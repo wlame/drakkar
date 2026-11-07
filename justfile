@@ -313,7 +313,7 @@ integration-scenarios provider='filesystem':
     esac
     export HARNESS_PROVIDER="$provider"
     integration/wait-ready.sh
-    for scenario in backpressure service-outage worker-cut-off unclean-exit twin-name secrets cluster-tasks recorder-memory recorder-postgres dlq-record databases-view headless; do
+    for scenario in service-outage backpressure worker-cut-off unclean-exit twin-name secrets cluster-tasks recorder-memory recorder-postgres dlq-record databases-view headless; do
         integration/scenario-${scenario}.sh
     done
 
@@ -328,7 +328,7 @@ integration-matrix profile='quick':
         *) echo "unknown profile '$profile': expected full or quick" >&2; exit 2 ;;
     esac
     providers=(filesystem postgres redis consul)
-    steps=(backpressure service-outage worker-cut-off unclean-exit twin-name secrets cluster-tasks recorder-memory recorder-postgres dlq-record databases-view headless drain-delivery)
+    steps=(service-outage backpressure worker-cut-off unclean-exit twin-name secrets cluster-tasks recorder-memory recorder-postgres dlq-record databases-view headless drain-delivery)
     scratch=$(mktemp -d)
     trap 'rm -rf "$scratch"' EXIT
     any_failed=false
@@ -367,7 +367,7 @@ integration-matrix profile='quick':
             continue
         fi
         if integration/wait-ready.sh; then
-            for step in backpressure service-outage worker-cut-off unclean-exit twin-name secrets cluster-tasks recorder-memory recorder-postgres dlq-record databases-view headless; do
+            for step in service-outage backpressure worker-cut-off unclean-exit twin-name secrets cluster-tasks recorder-memory recorder-postgres dlq-record databases-view headless; do
                 run_step "$provider" "$step" "integration/scenario-${step}.sh"
             done
             run_step "$provider" drain-delivery integration/verify-after-drain.sh

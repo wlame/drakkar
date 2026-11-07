@@ -6,26 +6,29 @@
 # executor.max_pending_tasks 4 and executor.max_pending_bytes 16MiB. The fast
 # handler makes one task per file path, and a producer message has one or
 # two paths, so one message's fan-out is at most two tasks. The caps are soft
-# by about one message: the pending tasks may reach the cap plus two. The burst and flood phases of the producer send messages
-# faster than fast-worker-1's two executors run them, so the cap fills.
+# by about one message: the pending tasks may reach the cap plus two. The
+# burst and flood phases of the producer send messages faster than
+# fast-worker-1's two executors run them, so the cap fills, and the fast
+# cluster works its backlog off for minutes after PRODUCER_DONE.
 #
-# Runs first in the scenario list, while the producer still sends. It
+# The check does not depend on where it runs in the scenario list: the load
+# is over by the time most scenarios run (the outage scenario, which needs
+# the load, comes first). Prometheus keeps the gauge of the whole run. It
 # checks, in order:
-#   1. fast-worker-1 answers /readyz with 200 (a worker that failed its
-#      config load is found here, not at the end of the run),
-#   2. from now until the producer printed PRODUCER_DONE and the consumer
-#      group of the fast cluster (drakkar-fast) has a lag of 0 on the source
-#      topic, the samples of drakkar_pending_tasks on fast-worker-1 stay at
-#      most the task cap plus one message's fan-out, and those of
-#      drakkar_pending_bytes at most the byte cap plus one message's bytes
-#      (a task's stdin here is under 1 KiB; the margin allows 64 KiB),
-#   3. the highest drakkar_pending_tasks Prometheus scraped from fast-worker-1
-#      over the last 3 hours obeys the same bound (this also covers the time
-#      before the scenario started; skipped with a warning when Prometheus
-#      does not answer),
+#   1. fast-worker-1 answers /readyz with 200,
+#   2. until the producer printed PRODUCER_DONE and the consumer group of the
+#      fast cluster (drakkar-fast) has a lag of 0 on the source topic (at
+#      once when both already hold), the samples of drakkar_pending_tasks on
+#      fast-worker-1, taken every 0.5 s, stay at most the task cap plus one
+#      message's fan-out, and those of drakkar_pending_bytes at most the byte
+#      cap plus one message's bytes (a task's stdin here is under 1 KiB; the
+#      margin allows 64 KiB),
+#   3. the highest drakkar_pending_tasks that Prometheus scraped from
+#      fast-worker-1 (every 10 s) over the last 6 hours is at least the cap
+#      and at most the cap plus one message's fan-out: the gauge stayed near
+#      the cap, and never above the bound, during the load,
 #   4. drakkar_window_admission_wait_seconds_total{limit="tasks"} on
-#      fast-worker-1 is above 0: admission waited at the task cap, so the
-#      bound of check 2 was tested under a full cap,
+#      fast-worker-1 is above 0: admission waited at the task cap,
 #   5. delivery of the fast cluster: every produced request id is a key on
 #      the symbol-counts topic (the per-message sink of the fast handler).
 #      The main cluster's delivery is checked by verify-after-drain.sh.
@@ -61,7 +64,8 @@ SOURCE_TOPIC=search-requests
 SINK_TOPIC=symbol-counts
 READY_LIMIT_SECONDS=120
 # The paced producer phases take about 7 minutes for 5000 messages; the
-# limit leaves room for a slow start of the producer.
+# limit leaves room for a slow start of the producer (the scenario run
+# alone on a fresh harness).
 PRODUCER_DONE_LIMIT_SECONDS=2700
 # Under the small caps fast-worker-1 runs about 6 tasks per second, so the
 # fast cluster needs about 5 minutes after PRODUCER_DONE with the quick
@@ -129,13 +133,13 @@ print(int(values.get("drakkar_pending_tasks", -1)), int(values.get("drakkar_pend
 }
 
 # The highest drakkar_pending_tasks Prometheus scraped from the capped worker
-# in the last 3 hours; nothing when Prometheus does not answer or has no
+# in the last 6 hours; nothing when Prometheus does not answer or has no
 # sample.
 prometheus_max_pending_tasks() {
     local answer
     # curl's long options take no `=`, so they keep the space form here.
     answer=$(curl -sf --connect-timeout 2 --max-time 5 -G "${PROMETHEUS_URL}/api/v1/query" \
-        --data-urlencode "query=max_over_time(drakkar_pending_tasks{instance=\"${CAPPED_PROMETHEUS_INSTANCE}\"}[3h])") || return 0
+        --data-urlencode "query=max_over_time(drakkar_pending_tasks{instance=\"${CAPPED_PROMETHEUS_INSTANCE}\"}[6h])") || return 0
     python3 -c '
 import json, sys
 result = json.load(sys.stdin).get("data", {}).get("result", [])
@@ -204,15 +208,13 @@ sampled_for=$((SECONDS - started))
 ok "${samples} samples in ${sampled_for}s (${unreachable} unreadable): peak ${max_tasks} tasks (allowed ${task_bound}), ${max_bytes} bytes (allowed ${byte_bound}); ${FAST_CONSUMER_GROUP} drained $((SECONDS - done_at))s after PRODUCER_DONE"
 
 prometheus_peak=$(prometheus_max_pending_tasks)
-if [ -n "$prometheus_peak" ]; then
-    [ "$prometheus_peak" -le "$task_bound" ] \
-        || fail "Prometheus scraped ${prometheus_peak} pending tasks from ${CAPPED_SERVICE}, above the cap ${task_cap} plus one message's fan-out"
-    ok "Prometheus peak over the run: ${prometheus_peak} pending tasks"
-    prometheus_text="Prometheus peak ${prometheus_peak}"
-else
-    warn "Prometheus gave no max_over_time sample of drakkar_pending_tasks for ${CAPPED_PROMETHEUS_INSTANCE}; the bound rests on the scenario's own samples"
-    prometheus_text="no Prometheus sample"
-fi
+[ -n "$prometheus_peak" ] \
+    || fail "Prometheus (${PROMETHEUS_URL}) gave no max_over_time sample of drakkar_pending_tasks for ${CAPPED_PROMETHEUS_INSTANCE}"
+[ "$prometheus_peak" -le "$task_bound" ] \
+    || fail "Prometheus scraped ${prometheus_peak} pending tasks from ${CAPPED_SERVICE}, above the cap ${task_cap} plus one message's fan-out (${FAN_OUT_TASKS})"
+[ "$prometheus_peak" -ge "$task_cap" ] \
+    || fail "the highest pending tasks Prometheus scraped from ${CAPPED_SERVICE} is ${prometheus_peak}, below the cap ${task_cap}: the load never filled the cap"
+ok "Prometheus peak over the run: ${prometheus_peak} pending tasks (cap ${task_cap}, allowed ${task_bound})"
 
 admission_wait=$(metric "$CAPPED_METRICS_PORT" drakkar_window_admission_wait_seconds_total 'limit="tasks"')
 case "$admission_wait" in
@@ -238,4 +240,4 @@ read -r distinct_keys missing_count missing_sample <<<"$delivery"
     || fail "${missing_count} of ${TOTAL_MESSAGES} request ids have no record on ${SINK_TOPIC} (${distinct_keys} distinct keys); first missing: ${missing_sample}"
 ok "every one of ${TOTAL_MESSAGES} request ids is on ${SINK_TOPIC} (${distinct_keys} distinct keys)"
 
-pass "peak ${max_tasks} pending tasks (cap ${task_cap}, allowed ${task_bound}), peak ${max_bytes} pending bytes (cap ${byte_cap}), ${prometheus_text}, admission wait ${admission_wait}s at the task cap, ${TOTAL_MESSAGES} request ids delivered to ${SINK_TOPIC}"
+pass "peak ${max_tasks} pending tasks (cap ${task_cap}, allowed ${task_bound}), peak ${max_bytes} pending bytes (cap ${byte_cap}), Prometheus peak ${prometheus_peak}, admission wait ${admission_wait}s at the task cap, ${TOTAL_MESSAGES} request ids delivered to ${SINK_TOPIC}"
