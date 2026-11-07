@@ -329,9 +329,11 @@ class PartitionProcessor:
         # Until the first window is measured, the worker-wide averages of the
         # budget size the window.
         self._shape = MessageShape()
-        # Windows that created tasks, measured by this partition. Below
-        # WARM_UP_WINDOWS each window takes one message.
-        self._measured_windows = 0
+        # Windows this partition processed, with tasks or without. Below
+        # WARM_UP_WINDOWS each window takes one message. A window with no
+        # tasks counts here but not in the averages, so a partition whose
+        # arrange skips its messages still leaves the warm-up.
+        self._windows_seen = 0
         # Whether the window being arranged holds the budget's one slot for a
         # window with no estimate.
         self._holds_unmeasured_window = False
@@ -868,8 +870,8 @@ class PartitionProcessor:
         return True
 
     def _in_warm_up(self) -> bool:
-        """Whether this partition has fewer than ``WARM_UP_WINDOWS`` measured windows of its own."""
-        return self._measured_windows < WARM_UP_WINDOWS
+        """Whether this partition has processed fewer than ``WARM_UP_WINDOWS`` windows of its own."""
+        return self._windows_seen < WARM_UP_WINDOWS
 
     def _per_message_estimate(self, shape: MessageShape) -> tuple[float, float]:
         """Tasks and bytes to reserve per message: the averages, never below the floor.
@@ -890,8 +892,9 @@ class PartitionProcessor:
     def _admitted_window_size(self) -> int:
         """How many messages the next window may take.
 
-        During the warm-up (fewer than ``WARM_UP_WINDOWS`` measured windows of
-        its own) a partition takes one message per window. After it,
+        During the warm-up (fewer than ``WARM_UP_WINDOWS`` windows of its own,
+        counted whether they created tasks or not) a partition takes one
+        message per window. After it,
         ``min(free tasks / tasks per message, free bytes / bytes per
         message)``, clamped to 1 .. window_size, with the per-message
         estimate of ``_per_message_estimate`` and the free room already
@@ -917,9 +920,12 @@ class PartitionProcessor:
     def _reserve_window(self, message_count: int) -> None:
         """Reserve the estimated tasks and bytes of a window just taken, or the one unmeasured slot.
 
-        A warm-up window reserves at least all the free room: its estimate is
-        not this partition's own, so no other window is admitted until its
-        fan-out has landed, and the cap is passed by at most this one message.
+        A warm-up window reserves at least all the free room: its estimate
+        rests on too few windows of this partition, so no other window is
+        admitted until its fan-out has landed, and the cap is passed by at most
+        this one message. The warm-up lasts ``WARM_UP_WINDOWS`` windows, so a
+        partition whose windows create no tasks reserves the whole room only
+        for those first windows.
         """
         if self._account is None:
             return
@@ -979,7 +985,6 @@ class PartitionProcessor:
 
     def _note_window_shape(self, message_count: int, task_count: int, stdin_bytes: int) -> None:
         """Fold one window's fan-out into this partition's averages and the worker's."""
-        self._measured_windows += 1
         self._shape.note_window(message_count, task_count, stdin_bytes)
         if self._account is not None:
             self._account.budget.shape.note_window(message_count, task_count, stdin_bytes)
@@ -1013,6 +1018,9 @@ class PartitionProcessor:
 
     async def _process_window(self, messages: list[SourceMessage]) -> None:
         self._window_counter += 1
+        # Counted before any early return: a window whose messages all fail to
+        # parse, or whose arrange creates no tasks, still ends a warm-up step.
+        self._windows_seen += 1
 
         # Register offsets and deserialize BEFORE building the window so
         # the parse-error policy can drop unparseable messages from the

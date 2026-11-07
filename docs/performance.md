@@ -502,10 +502,11 @@ Three rules keep the estimate from being low for several windows at once:
 - **No estimate:** before the worker has measured a window that created
   tasks, only one window with no estimate is arranged at a time, and it takes
   one message.
-- **Warm-up:** a partition takes one message per window until it has measured
-  3 windows of its own that created tasks. A warm-up window reserves at least
-  all the free room, so no other window is admitted until its fan-out has
-  landed.
+- **Warm-up:** a partition takes one message per window for its first 3
+  windows, whether they created tasks or not. A warm-up window reserves at
+  least all the free room, so no other window is admitted until its fan-out
+  has landed. A window that created no tasks counts toward the warm-up but
+  does not change the averages.
 - **Floor:** after the warm-up a message never reserves less than
   `max_pending_tasks / window_size` tasks and `max_pending_bytes /
   window_size` bytes, so a full window always reserves the whole cap.

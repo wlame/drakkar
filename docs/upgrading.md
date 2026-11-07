@@ -1048,8 +1048,8 @@ Now there are two stages (see [Backpressure](performance.md#backpressure)):
    `2000`) and the pending bytes — task stdin plus the stdout and stderr kept
    for `on_message_complete` and `on_window_complete` — are below
    `executor.max_pending_bytes` (default `1GiB`). The window size adapts to the
-   free room after a warm-up of one-message windows (3 measured windows per
-   partition). The limits are soft: a window reserves its estimate when it is
+   free room after a warm-up of one-message windows (the first 3 windows of
+   each partition). The limits are soft: a window reserves its estimate when it is
    taken, so with a steady message shape they are passed by about one message;
    after the warm-up a sudden jump in tasks per message can pass them by that
    jump.

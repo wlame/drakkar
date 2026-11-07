@@ -417,8 +417,8 @@ message give how many messages fit in the free room (at least one, at most
 once, so other loops see that room as taken while `arrange()` runs; the
 fan-out charges the real tasks out of the reservation.
 
-A partition takes one message per window until it has measured 3 windows of
-its own that created tasks, and such a warm-up window reserves all the free
+A partition takes one message per window for its first 3 windows, whether
+they created tasks or not, and such a warm-up window reserves all the free
 room. After the warm-up, a message never reserves less than
 `max_pending_tasks / window_size` tasks (and the same share of the bytes), so
 a full window reserves the whole cap. A window whose `arrange()` created no

@@ -69,11 +69,13 @@ async def collect_next_window(proc: PartitionProcessor) -> list[SourceMessage]:
             return messages
 
 
-def idle_processor(budget: PendingBudget | None, window_size: int = 10) -> PartitionProcessor:
+def idle_processor(
+    budget: PendingBudget | None, window_size: int = 10, handler: BaseDrakkarHandler | None = None
+) -> PartitionProcessor:
     """A processor whose loop is not started; tests call ``_collect_window`` themselves."""
     proc = PartitionProcessor(
         partition_id=0,
-        handler=SimpleHandler(),
+        handler=handler or SimpleHandler(),
         executor_pool=MagicMock(),
         window_size=window_size,
         budget=budget,
@@ -401,6 +403,36 @@ async def test_warm_up_window_takes_one_message_and_reserves_all_the_free_room()
     assert not budget.unmeasured_window_open
 
 
+class SkipEveryMessageHandler(BaseDrakkarHandler):
+    """``arrange`` creates no task for any message."""
+
+    async def arrange(self, messages, pending):
+        return []
+
+
+async def test_partition_whose_windows_create_no_tasks_leaves_the_warm_up():
+    """Windows with no tasks count toward the warm-up but not the averages, so they stop reserving the whole budget."""
+    budget = PendingBudget(max_tasks=100, max_bytes=1 << 30)
+    budget.shape.note_window(message_count=1, task_count=1, stdin_bytes=0)
+    proc = idle_processor(budget, window_size=10, handler=SkipEveryMessageHandler())
+    for offset in range(partition_module.WARM_UP_WINDOWS + 2):
+        proc.enqueue(make_msg(offset))
+
+    for _ in range(partition_module.WARM_UP_WINDOWS):
+        messages = await proc._collect_window()
+        assert len(messages) == 1
+        assert budget.reserved_tasks == 100
+        await proc._process_window(messages)
+        proc._end_window_reservation()
+
+    assert not proc._shape.measured
+    assert not proc._in_warm_up()
+    messages = await proc._collect_window()
+    # The floor is 100 / 10 = 10 tasks per message: two messages reserve 20, not the whole budget.
+    assert len(messages) == 2
+    assert budget.reserved_tasks == 20
+
+
 async def test_collect_window_first_window_of_a_partition_takes_one_message():
     proc = idle_processor(big_budget())
     for offset in range(5):
@@ -418,7 +450,7 @@ def test_admitted_window_size_follows_the_moving_averages():
     proc = idle_processor(budget, window_size=50)
 
     proc._note_window_shape(message_count=1, task_count=10, stdin_bytes=0)
-    proc._measured_windows = partition_module.WARM_UP_WINDOWS
+    proc._windows_seen = partition_module.WARM_UP_WINDOWS
     assert proc._admitted_window_size() == 10
 
     proc._note_window_shape(message_count=1, task_count=20, stdin_bytes=0)
@@ -430,7 +462,7 @@ def test_admitted_window_size_is_bound_by_free_bytes():
     budget = PendingBudget(max_tasks=10_000, max_bytes=10_000)
     proc = idle_processor(budget, window_size=5)
     proc._note_window_shape(message_count=1, task_count=1, stdin_bytes=4000)
-    proc._measured_windows = partition_module.WARM_UP_WINDOWS
+    proc._windows_seen = partition_module.WARM_UP_WINDOWS
 
     assert proc._admitted_window_size() == 2
     budget.charge(0, 4000)
@@ -441,7 +473,7 @@ def test_admitted_window_size_reserves_at_least_the_floor_for_a_low_average():
     budget = PendingBudget(max_tasks=100, max_bytes=1 << 30)
     proc = idle_processor(budget, window_size=10)
     proc._note_window_shape(message_count=1, task_count=1, stdin_bytes=0)
-    proc._measured_windows = partition_module.WARM_UP_WINDOWS
+    proc._windows_seen = partition_module.WARM_UP_WINDOWS
 
     # The floor is 100 / 10 = 10 tasks per message, so a full window reserves the cap.
     assert proc._admitted_window_size() == 10
@@ -987,7 +1019,7 @@ def test_released_kept_output_feeds_the_byte_estimate_per_message():
     budget = PendingBudget(max_tasks=100, max_bytes=10_000)
     proc = idle_processor(budget, window_size=50)
     proc._note_window_shape(message_count=1, task_count=1, stdin_bytes=100)
-    proc._measured_windows = partition_module.WARM_UP_WINDOWS
+    proc._windows_seen = partition_module.WARM_UP_WINDOWS
     window = partition_module.Window(window_id=1, source_messages=[make_msg(0), make_msg(1)])
     tracker = partition_module.MessageTracker(source_message=make_msg(0))
     proc._account.charge(0, 1300)
