@@ -15,8 +15,8 @@ whichever comes first, so one batch is bounded in memory; the file and RAM
 size limits are checked after each batch.
 
 The memory store is read first. A later source leaves out the rows the
-store gave (the same process and id; for an own sealed file without a meta
-file, the same id and time), so each row is written once even when the
+store gave (the same process and id; for an own sealed file, the same id
+and time), so each row is written once even when the
 store evicts rows while the build runs.
 
 A limit never fails a build. The rows cap, the file size cap, the time limit
@@ -109,9 +109,8 @@ POSTGRES_SOURCE_FILE = 'postgres'
 _NO_ID = NO_ID
 # Ids asked at once from the temp table of memory keys (under SQLite's variable limit).
 _KEY_LOOKUP_CHUNK = 500
-# How a source leaves out the rows the memory store gave: by id (a source of
-# this process), by id and time (an own file of an unknown process), or not.
-DEDUPE_BY_ID = 'id'
+# How a source leaves out the rows the memory store gave: by id and time (an
+# own sealed file), or not at all (``None``).
 DEDUPE_BY_ID_AND_TS = 'id_ts'
 
 MemoryOpener = Callable[[], AbstractContextManager[sqlite3.Connection | None]]
@@ -565,8 +564,6 @@ class _Build:
         if dedupe is None or not self.writer.has_memory_keys or not rows:
             return rows
         known = self.writer.memory_keys_among([row[0] for row in rows])
-        if dedupe == DEDUPE_BY_ID:
-            return [row for row in rows if row[0] not in known]
         return [row for row in rows if known.get(row[0]) != row[1]]
 
     def _copy_batches(
@@ -778,13 +775,16 @@ class _Build:
             conn.close()
         return low, high, None
 
-    def _sealed_dedupe(self, meta: dict[str, Any] | None) -> str | None:
-        """How an own sealed file leaves out the memory rows: by id for this process, by id and time without a meta file."""
-        if self.cluster_scope:
-            return None
-        if meta is None:
-            return DEDUPE_BY_ID_AND_TS
-        return DEDUPE_BY_ID if meta.get('instance') == self.worker.instance else None
+    def _sealed_dedupe(self) -> str | None:
+        """How an own sealed file leaves out the memory rows: by id and time.
+
+        The meta ``instance`` names the process that sealed the file, not the
+        one that wrote its rows: a start seals the files an earlier process of
+        the same name left, and both processes number their rows from 1. A row
+        of this process has the same id and time as its memory row; a row of
+        another process almost never has both.
+        """
+        return None if self.cluster_scope else DEDUPE_BY_ID_AND_TS
 
     def sealed_sources(self, unsealed_names: set[str]) -> list[_FileSource]:
         """The sealed files to read, oldest first: newest first up to the file budget, each overlapping the range.
@@ -819,7 +819,7 @@ class _Build:
             worker = meta.get('worker') if meta else None
             chosen.append(
                 _FileSource(
-                    path, SOURCE_KIND_SEALED, worker if isinstance(worker, str) else None, self._sealed_dedupe(meta)
+                    path, SOURCE_KIND_SEALED, worker if isinstance(worker, str) else None, self._sealed_dedupe()
                 )
             )
         chosen.reverse()

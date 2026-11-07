@@ -1248,6 +1248,22 @@ async def test_rows_evicted_from_the_store_during_its_own_read_come_from_the_tab
     assert sorted(offsets) == [1, 2, 3, 4, 5, 6, 7]
 
 
+async def test_a_leftover_file_sealed_by_this_process_keeps_rows_that_collide_by_id_only(tmp_path):
+    """A start seals the file an earlier process left: the meta names this instance, the rows are the earlier process's."""
+    _own, history = _folders(tmp_path)
+    leftover = _own_file(history, '2025-11-01__11_00_00')
+    # The earlier process numbered its rows from 1 too, at other times.
+    write_recorder_file(leftover, [event(i, T0 + i + 0.5, offset=100 + i) for i in range(1, 4)])
+    write_meta_file(leftover, worker=WORKER, instance=INSTANCE, first=T0 + 1.5, last=T0 + 3.5)
+    store = await _memory_store([event(i, T0 + i, offset=i) for i in range(1, 4)])
+    try:
+        built = await _build(_request({'sources': 'memory,history'}), _worker(tmp_path, open_memory=store.open_by_name))
+    finally:
+        await store.close()
+
+    assert [row[1] for row in _offsets(_save(built, tmp_path))] == [1, 2, 3, 101, 102, 103]
+
+
 async def test_an_own_sealed_file_without_meta_leaves_out_the_store_rows_by_id_and_time(tmp_path):
     _own, history = _folders(tmp_path)
     # Rows 4 and 5 are the store's rows (same id and time); another process's row 6 has another time.
