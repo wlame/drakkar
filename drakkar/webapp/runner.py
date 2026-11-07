@@ -563,22 +563,31 @@ class WebappRunner:
                 'executor pool is not initialised; webapp.run cannot submit tasks before AppLifecycle starts the pool'
             )
         pool = self._app._executor_pool
-        coros = [self._execute_and_record(pool, task, account) for task in tasks]
+        # Per task object (``id``, not task_id): [runs not ended, stdin bytes
+        # charged]. ``arrange_http_request`` may list one object twice, and its
+        # stdin must outlive the first run.
+        holds: dict[int, list[int]] = {}
+        for task in tasks:
+            holds.setdefault(id(task), [0, 0])[0] += 1
+        coros = [self._execute_and_record(pool, task, holds, account) for task in tasks]
         return await asyncio.gather(*coros, return_exceptions=True)
 
     async def _execute_and_record(
         self,
         pool: ExecutorPool,
         task: ExecutorTask,
+        holds: dict[int, list[int]],
         account: BudgetAccount | None = None,
     ) -> ExecutorResult | ExecutorError:
         """Run one task, record its terminal event as soon as it ends, and release its stdin.
 
-        There is no retry over HTTP, so the first outcome is the last one:
-        ``task.stdin`` is set to None and its charge released, and
-        ``on_http_request_complete`` sees the task without its stdin. The
-        output of the outcome stays charged to ``account`` until the request
-        ends.
+        There is no retry over HTTP, but the request may list one task object
+        more than once (``holds`` counts its runs that have not ended and the
+        stdin they charged). At the last run of the object ``task.stdin`` is
+        set to None and the stdin charged by all its runs is released, so no
+        run starts without its input; ``on_http_request_complete`` sees the
+        task without its stdin. The output of the outcome stays charged to
+        ``account`` until the request ends.
 
         The pool records only ``task_started``; the terminal
         ``task_completed`` / ``task_failed`` row is the caller's job (the
@@ -598,6 +607,8 @@ class WebappRunner:
         # so recorder rows for HTTP-origin tasks all key on -1. The
         # recorder treats partition_id as opaque.
         held = text_bytes(task.stdin)
+        hold = holds[id(task)]
+        hold[1] += held
         if account is not None:
             account.charge(1, held)
         try:
@@ -609,9 +620,14 @@ class WebappRunner:
                 run_seconds_hook=self._task_run_seconds,
             )
         finally:
-            task.stdin = None
-            if account is not None:
-                account.release(1, held)
+            hold[0] -= 1
+            if hold[0] > 0:
+                if account is not None:
+                    account.release(1, 0)
+            else:
+                task.stdin = None
+                if account is not None:
+                    account.release(1, hold[1])
         if account is not None:
             account.charge(0, output_bytes(outcome))
         return outcome

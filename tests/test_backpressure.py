@@ -1210,6 +1210,33 @@ async def test_http_request_counts_its_tasks_and_releases_stdin_and_budget(pool)
     assert (budget.tasks, budget.bytes) == (0, 0)
 
 
+async def test_http_request_runs_one_task_object_listed_twice_with_its_stdin_both_times():
+    """With one executor slot the second run starts after the first ended; it must still get the stdin."""
+    budget = big_budget()
+    handler = _RecordingHandler()
+    shared = ExecutorTask(task_id='twice', source_offsets=[0], stdin='payload\n')
+    seen_stdout: list[str] = []
+
+    async def arrange_impl(req, pending):
+        return [shared, shared]
+
+    async def complete_impl(group):
+        seen_stdout.extend(result.stdout for result in group.results)
+        return None
+
+    handler.arrange_http_request_impl = arrange_impl
+    handler.on_http_request_complete_impl = complete_impl
+    app = _make_stub_app(handler, pool=ExecutorPool(binary_path='/bin/cat', max_executors=1, task_timeout_seconds=10))
+    app._pending_budget = budget
+    runner = WebappRunner(app, _make_config())
+
+    await runner.run(_make_ctx())
+
+    assert seen_stdout == ['payload\n', 'payload\n']
+    assert shared.stdin is None
+    assert (budget.tasks, budget.bytes) == (0, 0)
+
+
 # ------------------------------------------------------------------ metrics
 
 
