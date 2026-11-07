@@ -750,12 +750,17 @@ class ExecutorPool:
             run_started_at = time.time()
             proc, protocol = await self._spawn(binary, task.args, stdin_pipe, subprocess_env, platform_kwargs)
             # Watch the exit on the very next line, with no ``await`` in
-            # between, so no reap can happen between here and the watch
-            # (returning from ``_spawn`` gives the loop no turn).
-            # asyncio may still have reaped the child during the spawn's own
-            # internal await, with ``returncode`` set one loop hop later; the
-            # watcher's ``waitid(..., WNOWAIT)`` probe catches that case, so
-            # a reused pid is never watched.
+            # between. Where asyncio reaps on the loop (a pidfd callback, on
+            # Linux), returning from ``_spawn`` gives the loop no turn, so no
+            # reap can happen between here and the watch. Where asyncio reaps
+            # on a thread per child (macOS), that thread reaps a child the
+            # moment it exits, loop turn or not, so a child that exits before
+            # this line is watched as ``exited_before_watch``: the run then
+            # ends at the watch time, with no exit notice. In both cases the
+            # child may also be reaped during the spawn's own internal await,
+            # with ``returncode`` set one loop hop later; the watcher's
+            # ``waitid(..., WNOWAIT)`` probe catches a reaped or reused pid,
+            # so a reused pid is never watched.
             exit_watch = self._exit_watcher.watch(proc)
             spawn_seconds = time.monotonic() - run_started_mono
             stdin_bytes = task.stdin.encode() if task.stdin is not None else None

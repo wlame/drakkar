@@ -171,8 +171,10 @@ These cases fall back to timing on the loop, counted on
 
 - `exited_before_watch` — the child exited and was reaped before the watch
   started. `create_subprocess_exec` awaits its pipe set-up after the fork,
-  and on a busy loop a short task can finish in that gap. The run then ends
-  at the watch time.
+  and on a busy loop a short task can finish in that gap. On macOS asyncio
+  reaps each child on a thread of its own the moment it exits, so a short
+  task is also counted here when the loop is slow to reach the watch after
+  the spawn returns. The run then ends at the watch time.
 - `unavailable` — the host cannot watch: no backend for the platform, or the
   kernel refused (for example a seccomp profile without `pidfd_open`; then
   the watcher turns off for the process). A resource error of one watch

@@ -333,11 +333,16 @@ class ExitWatcher:
 
     The thread starts on the first watch (or on :meth:`start`). ``watch``
     runs on the event loop and must be called right after
-    ``create_subprocess_exec`` returns, with no ``await`` in between, so no
-    reap can happen between the spawn's return and the start of the watch.
-    A reap during the spawn's own internal await is still possible, and
-    ``returncode`` is set one loop hop after it, so the pid may already be
-    free; each backend's ``waitid(..., WNOWAIT)`` probe catches that case.
+    ``create_subprocess_exec`` returns, with no ``await`` in between. Where
+    asyncio reaps on the loop (a pidfd callback, on Linux), no reap can then
+    happen between the spawn's return and the start of the watch. Where it
+    reaps on a thread per child (macOS), that thread reaps a child the
+    moment it exits, so a child that exits before ``watch`` falls back to
+    ``exited_before_watch`` (the run ends at the watch time, with no exit
+    notice). A reap during the spawn's own internal await is possible on
+    both, and ``returncode`` is set one loop hop after it, so the pid may
+    already be free; each backend's ``waitid(..., WNOWAIT)`` probe catches
+    that case.
     """
 
     def __init__(
