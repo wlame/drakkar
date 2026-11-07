@@ -573,6 +573,11 @@ services:
       # drain gets enough that the sealed file is always moved into the
       # shared folder.
       DK_EXECUTOR__DRAIN_TIMEOUT: "30s"
+      # The group starts at the earliest offset, so the worker finds the
+      # whole backlog of the producer. A small task cap keeps the tasks it
+      # has admitted few, so the stop drains them well within the drain
+      # timeout; the messages not yet admitted are dropped at the stop.
+      DK_EXECUTOR__MAX_PENDING_TASKS: "8"
       DK_RECORDER__ENABLED: "true"
       DK_RECORDER__ARCHIVE__ENABLED: "false"
       DK_AUTODISCOVER__ENABLED: "false"
@@ -603,6 +608,8 @@ services:
       DK_API__ENABLED: "false"
       DK_UI__ENABLED: "false"
       DK_EXECUTOR__DRAIN_TIMEOUT: "30s"
+      # The same small task cap as headless-recorder (see there).
+      DK_EXECUTOR__MAX_PENDING_TASKS: "8"
       DK_RECORDER__ENABLED: "false"
       DK_AUTODISCOVER__ENABLED: "false"
     ports:
