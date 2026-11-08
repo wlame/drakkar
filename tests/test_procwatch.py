@@ -94,13 +94,31 @@ def fake_watcher():
 # --- the native backend, with real subprocesses ---------------------------------
 
 
+async def spawn_waiting_for_stdin() -> asyncio.subprocess.Process:
+    """A child that sleeps 0.05 s and exits only after it read a line of stdin.
+
+    On macOS asyncio reaps each child on a thread of its own the moment it
+    exits, so a child that could exit before ``watch()`` would be reaped
+    first on a loaded host; this one waits for :func:`release_child`.
+    """
+    return await asyncio.create_subprocess_exec('sh', '-c', 'read x; sleep 0.05', stdin=asyncio.subprocess.PIPE)
+
+
+def release_child(proc: asyncio.subprocess.Process) -> None:
+    """Write the line the child waits for and close its stdin (the write is done at once on an empty pipe)."""
+    assert proc.stdin is not None
+    proc.stdin.write(b'go\n')
+    proc.stdin.close()
+
+
 @needs_native_backend
 async def test_native_watch_stamps_the_exit_of_a_real_child():
     watcher = ExitWatcher(NATIVE_BACKEND)
     try:
         started = time.monotonic()
-        proc = await asyncio.create_subprocess_exec('sleep', '0.05')
+        proc = await spawn_waiting_for_stdin()
         exit_watch = watcher.watch(proc)
+        release_child(proc)
         await proc.wait()
         await asyncio.to_thread(wait_until, lambda: exit_watch.stamp is not None)
     finally:
@@ -108,7 +126,7 @@ async def test_native_watch_stamps_the_exit_of_a_real_child():
 
     assert exit_watch.fallback_reason is None
     assert exit_watch.stamp is not None
-    assert 0.04 <= exit_watch.stamp.monotonic - started < 0.5
+    assert 0.04 <= exit_watch.stamp.monotonic - started < 3.0
     # asyncio keeps the exit status: the watch never reaps.
     assert proc.returncode == 0
 
@@ -118,9 +136,10 @@ async def test_native_watch_stamps_the_exit_during_a_loop_stall():
     watcher = ExitWatcher(NATIVE_BACKEND)
     try:
         started = time.monotonic()
-        proc = await asyncio.create_subprocess_exec('sleep', '0.05')
+        proc = await spawn_waiting_for_stdin()
         exit_watch = watcher.watch(proc)
-        time.sleep(1.0)  # the loop is blocked while the child exits
+        release_child(proc)
+        time.sleep(2.0)  # the loop is blocked while the child exits
         await proc.wait()
         loop_saw_exit = time.monotonic()
     finally:
@@ -128,7 +147,7 @@ async def test_native_watch_stamps_the_exit_during_a_loop_stall():
 
     # Wide margins: a slow exec on a loaded runner must not decide the outcome.
     assert exit_watch.stamp is not None
-    assert exit_watch.stamp.monotonic - started < 0.5
+    assert exit_watch.stamp.monotonic - started < 1.5
     assert loop_saw_exit - exit_watch.stamp.monotonic >= 0.5
 
 

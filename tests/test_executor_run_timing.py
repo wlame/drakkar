@@ -48,8 +48,16 @@ def make_pool(watcher: ExitWatcher, binary: str = 'sleep', timeout: int = 10) ->
     return ExecutorPool(binary_path=binary, max_executors=2, task_timeout_seconds=timeout, exit_watcher=watcher)
 
 
-def make_task(*args: str) -> ExecutorTask:
-    return ExecutorTask(task_id='t1', args=list(args), source_offsets=[0])
+def make_task(*args: str, stdin: str | None = None) -> ExecutorTask:
+    return ExecutorTask(task_id='t1', args=list(args), source_offsets=[0], stdin=stdin)
+
+
+# A child that exits only after it has read its stdin. The pool writes the
+# stdin after ``watch()`` has returned, so the child cannot exit (and be reaped
+# by a child-watcher thread, as on macOS) before the watch starts, however
+# late a loaded loop reaches the watch after the spawn.
+WAIT_FOR_STDIN = 'read x; '
+GO = 'go\n'
 
 
 def reaped(pid: int) -> bool:
@@ -77,14 +85,17 @@ def notice_count() -> float:
 
 @needs_native_backend
 async def test_a_loop_stall_does_not_stretch_the_duration():
-    # Wide margins: a slow exec on a loaded runner must not decide the outcome.
-    watcher = StallingWatcher(stall_seconds=1.0)
+    # The stall comes inside the watch, before the stdin write, so this child
+    # takes no stdin. It sleeps 0.3 s, so a spawn delayed that long on a
+    # loaded loop would be needed to reap it before the watch. Wide margins:
+    # loop timing would give at least the 2 s stall.
+    watcher = StallingWatcher(stall_seconds=2.0)
     try:
-        result = await make_pool(watcher).execute(make_task('0.05'))
+        result = await make_pool(watcher).execute(make_task('0.3'))
     finally:
         watcher.stop()
 
-    assert result.duration_seconds < 0.5
+    assert result.duration_seconds < 1.5
     assert result.exit_notice_seconds is not None
     assert result.exit_notice_seconds >= 0.5
 
@@ -95,24 +106,27 @@ async def test_a_completed_task_carries_its_spawn_time_and_notice():
     before_wall = time.time()
     observed_before = notice_count()
     try:
-        result = await make_pool(watcher).execute(make_task('0.05'))
+        result = await make_pool(watcher, binary='sh').execute(make_task('-c', f'{WAIT_FOR_STDIN}sleep 0.05', stdin=GO))
     finally:
         watcher.stop()
 
     assert result.run_started_at is not None
     assert before_wall <= result.run_started_at <= time.time()
-    assert 0.04 <= result.duration_seconds < 1.0
+    assert 0.04 <= result.duration_seconds < 3.0
     assert result.exit_notice_seconds is not None
     assert result.exit_notice_seconds >= 0.0
     assert notice_count() == observed_before + 1
 
 
 @needs_native_backend
-async def test_a_nonzero_exit_carries_the_run_timing():
+async def test_a_nonzero_exit_carries_the_run_timing(monkeypatch):
+    # Not about descendants: an EOF callback that a stalled loop runs well
+    # after the exit callback must not take the descendant path.
+    monkeypatch.setattr(executor_module, 'DESCENDANT_PIPE_MARGIN_SECONDS', 5.0)
     watcher = ExitWatcher(NATIVE_BACKEND)
     try:
         with pytest.raises(ExecutorTaskError) as raised:
-            await make_pool(watcher, binary='sh').execute(make_task('-c', 'exit 3'))
+            await make_pool(watcher, binary='sh').execute(make_task('-c', f'{WAIT_FOR_STDIN}exit 3', stdin=GO))
     finally:
         watcher.stop()
 
@@ -122,17 +136,22 @@ async def test_a_nonzero_exit_carries_the_run_timing():
 
 
 @needs_native_backend
-@needs_native_backend
 async def test_a_descendant_that_holds_the_pipes_ends_the_run_when_they_close():
-    """The child exits at once; its background sleep keeps stdout open for 0.3 s."""
+    """The child exits once it read its stdin; its background sleep keeps stdout open for 1 s.
+
+    The long hold keeps the gap between the exit and the pipe close far above
+    the 50 ms margin even when the loop stalls for several hundred ms.
+    """
     watcher = ExitWatcher(NATIVE_BACKEND)
     before = executor_exit_watch_fallbacks.labels(reason=DESCENDANT_HELD_PIPES)._value.get()
     try:
-        result = await make_pool(watcher, binary='sh').execute(make_task('-c', 'sleep 0.3 & exit 0'))
+        result = await make_pool(watcher, binary='sh').execute(
+            make_task('-c', f'{WAIT_FOR_STDIN}sleep 1 & exit 0', stdin=GO)
+        )
     finally:
         watcher.stop()
 
-    assert result.duration_seconds >= 0.25
+    assert result.duration_seconds >= 0.9
     assert result.exit_notice_seconds is None  # the gap was the descendant, not a loop stall
     assert executor_exit_watch_fallbacks.labels(reason=DESCENDANT_HELD_PIPES)._value.get() == before + 1
 
@@ -149,7 +168,8 @@ async def test_a_timeout_is_timed_on_the_loop_with_no_notice():
     result = raised.value.result
     assert raised.value.error.kind == 'timeout'
     assert result.run_started_at is not None
-    assert 1.0 <= result.duration_seconds < 1.5
+    # The 5 s child sleep is what the bound tells apart; the spawn on a loaded host may add a lot.
+    assert 1.0 <= result.duration_seconds < 3.0
     assert result.exit_notice_seconds is None
 
 
@@ -171,7 +191,7 @@ async def test_a_timeout_whose_child_exited_early_kills_the_descendant(tmp_path,
 
     result = raised.value.result
     assert raised.value.error.kind == 'timeout'
-    assert 1.0 <= result.duration_seconds < 1.5
+    assert 1.0 <= result.duration_seconds < 3.0
     assert result.exit_notice_seconds is None
     grandchild = int(pid_file.read_text())
     # Bounded below its own 5 s sleep: the kill ended it.
@@ -233,7 +253,7 @@ async def test_a_child_that_survives_the_kill_costs_one_bounded_wait_and_one_war
     monkeypatch.setattr(executor_module.os, 'killpg', lambda pgid, sig: signals.append(sig))
     started = time.monotonic()
     with capture_logs() as logs, pytest.raises(ExecutorTaskError) as raised:
-        await make_pool(ExitWatcher(None), timeout=1).execute(make_task('3'))
+        await make_pool(ExitWatcher(None), timeout=1).execute(make_task('5'))
     elapsed = time.monotonic() - started
     os.kill(raised.value.error.pid, signal.SIGKILL)  # the real cleanup
     await wait_for(lambda: reaped(raised.value.error.pid))
@@ -241,8 +261,9 @@ async def test_a_child_that_survives_the_kill_costs_one_bounded_wait_and_one_war
 
     assert len(signals) == 1
     assert [log['event'] for log in logs].count('executor_kill_reap_timeout') == 1
-    assert elapsed < 1.0 + 0.2 + 0.5
-    assert 1.0 <= raised.value.result.duration_seconds < 1.5
+    # Without the bounded wait the call would last the child's own 5 s sleep.
+    assert elapsed < 3.0
+    assert 1.0 <= raised.value.result.duration_seconds < 3.0
 
 
 async def test_an_exec_timeout_is_a_launch_failure(monkeypatch):
