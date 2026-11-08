@@ -195,6 +195,9 @@ class Window:
     # Bytes of the stdout and stderr in ``results``, charged to the pending
     # budget until on_window_complete has run.
     kept_bytes: int = 0
+    # Bytes of the stdout and stderr its tasks' outcomes held while their own
+    # hooks and delivery ran (results kept in ``results`` are in kept_bytes).
+    output_bytes: int = 0
 
     @property
     def is_complete(self) -> bool:
@@ -963,25 +966,29 @@ class PartitionProcessor:
             hold[0] += 1
             hold[1] += held_bytes
 
-    def _settle_task(self, task: ExecutorTask) -> None:
-        """One run of ``task`` settled; at its last pending run, free its stdin and give back the charge."""
+    def _settle_task(self, task: ExecutorTask, output_bytes: int = 0) -> None:
+        """One run of ``task`` settled; at its last pending run, free its stdin and give back the charge.
+
+        ``output_bytes`` is the output charge of this run's outcome, given back
+        in the same release so a settled task wakes a waiting loop once.
+        """
         hold = self._task_holds.get(id(task))
         if hold is None:
             # A run that was never held (a task scheduled outside the fan-out
             # paths, as some tests do): free the stdin, nothing to give back.
             task.stdin = None
             if self._account is not None:
-                self._account.release(1, 0)
+                self._account.release(1, output_bytes)
             return
         hold[0] -= 1
         if hold[0] > 0:
             if self._account is not None:
-                self._account.release(1, 0)
+                self._account.release(1, output_bytes)
             return
         del self._task_holds[id(task)]
         task.stdin = None
         if self._account is not None:
-            self._account.release(1, hold[1])
+            self._account.release(1, hold[1] + output_bytes)
 
     def _note_window_shape(self, message_count: int, task_count: int, stdin_bytes: int) -> None:
         """Fold one window's fan-out into this partition's averages and the worker's."""
@@ -996,6 +1003,26 @@ class PartitionProcessor:
         held = output_bytes(outcome)
         holder.kept_bytes += held
         self._account.charge(0, held)
+
+    def _charge_output(self, outcome: Any) -> int:
+        """Charge the stdout and stderr of a task's outcome while its hooks and delivery hold it; return the bytes."""
+        if self._account is None:
+            return 0
+        held = output_bytes(outcome)
+        self._account.charge(0, held)
+        return held
+
+    def _move_output_charge(self, holder: Window | MessageTracker, held: int) -> None:
+        """Hand a charged outcome to the holder that keeps it, so its hook releases the bytes, not the task."""
+        holder.kept_bytes += held
+
+    def _note_window_output(self, window: Window) -> None:
+        """Fold the output a window's tasks held in their hooks and delivery into the averages per message."""
+        if self._account is None:
+            return
+        message_count = max(1, len(window.source_messages))
+        self._shape.note_window_output(message_count, window.output_bytes)
+        self._account.budget.shape.note_window_output(message_count, window.output_bytes)
 
     def _release_kept_bytes(self, holder: Window | MessageTracker) -> None:
         """Give back the output bytes a window or tracker kept, once its hook has run.
@@ -1388,6 +1415,12 @@ class PartitionProcessor:
         The last outcome releases what the fan-out charged to the pending
         budget for this task's stdin, and sets ``task.stdin`` to None so the
         string is freed even while a message or window hook keeps the task.
+
+        The stdout and stderr of the outcome are charged as soon as it exists
+        and released when ``on_task_complete`` or ``on_error`` and the sink
+        delivery end, on every path (a retry, a replacement and a cancellation
+        included). A result kept for ``on_window_complete`` takes the charge
+        with it to the window.
         """
         # Bind partition context for this async task — inherited by all user hooks called within
         bind_contextvars(partition=self._partition_id, window_id=window.window_id)
@@ -1413,9 +1446,13 @@ class PartitionProcessor:
         # happens but neither results nor errors is appended.
         task_result: ExecutorResult | None = None
         task_error: ExecutorError | None = None
+        # Output bytes of this run's outcome still charged to the task; 0 once
+        # released or moved to the window that keeps the outcome.
+        charged_output = 0
 
         try:
             result = await self._executor_pool.execute(task, self._recorder, self._partition_id)
+            charged_output = self._charge_output(result)
             executor_tasks.labels(status='completed').inc()
             executor_duration.observe(result.duration_seconds)
             if result.spawn_seconds is not None:
@@ -1512,10 +1549,12 @@ class PartitionProcessor:
 
             if self._keep_window_results:
                 window.results.append(result)
-                self._keep_bytes(window, result)
+                self._move_output_charge(window, charged_output)
+                charged_output = 0
             task_result = result
 
         except ExecutorTaskError as e:
+            charged_output += self._charge_output(e.result)
             executor_tasks.labels(status='failed').inc()
             if e.error.kind == 'timeout':
                 executor_timeouts.inc()
@@ -1640,7 +1679,8 @@ class PartitionProcessor:
                     await self._send_execute_dlq(task, e.error, attempts=retry_count + 1)
                 if self._keep_window_results:
                     window.results.append(e.result)
-                    self._keep_bytes(window, e.result)
+                    self._move_output_charge(window, charged_output)
+                    charged_output = 0
                 task_error = e.error
 
         except Exception as e:
@@ -1655,6 +1695,10 @@ class PartitionProcessor:
                 self._keep_bytes(window, synthesized_result)
 
         finally:
+            # Released on every path; a retry charges its own outcome when it ends.
+            window.output_bytes += charged_output
+            if handed_off_to_retry and charged_output and self._account is not None:
+                self._account.release(0, charged_output)
             if not handed_off_to_retry:
                 removed = self._pending_tasks.pop(task.task_id, None)
                 self._inflight_count -= 1
@@ -1663,7 +1707,7 @@ class PartitionProcessor:
                 # already built any replacement from it. Message and window
                 # hooks see the task without its stdin once no other run of
                 # the same object is pending.
-                self._settle_task(task)
+                self._settle_task(task, charged_output)
                 if removed is None:
                     await log.awarning(
                         'task_not_in_pending_on_cleanup',
@@ -1706,6 +1750,7 @@ class PartitionProcessor:
         window.completed_count += 1
 
         if window.is_complete:
+            self._note_window_output(window)
             duration = time.monotonic() - window.start_time
             batch_duration.observe(duration)
 

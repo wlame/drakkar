@@ -292,7 +292,7 @@ and sizing.
 | Key | Default | What it bounds |
 |-----|---------|----------------|
 | `executor.max_pending_tasks` | `2000` | Tasks created and not yet settled (waiting for a slot, running, or in `on_task_complete` and its delivery). Must be at least `max_executors`. |
-| `executor.max_pending_bytes` | `1GiB` | The stdin of those tasks plus the stdout and stderr kept for `on_message_complete` and `on_window_complete`. At least `16MiB`. |
+| `executor.max_pending_bytes` | `1GiB` | The stdin of those tasks plus the stdout and stderr of their results while `on_task_complete`, `on_error` and the sink delivery run, and of results kept for `on_message_complete` and `on_window_complete`. Large outputs slow admission. At least `16MiB`. |
 | `sources.kafka.max_queued_messages` | `1000` | Polled messages waiting in partition queues. Must be at least `max_poll_records`. |
 
 - A partition loop takes a new window only while both pending counts are
@@ -304,7 +304,10 @@ and sizing.
   tasks or without), and after it a message never reserves less than
   `max_pending_tasks / window_size`. With a steady message shape the peak is
   about the cap plus one message for the whole worker. After the warm-up, a
-  sudden jump in tasks per message can pass the cap by the size of that jump. The `drakkar_pending_tasks` and
+  sudden jump in tasks per message can pass the cap by the size of that jump.
+  A task's output is known only when the task ends, so the outputs of the
+  pending tasks can also pass the byte limit; `max_stdout` and `max_stderr`
+  bound each one. The `drakkar_pending_tasks` and
   `drakkar_pending_bytes` gauges show the real counts.
 - The Kafka fetch pauses when the queues of the live partitions hold
   `max_queued_messages` messages and resumes at half of it. Stalled and dead
@@ -317,7 +320,7 @@ and sizing.
 executor:
   max_executors: 8
   max_pending_tasks: 2000      # new windows wait at 2000 unsettled tasks
-  max_pending_bytes: 1GiB      # ... or at 1 GiB of stdin and kept output
+  max_pending_bytes: 1GiB      # ... or at 1 GiB of stdin and task output
 sources:
   kafka:
     max_queued_messages: 1000  # pause the fetch at 1000 queued messages, resume at 500
@@ -333,7 +336,7 @@ Messages are collected into windows before being passed to [arrange()](handler.m
 
 1. The partition processor waits for the first message (blocks up to 1 second).
 2. It waits until the worker has room under `max_pending_tasks` and `max_pending_bytes` (each wait at most 1 second, then the loop retries a commit and comes back).
-3. It drains more messages from the queue without blocking, up to the admitted size. During the partition's warm-up (its first 3 windows, whether they created tasks or not) that is one message, and the window reserves all the free room. After it: `min(free tasks / tasks per message, free bytes / bytes per message)`, at least 1 and at most `window_size`, where the per-message numbers are the moving averages (bytes = stdin plus the output the hooks keep) raised to a floor of `max_pending_tasks / window_size` tasks and `max_pending_bytes / window_size` bytes, and the free room excludes other windows' reservations. The estimate is reserved at once. The worker's first window takes one message.
+3. It drains more messages from the queue without blocking, up to the admitted size. During the partition's warm-up (its first 3 windows, whether they created tasks or not) that is one message, and the window reserves all the free room. After it: `min(free tasks / tasks per message, free bytes / bytes per message)`, at least 1 and at most `window_size`, where the per-message numbers are the moving averages (bytes = stdin plus the output in the task hooks and delivery plus the output the message and window hooks keep) raised to a floor of `max_pending_tasks / window_size` tasks and `max_pending_bytes / window_size` bytes, and the free room excludes other windows' reservations. The estimate is reserved at once. The worker's first window takes one message.
 4. The window of messages is passed to [arrange()](handler.md#arrange-required), which returns `ExecutorTask` objects.
 5. All tasks in the window are launched concurrently.
 6. The window tracks `completed_count` vs `total_tasks` to know when it is done.
@@ -603,7 +606,7 @@ executor:
   on_failure: skip                         # skip | dlq: what the default on_error returns
   drain_timeout: 30s                       # max wait for in-flight tasks on shutdown
   max_pending_tasks: 2000                  # new windows wait while this many tasks are unsettled
-  max_pending_bytes: 1GiB                  # ... or while this much stdin and kept output is held
+  max_pending_bytes: 1GiB                  # ... or while this much stdin and task output is held
 ```
 
 | Field | Type | Default | Min | Description |
@@ -618,7 +621,7 @@ executor:
 | `on_failure` | `'skip' \| 'dlq'` | `'skip'` | -- | What the default `on_error` returns, and what a spent retry budget and a raising `on_error` become. `dlq` sends the source messages of a failed task to the DLQ. Any other value fails the load: `executor.on_failure must be skip or dlq, got '<v>'`. |
 | `executor.drain_timeout` | `int` | `30` | 1 | Max wait for in-flight tasks during graceful shutdown. On timeout, those tasks are cancelled and their offsets are **not** committed (they replay on restart). |
 | `max_pending_tasks` | `int` | `2000` | `max_executors` | New windows wait while this many tasks are created and not settled. A soft limit: it can be passed by the admitted window's fan-out beyond its estimate, normally one message; a sudden jump in tasks per message passes it by that jump. Below `max_executors` the load fails: `executor.max_pending_tasks (<n>) must be >= executor.max_executors (<m>)`. |
-| `max_pending_bytes` | size | `1GiB` | `16MiB` | New windows wait while task stdin plus kept task output reach this size. A soft limit, like `max_pending_tasks`. |
+| `max_pending_bytes` | size | `1GiB` | `16MiB` | New windows wait while task stdin plus task output (in hooks and delivery, or kept for the message and window hooks) reach this size. A soft limit, like `max_pending_tasks`. |
 
 Environment variable overrides use the `DK_EXECUTOR__` prefix:
 

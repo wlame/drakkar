@@ -324,8 +324,8 @@ pending_tasks = Gauge(
 
 pending_bytes = Gauge(
     'drakkar_pending_bytes',
-    'Bytes held for pending tasks and kept results: task stdin plus stdout and stderr '
-    'kept for on_message_complete and on_window_complete',
+    'Bytes held for pending tasks and their results: task stdin plus stdout and stderr '
+    'of results in hooks and delivery or kept for on_message_complete and on_window_complete',
 )
 
 window_admission_wait = Counter(

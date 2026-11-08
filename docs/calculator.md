@@ -239,8 +239,9 @@ The calculator leaves the backpressure keys at their defaults.
 `executor.max_pending_tasks` (2000) and `executor.max_pending_bytes`
 (1GiB) bound the tasks a worker holds; `sources.kafka.max_queued_messages`
 (1000) bounds the polled messages that wait for a window. Lower
-`max_pending_bytes` when tasks carry large stdin: about a quarter of the
-container memory. See [Performance](performance.md#backpressure).
+`max_pending_bytes` when tasks carry large stdin or large outputs (the stdout
+and stderr of a result count while its hooks and delivery run): about a quarter
+of the container memory. See [Performance](performance.md#backpressure).
 
 ### Duration thresholds
 

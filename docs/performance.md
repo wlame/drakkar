@@ -150,7 +150,8 @@ still move, the recorder still reports how many tasks succeeded and failed,
 and resident memory tracks the tasks in flight instead of the window.
 
 If you implement one of them, the kept output counts in
-`executor.max_pending_bytes` until the hook has run, so new windows wait
+`executor.max_pending_bytes` until the hook has run (without them it counts
+only while `on_task_complete` and its delivery run), so new windows wait
 while it is held (see [Backpressure](#backpressure)). Read what you need in
 `on_task_complete` — which is handed one result at a time and retains
 nothing — and keep the aggregate hooks for counts and summaries.
@@ -473,11 +474,20 @@ in `on_task_complete` and its sink delivery. A retry is the same task and
 counts once.
 
 **Pending bytes** are the stdin of those tasks, plus the stdout and stderr of
-results kept for `on_message_complete` and `on_window_complete`. Results are
-kept only when the handler overrides one of those hooks, and they count from
-the moment a task settles until the hook has run. A result kept by both hooks
-counts twice; that overestimates and pauses earlier, which is safe. Sizes
-come from `sys.getsizeof`, the real memory of a Python string.
+their results:
+
+- The output of a task's result or error counts from the moment the task
+  ends until `on_task_complete` (or `on_error`) and its sink delivery end, on
+  every path: success, failure, retry, an `on_error` replacement and a
+  cancellation. Large outputs therefore slow admission.
+- A result kept for `on_message_complete` or `on_window_complete` counts until
+  that hook has run. Results are kept only when the handler overrides one of
+  those hooks. A result kept by a window takes its charge with it, so it is
+  not counted twice; a result kept by both hooks counts twice, which
+  overestimates and pauses earlier, and that is safe.
+
+Sizes come from `sys.getsizeof`, the real memory of a Python string.
+`executor.max_stdout` and `executor.max_stderr` bound each output.
 
 One budget serves the whole worker: every partition loop and the HTTP
 source charge it. HTTP requests count in it, but never wait for it — a
@@ -523,6 +533,12 @@ What is left, stated plainly:
   tasks each before, 1000 now), it passes it by the whole window's excess:
   messages x (1000 - 10), at most one window thanks to the floor. A smaller
   `executor.window_size` makes this worst case smaller.
+- **The byte limit can also be passed by the outputs of the pending tasks.**
+  The estimate includes the average output per message, but a reservation is
+  given back when the window has fanned out, and a task's output exists only
+  when the task ends. So the outputs of the tasks that were pending when a
+  window was admitted come on top. Set `executor.max_stdout` and
+  `executor.max_stderr` when outputs can be large.
 
 The `drakkar_pending_tasks` and `drakkar_pending_bytes` gauges show the real
 numbers — the tasks and bytes that exist, reservations not included — so a

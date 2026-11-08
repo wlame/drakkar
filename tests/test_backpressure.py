@@ -618,7 +618,10 @@ async def test_admission_across_partitions_stays_within_the_cap_plus_one_message
         await proc.stop()
 
     assert budget.peak_tasks <= budget.max_tasks + fan_out
-    assert budget.peak_bytes <= budget.max_bytes + fan_out * task_bytes
+    # The byte limit is passed by one message's stdin, and by the outputs of the
+    # pending tasks: an output exists only when its task ends, after admission.
+    result_bytes = sys.getsizeof(STDOUT) + sys.getsizeof('')
+    assert budget.peak_bytes <= budget.max_bytes + fan_out * task_bytes + budget.peak_tasks * result_bytes
     assert (budget.tasks, budget.bytes, budget.reserved_tasks, budget.reserved_bytes) == (0, 0, 0, 0)
 
 
@@ -1259,8 +1262,8 @@ def test_backpressure_metrics_names_and_help_texts():
             Gauge,
             'drakkar_pending_bytes',
             (),
-            'Bytes held for pending tasks and kept results: task stdin plus stdout and stderr '
-            'kept for on_message_complete and on_window_complete',
+            'Bytes held for pending tasks and their results: task stdin plus stdout and stderr '
+            'of results in hooks and delivery or kept for on_message_complete and on_window_complete',
         ),
         (
             window_admission_wait,

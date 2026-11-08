@@ -393,7 +393,8 @@ The tasks in `group.tasks` (and in `result.task`) have `stdin` set to
 `None`: the framework frees a task's stdin when the task reaches its last
 outcome. Keep what you need from it in `task.metadata`. The stdout and
 stderr of the kept results count in `executor.max_pending_bytes` until this
-hook has run (see [Backpressure](performance.md#backpressure)).
+hook has run. Without this hook a result's output counts only while
+`on_task_complete` and its delivery run (see [Backpressure](performance.md#backpressure)).
 
 ```python
 async def on_message_complete(self, group: dk.MessageGroup) -> dk.CollectResult | None:

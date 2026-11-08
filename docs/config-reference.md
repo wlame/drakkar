@@ -133,7 +133,7 @@ executor:
   # (normally one message; a jump in tasks per message passes them by that jump);
   # drakkar_pending_tasks / drakkar_pending_bytes show the real counts.
   max_pending_tasks: 2000          # unsettled tasks (waiting, running, in on_task_complete). env: DK_EXECUTOR__MAX_PENDING_TASKS  · >= max_executors
-  max_pending_bytes: 1GiB          # task stdin + output kept for on_message_complete / on_window_complete.
+  max_pending_bytes: 1GiB          # task stdin + output in hooks and delivery or kept for the message / window hooks.
                                    #   env: DK_EXECUTOR__MAX_PENDING_BYTES  · >= 16MiB; about a quarter of container memory
 
   # Subprocess environment.

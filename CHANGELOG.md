@@ -465,6 +465,16 @@ the steps of the upgrade and the changes of behaviour.
   no chunk for 120 s is cut off. Before, a client that read nothing kept its
   copy on `storage.dir` for as long as its connection stayed open (contract
   v1.30).
+- **Behaviour change: task outputs in hooks and delivery count in the pending
+  bytes.** The stdout and stderr of a result or error count in
+  `executor.max_pending_bytes` from the end of the task until `on_task_complete`
+  or `on_error` and its sink delivery end, on every path (retry, `on_error`
+  replacement and cancellation included). A result kept for a message or window
+  hook keeps its charge until that hook has run; it is not counted twice. Large
+  outputs now slow admission. The window estimate includes the average output
+  per message, and the outputs of the pending tasks can pass the byte limit;
+  `executor.max_stdout` and `executor.max_stderr` bound each one. New help text
+  for `drakkar_pending_bytes`.
 
 ### Fixed
 

@@ -7,7 +7,9 @@ HTTP source. It counts two things:
   settled — waiting for an executor slot, running, or in ``on_task_complete``
   and its delivery;
 - **pending bytes**: the stdin of those tasks, plus the stdout and stderr of
-  results kept for ``on_message_complete`` and ``on_window_complete``.
+  their results while ``on_task_complete``, ``on_error`` and the sink delivery
+  run, and of results kept for ``on_message_complete`` and
+  ``on_window_complete``.
 
 A partition loop takes a new window only while both counts are below their
 limits (``executor.max_pending_tasks``, ``executor.max_pending_bytes``). When
@@ -80,14 +82,17 @@ def _moving_average(current: float | None, sample: float) -> float:
 
 @dataclass
 class MessageShape:
-    """Moving averages of what one message costs: tasks, stdin bytes and kept output bytes.
+    """Moving averages of what one message costs: tasks, stdin bytes and output bytes.
 
-    Kept output is averaged in two parts, because a window and a message
-    tracker keep their results apart and a result kept by both counts twice.
+    Output is averaged in three parts: the output a task holds while its own
+    hooks and delivery run, and the output kept by a window and by a message
+    tracker. A window and a tracker keep their results apart, and a result
+    kept by both counts twice. A result kept by a window counts only as kept.
     """
 
     tasks: float | None = None
     stdin_bytes: float = 0.0
+    output_bytes: float | None = None
     window_kept_bytes: float | None = None
     message_kept_bytes: float | None = None
 
@@ -102,14 +107,23 @@ class MessageShape:
 
     @property
     def held_bytes(self) -> float:
-        """Estimated pending bytes of one message: stdin plus the output the hooks keep."""
-        return self.stdin_bytes + (self.window_kept_bytes or 0.0) + (self.message_kept_bytes or 0.0)
+        """Estimated pending bytes of one message: stdin, output in its tasks' hooks and delivery, and kept output."""
+        return (
+            self.stdin_bytes
+            + (self.output_bytes or 0.0)
+            + (self.window_kept_bytes or 0.0)
+            + (self.message_kept_bytes or 0.0)
+        )
 
     def note_window(self, message_count: int, task_count: int, stdin_bytes: int) -> None:
         """Fold the fan-out of one window that created tasks into the averages."""
         previous_stdin = self.stdin_bytes if self.measured else None
         self.tasks = _moving_average(self.tasks, task_count / message_count)
         self.stdin_bytes = _moving_average(previous_stdin, stdin_bytes / message_count)
+
+    def note_window_output(self, message_count: int, output_bytes: int) -> None:
+        """Fold the output a window's tasks held in their hooks and delivery into the averages."""
+        self.output_bytes = _moving_average(self.output_bytes, output_bytes / message_count)
 
     def note_window_kept(self, message_count: int, kept_bytes: int) -> None:
         """Fold the output a window kept for on_window_complete into the averages."""
