@@ -287,7 +287,8 @@ Emitted only when the worker has a recorder (`recorder.enabled` or `ui.enabled`,
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `drakkar_recorder_buffer_size` | Gauge | -- | Events that wait in the intake plus rows that wait in the file queue. Updated on every `_record()` call and after each stage. A sustained value near `recorder.max_buffer_rows` signals the loops can't keep up with incoming events -- raise `recorder.flush_interval` or `recorder.max_buffer_rows`, or investigate disk latency. |
-| `drakkar_recorder_dropped_events_total` | Counter | -- | Rows evicted from the intake or the file queue because it was full. Non-zero means event history has gaps; scale the buffer up or speed up flushes. |
+| `drakkar_recorder_dropped_events_total` | Counter | -- | Rows evicted from the intake or the file queue because it was full (`recorder.max_buffer_rows` rows, or `recorder.sqlite.max_queue` of text in the file queue). Non-zero means event history has gaps; scale the buffer up or speed up flushes. |
+| `drakkar_recorder_file_queue_bytes` | Gauge | -- | Characters of the large fields (stdout, stderr, metadata, args) of the rows that wait in the file queue. Bounded by `recorder.sqlite.max_queue`; at half of it the file loop starts early. Only with provider `sqlite`. See [Buffer Mechanics](#buffer-mechanics). |
 | `drakkar_recorder_flush_duration_seconds` | Histogram | -- | Duration of one stage F, the file write (`executemany` + `commit`). Exposes disk-I/O latency tail. Buckets: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5. Alert on p99 exceeding `recorder.flush_interval` -- flushes overlapping the next scheduled flush starve the buffer. |
 | `drakkar_recorder_flush_retries_total` | Counter | -- | Flush attempts that failed with `aiosqlite.OperationalError` and re-queued their batch at the front of the buffer. A non-zero `rate(...[5m])` signals a transient DB-health issue (WAL lock, disk pressure); if it climbs without stabilising, the recorder is about to start dropping batches. Pair with `drakkar_recorder_flush_batches_dropped_total` to distinguish "retrying" from "giving up". |
 | `drakkar_recorder_flush_batches_dropped_total` | Counter | -- | Batches discarded after `recorder.sqlite.max_flush_retries` consecutive failures. This is silent recorder data loss — alert on any non-zero rate. Investigate disk space, filesystem health, and WAL contention. |
@@ -299,6 +300,7 @@ Emitted only when the worker has a recorder (`recorder.enabled` or `ui.enabled`,
 | `drakkar_recorder_memory_evicted_rows_total` | Counter | `reason` | Rows removed from the recorder memory store, by reason: `window`, `rows`, `bytes`, `gap`. |
 | `drakkar_recorder_memory_write_failures_total` | Counter | -- | Event chunks that could not be written to the recorder memory store. Final errors only; a busy or locked store is retried and logs `recorder_memory_write_retry`. |
 | `drakkar_recorder_postgres_queue_rows` | Gauge | -- | Rows waiting to be written to the recorder Postgres table: the Postgres queue plus the chunk that stage P holds. Only with provider `postgres`. See [Recorder History in Postgres](recorder-postgres.md#while-postgres-is-down). |
+| `drakkar_recorder_postgres_queue_bytes` | Gauge | -- | Characters of text of the rows in the Postgres queue, bounded by `recorder.postgres.max_queue`. The chunk that stage P holds is not counted. Only with provider `postgres`. |
 | `drakkar_recorder_postgres_rows_written_total` | Counter | -- | Rows written to the recorder Postgres table. With the table size, it gives the real write volume. |
 | `drakkar_recorder_postgres_dropped_rows_total` | Counter | `reason` | Rows that never reached the recorder Postgres table, by reason: `queue_full` (the Postgres queue passed a bound), `rejected` (a chunk failed twice with a final error), `no_partition` (the same, and the last error was `23514`), `shutdown` (left over at stop). Any non-zero rate is a gap in the Postgres history. |
 | `drakkar_recorder_postgres_partitions_dropped_total` | Counter | `reason` | Recorder Postgres partitions dropped, by reason: `retention` (the hour is past the retention stored with the table), `size` (the table was above `recorder.postgres.max_size`). Counted when the upkeep commits. A steady `size` rate means the table is too small for its retention. |
@@ -778,6 +780,8 @@ recorder:
   provider: sqlite                    # sqlite | postgres
   flush_interval: 5s                  # Tick of the memory loop and the file loop
   max_buffer_rows: 50000              # Capacity of the intake and of the file queue, each
+  sqlite:
+    max_queue: 128MiB                 # Most text in the file queue (stdout, stderr, metadata, args)
   memory:
     window: 2m                        # Keep events in the memory store this long
     rows_per_executor: 3000           # Row cap = this x executor.max_executors
@@ -1072,7 +1076,9 @@ an in-memory buffer (`collections.deque` with `maxlen=recorder.max_buffer_rows`,
   intake in chunks, gives each row its id, and writes the chunk to the
   [memory store](recent-events.md). With provider `sqlite` it then puts
   the `(id, row)` pairs in the **file queue**, which also holds at most
-  `recorder.max_buffer_rows` rows. After the write it runs one eviction pass.
+  `recorder.max_buffer_rows` rows and at most `recorder.sqlite.max_queue`
+  (default `128MiB`) of text in the stdout, stderr, metadata and args fields
+  of its rows. After the write it runs one eviction pass.
 - **Stage F** (the file loop, background task `file_flush`, `sqlite` only)
   writes the file queue to the recorder file in transactions of up to 5000
   rows.
@@ -1087,9 +1093,14 @@ design:
   disk stalls
 
 When the intake or the file queue is full, its oldest rows are evicted.
+The file queue is full at `recorder.max_buffer_rows` rows or at
+`recorder.sqlite.max_queue` of text, whichever comes first; one row larger
+than `recorder.sqlite.max_queue` on its own is dropped alone and never
+queued. A row evicted from the file queue stays in the memory store.
 Drops are not silent: `drakkar_recorder_dropped_events_total`
-([see Recorder metrics](#recorder)) counts the evictions of both, and
-`drakkar_recorder_buffer_size` shows the intake plus the file queue. While
+([see Recorder metrics](#recorder)) counts the evictions of both,
+`drakkar_recorder_buffer_size` shows the intake plus the file queue, and
+`drakkar_recorder_file_queue_bytes` shows the text of the file queue. While
 the disk stalls, up to twice `recorder.max_buffer_rows` rows wait in memory: a full intake
 and a full file queue. While stage M is held back (the memory store is busy
 or locked), the intake fills, and its overflow counts as dropped. Alert on
@@ -1101,7 +1112,8 @@ chunks: building a row tuple costs one lookup per column, so an unchunked
 write of tens of thousands of events would stall the loop for tens of
 milliseconds and show up as loop lag in [runtime health](runtime-health.md).
 Stage M also starts early, before `recorder.flush_interval` elapses, once the
-intake is half full, and stage F once the file queue is half full. A burst
+intake is half full, and stage F once the file queue holds half of
+`recorder.max_buffer_rows` rows or half of `recorder.sqlite.max_queue`. A burst
 is written out rather than left to reach `recorder.max_buffer_rows` and evict.
 
 Stage M starts early on **size** as well as on count, once the buffered
@@ -1113,7 +1125,9 @@ handler producing hundreds of kilobytes per task therefore reaches gigabytes
 of resident buffer long before it reaches 25,000 events. The size trigger is
 not configurable: it is a safety floor rather than a tuning knob, and writing
 early is never wrong. Nothing is truncated — the stored row keeps the whole
-output, which is what the task-detail page shows.
+output, which is what the task-detail page shows. When the disk is slow, the
+file queue keeps that output until stage F writes it; `recorder.sqlite.max_queue`
+bounds that memory, and raising it trades memory for fewer dropped rows.
 
 Live WebSocket clients never receive captured output — the live views show
 `stdout_size`, not the text — and the queued frames do not hold it either: the

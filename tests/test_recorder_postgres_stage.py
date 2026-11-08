@@ -19,6 +19,7 @@ from drakkar.config import PostgresConnectionConfig, RecorderConfig, ResilienceC
 from drakkar.metrics import (
     provider_calls,
     recorder_postgres_dropped_rows,
+    recorder_postgres_queue_bytes,
     recorder_postgres_queue_rows,
     recorder_postgres_rows_written,
 )
@@ -249,6 +250,17 @@ async def test_written_chunk_counts_rows_and_a_backlog_drains_in_one_run():
     assert fake.copied_ids() == list(range(1, 251))
     assert _counter(recorder_postgres_rows_written) == written_before + 250
     assert _counter(recorder_postgres_queue_rows) == 0
+
+
+def test_queue_gauges_report_the_rows_and_the_text_of_the_queue():
+    writer = _writer(RecorderFakePostgres())
+    pairs = _pairs(1, 3)
+    writer._queue.append(pairs)
+
+    writer._set_queue_gauge()
+
+    assert _counter(recorder_postgres_queue_rows) == 3
+    assert _counter(recorder_postgres_queue_bytes) == sum(row_text_bytes(row) for _, row in pairs)
 
 
 @pytest.mark.parametrize(

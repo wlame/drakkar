@@ -444,7 +444,10 @@ The connection discipline is:
 `recorder.max_buffer_rows`). Every `recorder.flush_interval` the
 memory loop gives each row its id and writes it to the
 [memory store](recent-events.md); with `sqlite` it then puts the rows in the
-file queue (capped at `recorder.max_buffer_rows` too). The file loop writes the file queue
+file queue (capped at `recorder.max_buffer_rows` too, and at
+`recorder.sqlite.max_queue` of text in the stdout, stderr, metadata and args
+fields; past either bound the oldest rows leave the file queue and are counted
+as dropped events). The file loop writes the file queue
 in transactions of up to 5000 rows. A row has the same id in memory and in
 the file. Ids continue across rotations, so a new file does not start at
 id 1; they start again at 1 after a restart. On a file write failure the

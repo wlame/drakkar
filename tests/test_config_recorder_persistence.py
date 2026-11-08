@@ -62,6 +62,7 @@ def test_recorder_defaults_print_in_canonical_units():
         'max_flush_retries': 3,
         'state_snapshots': True,
         'state_interval': '10s',
+        'max_queue': '128MiB',
     }
     assert dumped['search'] == {'max_files': 256, 'timeout': '10s'}
     assert dumped['postgres']['resilience'] == {

@@ -56,6 +56,7 @@ from drakkar.hostinfo import HostSampler, detect_network_fs
 from drakkar.metrics import (
     recorder_buffer_size,
     recorder_dropped_events,
+    recorder_file_queue_bytes,
     recorder_flush_batches_dropped,
     recorder_flush_duration,
     recorder_flush_retries,
@@ -182,6 +183,8 @@ FLUSH_BYTES_HIGH_WATER = 64 * 1024 * 1024
 # Event keys whose values can be arbitrarily large. Summed for the byte
 # high-water mark above; everything else in a row is bounded and small.
 _HEAVY_EVENT_FIELDS = ('stdout', 'stderr', 'metadata', 'args')
+# The positions of those fields in a row tuple, for the byte bound of the file queue.
+_HEAVY_ROW_INDEXES = tuple(EVENT_COLUMNS.index(field) for field in _HEAVY_EVENT_FIELDS)
 
 # The name of the thread whose event loop runs stage P with ``postgres``.
 POSTGRES_THREAD_NAME = 'drakkar-recorder-postgres'
@@ -206,6 +209,11 @@ def _event_weight(event: dict) -> int:
     makes the flush trigger slightly later than the nominal threshold.
     """
     return sum(len(value) for field in _HEAVY_EVENT_FIELDS if isinstance(value := event.get(field), str))
+
+
+def _row_weight(row: tuple) -> int:
+    """The size of one row tuple as the file queue's byte bound counts it: the characters of its large fields."""
+    return sum(len(value) for index in _HEAVY_ROW_INDEXES if isinstance(value := row[index], str))
 
 
 def _row_tuple(row_id: int, event: dict) -> tuple:
@@ -392,6 +400,10 @@ class EventRecorder(EventWriter):
         # rides next to the row, never inside the event dict: the fan-out may
         # encode that dict on the API server thread at any time.
         self._file_queue: deque[tuple[int, tuple]] = deque(maxlen=config.max_buffer_rows)
+        # The characters of the large fields of the file queue's rows, kept
+        # exact by every append, pop, re-queue and clear, and their bound.
+        self._file_queue_bytes = 0
+        self._file_queue_max_bytes = config.sqlite.max_queue
         # The P queue: the same pairs on their way to the Postgres table,
         # bounded by count and by text size; only with ``postgres``.
         self._pg_queue: PostgresQueue | None = (
@@ -1495,6 +1507,7 @@ class EventRecorder(EventWriter):
             return
         rows = [row for _, row in self._file_queue]
         self._file_queue.clear()
+        self._file_queue_bytes = 0
         batch = list(self._intake)
         self._intake.clear()
         first_id = self._next_id
@@ -1586,14 +1599,23 @@ class EventRecorder(EventWriter):
     # --- Write path: the memory loop and stage M, the file loop and stage F ---
 
     def _update_buffer_gauge(self) -> None:
-        """Report the rows waiting in memory: the intake plus the file queue."""
+        """Report the rows waiting in memory (the intake plus the file queue) and the file queue's bytes."""
         recorder_buffer_size.set(len(self._intake) + len(self._file_queue))
+        recorder_file_queue_bytes.set(self._file_queue_bytes)
+
+    def _intake_bytes_due(self) -> bool:
+        """True when the intake's payload reached the high-water mark."""
+        return self._buffered_bytes >= FLUSH_BYTES_HIGH_WATER
+
+    def _file_queue_bytes_due(self) -> bool:
+        """True when the file queue holds at least half of ``recorder.sqlite.max_queue``."""
+        return 2 * self._file_queue_bytes >= self._file_queue_max_bytes
 
     async def _wait_until_due(
         self,
         queue: deque,
         *,
-        watch_bytes: bool,
+        bytes_due: Callable[[], bool],
         wakeup: asyncio.Event | None = None,
     ) -> None:
         """Wait out ``flush_interval``, or return early on a burst.
@@ -1602,8 +1624,9 @@ class EventRecorder(EventWriter):
         filling ``queue`` faster than one interval's worth would reach
         ``max_buffer_rows`` and start evicting between ticks. Returning as soon
         as it is half full turns that into an early write instead of lost
-        events. ``watch_bytes`` also returns at the payload high-water mark
-        of the intake, and ``wakeup`` when that event is set. The intake is
+        events. It also returns when ``bytes_due`` answers true (the payload
+        high-water mark of the intake, or half the byte bound of the file
+        queue), and when ``wakeup`` is set. The intake is
         polled rather than signalled because ``_record`` is also reached
         from the webapp's own event loop, and ``Event.set`` is not safe
         across loops; ``wakeup`` is set on the main loop only.
@@ -1626,13 +1649,13 @@ class EventRecorder(EventWriter):
                     return
             if high_water is not None and len(queue) >= high_water:
                 return
-            if watch_bytes and self._buffered_bytes >= FLUSH_BYTES_HIGH_WATER:
+            if bytes_due():
                 return
 
     async def _memory_loop(self) -> None:
         """Run stage M on the intake's triggers; a hung disk never holds this loop."""
         while self._running:
-            await self._wait_until_due(self._intake, watch_bytes=True)
+            await self._wait_until_due(self._intake, bytes_due=self._intake_bytes_due)
             # Per-iteration guard: an unexpected raise would end the task and
             # stop recording for the rest of the process. Cancellation still
             # propagates — that is how ``stop`` ends the loop.
@@ -1668,9 +1691,9 @@ class EventRecorder(EventWriter):
                 await self._log_loop_failure('postgres', exc)
 
     async def _file_loop(self) -> None:
-        """Run stage F on the memory loop's tick, when the file queue is half full, or at the interval."""
+        """Run stage F on the memory loop's tick, when the file queue holds half of its rows or bytes, or at the interval."""
         while self._running:
-            await self._wait_until_due(self._file_queue, watch_bytes=False, wakeup=self._file_wakeup)
+            await self._wait_until_due(self._file_queue, bytes_due=self._file_queue_bytes_due, wakeup=self._file_wakeup)
             self._file_wakeup.clear()
             try:
                 await self._stage_file()
@@ -2021,13 +2044,40 @@ class EventRecorder(EventWriter):
             self._pg_unlogged_drops -= rows
 
     def _append_file_queue(self, pairs: list[tuple[int, tuple]]) -> None:
-        """Append ``(id, row)`` pairs to the file queue; pairs pushed out of a full queue count as dropped events."""
-        maxlen = self._file_queue.maxlen
-        if maxlen is not None:
-            overflow = len(self._file_queue) + len(pairs) - maxlen
-            if overflow > 0:
-                recorder_dropped_events.inc(overflow)
-        self._file_queue.extend(pairs)
+        """Append ``(id, row)`` pairs to the file queue, keeping its row and byte bounds.
+
+        A row larger than the byte bound on its own is dropped alone and
+        never queued, so it cannot push out the rows already waiting. Then
+        the oldest pairs go until both bounds hold. Every dropped pair counts
+        as a dropped event; the memory store keeps its rows either way.
+        """
+        queue = self._file_queue
+        maxlen = queue.maxlen
+        max_bytes = self._file_queue_max_bytes
+        dropped = 0
+        for pair in pairs:
+            size = _row_weight(pair[1])
+            if size > max_bytes:
+                dropped += 1
+                continue
+            # Pop the oldest pair here rather than let ``maxlen`` push it out,
+            # so its bytes leave the total too.
+            if maxlen is not None and len(queue) >= maxlen:
+                self._file_queue_bytes -= _row_weight(queue.popleft()[1])
+                dropped += 1
+            queue.append(pair)
+            self._file_queue_bytes += size
+        while queue and self._file_queue_bytes > max_bytes:
+            self._file_queue_bytes -= _row_weight(queue.popleft()[1])
+            dropped += 1
+        if dropped:
+            recorder_dropped_events.inc(dropped)
+
+    def _pop_file_queue(self) -> tuple[int, tuple]:
+        """Pop the oldest pair of the file queue and take its bytes off the total."""
+        pair = self._file_queue.popleft()
+        self._file_queue_bytes -= _row_weight(pair[1])
+        return pair
 
     async def _stage_file(self) -> None:
         """Stage F: write the file queue's stored rows to the live file, in chunks.
@@ -2058,7 +2108,7 @@ class EventRecorder(EventWriter):
         while pending > 0:
             take = min(pending, FLUSH_CHUNK_ROWS)
             pending -= take
-            batch = [self._file_queue.popleft() for _ in range(take)]
+            batch = [self._pop_file_queue() for _ in range(take)]
             if not await self._write_file_chunk(db, batch):
                 self._update_buffer_gauge()
                 return
@@ -2157,6 +2207,8 @@ class EventRecorder(EventWriter):
         """
         len_before = len(queue)
         batch_len = len(batch)
+        if queue is self._file_queue:
+            self._requeue_file_bytes(batch)
         queue.extendleft(reversed(batch))
         maxlen = queue.maxlen
         if maxlen is not None:
@@ -2172,6 +2224,19 @@ class EventRecorder(EventWriter):
                     max_buffer=maxlen,
                 )
         self._update_buffer_gauge()
+
+    def _requeue_file_bytes(self, batch: list[tuple[int, tuple]]) -> None:
+        """Adjust the file queue's byte total for a re-queue of ``batch``, before the ``extendleft``.
+
+        The batch's rows come back; the newest rows that ``extendleft`` is
+        about to push out of a full queue leave.
+        """
+        queue = self._file_queue
+        maxlen = queue.maxlen
+        overflow = len(queue) + len(batch) - maxlen if maxlen is not None else 0
+        for index in range(1, min(max(overflow, 0), len(queue)) + 1):
+            self._file_queue_bytes -= _row_weight(queue[-index][1])
+        self._file_queue_bytes += sum(_row_weight(row) for _, row in batch)
 
     async def _rotation_loop(self) -> None:
         while self._running:

@@ -348,7 +348,7 @@ async def test_flush_wait_returns_early_when_the_buffer_is_half_full(tmp_path):
         rec.record_committed(partition=0, offset=offset)
 
     # Returns on the buffer depth, not on the ten-minute interval.
-    await asyncio.wait_for(rec._wait_until_due(rec._intake, watch_bytes=True), timeout=5.0)
+    await asyncio.wait_for(rec._wait_until_due(rec._intake, bytes_due=rec._intake_bytes_due), timeout=5.0)
 
 
 async def test_flush_wait_holds_for_the_interval_below_the_high_water_mark(tmp_path):
@@ -362,4 +362,4 @@ async def test_flush_wait_holds_for_the_interval_below_the_high_water_mark(tmp_p
         rec.record_committed(partition=0, offset=offset)
 
     with pytest.raises(TimeoutError):
-        await asyncio.wait_for(rec._wait_until_due(rec._intake, watch_bytes=True), timeout=0.6)
+        await asyncio.wait_for(rec._wait_until_due(rec._intake, bytes_due=rec._intake_bytes_due), timeout=0.6)

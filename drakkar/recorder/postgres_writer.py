@@ -20,7 +20,8 @@ One run (:meth:`PostgresWriter.run_once`):
    on, so a backlog drains as fast as Postgres takes it; any other outcome
    ends the run;
 4. set ``drakkar_recorder_postgres_queue_rows`` to the rows of the queue plus
-   the slot, and publish a new :class:`WriterStatus`.
+   the slot and ``drakkar_recorder_postgres_queue_bytes`` to the text of the
+   queue, and publish a new :class:`WriterStatus`.
 
 A chunk is dropped only after ``POSTGRES_CHUNK_FINAL_FAILURES`` final COPY
 errors: an error that its rows cause (a data or integrity error of the server,
@@ -55,6 +56,7 @@ from drakkar.config.connections import PostgresConnectionConfig
 from drakkar.metrics import (
     recorder_postgres_dropped_rows,
     recorder_postgres_partitions_dropped,
+    recorder_postgres_queue_bytes,
     recorder_postgres_queue_rows,
     recorder_postgres_rows_written,
 )
@@ -765,9 +767,10 @@ class PostgresWriter:
     # --- metrics and logs ---
 
     def _set_queue_gauge(self) -> None:
-        """Set the queue gauge to the rows of the queue plus the slot, and publish the status with them."""
+        """Set the queue gauges (rows of the queue plus the slot, text of the queue) and publish the status."""
         slot_rows = len(self._slot.pairs) if self._slot is not None else 0
         recorder_postgres_queue_rows.set(len(self._queue) + slot_rows)
+        recorder_postgres_queue_bytes.set(self._queue.bytes)
         self._publish_status()
 
     async def _drop(self, reason: str, rows: int, error: str) -> None:

@@ -507,6 +507,7 @@ Metrics and log events of the write path:
 | Name | Kind | Meaning |
 |---|---|---|
 | `drakkar_recorder_postgres_queue_rows` | gauge | Rows waiting to be written to the recorder Postgres table (the queue plus the chunk in the slot) |
+| `drakkar_recorder_postgres_queue_bytes` | gauge | Characters of text of the rows in the recorder Postgres queue, bounded by `recorder.postgres.max_queue` (the chunk in the slot is not counted) |
 | `drakkar_recorder_postgres_rows_written_total` | counter | Rows written to the recorder Postgres table |
 | `drakkar_recorder_postgres_dropped_rows_total` | counter, `reason` | Rows that never reached the recorder Postgres table, by reason: `queue_full`, `rejected`, `no_partition` (the last error was `23514`), `shutdown` |
 | `drakkar_recorder_postgres_partitions_dropped_total` | counter, `reason` | Recorder Postgres partitions dropped, by reason: `retention` (past the stored retention), `size` (by the size cap). Counted when the upkeep commits. |

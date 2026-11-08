@@ -246,6 +246,13 @@ the steps of the upgrade and the changes of behaviour.
   "Consumer lag" and "Total lag (cluster)" and the lag tile use it. A new link
   "Pending offsets" shows `drakkar_offset_lag`, which counts the pending offsets of
   this worker.
+- **Byte bound of the recorder file queue.** New key `recorder.sqlite.max_queue`
+  (default `128MiB`, from `16MiB` to `1GiB`). It counts the characters of the
+  stdout, stderr, metadata and args fields of the rows that wait for the file.
+  When the queue passes it, the oldest rows leave the file queue and count on
+  `drakkar_recorder_dropped_events_total`; the memory store keeps them. The file
+  loop also starts at half of the bound. New gauges:
+  `drakkar_recorder_file_queue_bytes` and `drakkar_recorder_postgres_queue_bytes`.
 - **Databases tab: where the data is.** `GET /api/v1/debug/databases` answers
   `worker`, and two new parts: `recorder` (the effective provider, the memory
   bounds, the rotation and the next archive slot, or the Postgres table and this

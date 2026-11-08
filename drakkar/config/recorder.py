@@ -223,6 +223,14 @@ class RecorderSqliteConfig(ConfigModel):
             'samples come every 10s.'
         ),
     )
+    max_queue: ByteSize = Field(
+        default=128 * MIB,
+        description=(
+            'Most text waiting for the recorder file, from 16MiB to 1GiB, counted in characters of the '
+            'stdout, stderr, metadata and args fields. When full, the oldest rows are dropped from the file '
+            'queue and counted. Used only with provider sqlite.'
+        ),
+    )
 
 
 class RecorderArchiveConfig(ConfigModel):

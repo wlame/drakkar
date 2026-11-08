@@ -141,6 +141,7 @@ LAYOUT = [
     'recorder.sqlite.max_flush_retries',
     'recorder.sqlite.state_snapshots',
     'recorder.sqlite.state_interval',
+    'recorder.sqlite.max_queue',
     'recorder.archive.enabled',
     'recorder.archive.window',
     'recorder.archive.due_after',

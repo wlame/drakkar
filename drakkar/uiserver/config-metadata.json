@@ -1775,6 +1775,16 @@
           "group": "recorder"
         },
         {
+          "path": "recorder.sqlite.max_queue",
+          "env": "DK_RECORDER__SQLITE__MAX_QUEUE",
+          "description": "Most text waiting for the recorder file, from 16MiB to 1GiB, counted in characters of the stdout, stderr, metadata and args fields.",
+          "full_description": "Most text waiting for the recorder file, from 16MiB to 1GiB, counted in characters of the stdout, stderr, metadata and args fields. When full, the oldest rows are dropped from the file queue and counted. Used only with provider sqlite.",
+          "type": "size",
+          "default": "128MiB",
+          "secret": false,
+          "group": "recorder"
+        },
+        {
           "path": "recorder.archive.enabled",
           "env": "DK_RECORDER__ARCHIVE__ENABLED",
           "description": "Fold sealed recorder files into one compressed archive per window, then delete the files.",

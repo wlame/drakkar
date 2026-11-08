@@ -15,6 +15,7 @@ from structlog.testing import capture_logs
 from drakkar.config import PostgresConnectionConfig, RecorderConfig, ResilienceConfig
 from drakkar.metrics import (
     recorder_postgres_dropped_rows,
+    recorder_postgres_queue_bytes,
     recorder_postgres_queue_rows,
     recorder_postgres_rows_written,
 )
@@ -611,11 +612,15 @@ def test_other_modes_build_no_p_queue(tmp_path, persistence):
 def test_recorder_postgres_metrics_names_and_help_texts():
     rows = [
         (recorder_postgres_queue_rows, 'gauge', 'drakkar_recorder_postgres_queue_rows', ()),
+        (recorder_postgres_queue_bytes, 'gauge', 'drakkar_recorder_postgres_queue_bytes', ()),
         (recorder_postgres_rows_written, 'counter', 'drakkar_recorder_postgres_rows_written', ()),
         (recorder_postgres_dropped_rows, 'counter', 'drakkar_recorder_postgres_dropped_rows', ('reason',)),
     ]
     helps = {
         'drakkar_recorder_postgres_queue_rows': 'Rows waiting to be written to the recorder Postgres table',
+        'drakkar_recorder_postgres_queue_bytes': (
+            'Characters of text of the rows in the recorder Postgres queue, bounded by recorder.postgres.max_queue'
+        ),
         'drakkar_recorder_postgres_rows_written': 'Rows written to the recorder Postgres table',
         'drakkar_recorder_postgres_dropped_rows': 'Rows that never reached the recorder Postgres table, by reason',
     }

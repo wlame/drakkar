@@ -58,6 +58,7 @@ UNIT_BOUNDS: tuple[UnitBound, ...] = (
     UnitBound('recorder.memory.max_size', 16 * MIB, 512 * MIB),
     UnitBound('recorder.sqlite.rotation_interval', 1, None),
     UnitBound('recorder.sqlite.state_interval', 1, None),
+    UnitBound('recorder.sqlite.max_queue', 16 * MIB, GIB),
     UnitBound('recorder.archive.window', 1, None),
     UnitBound('recorder.archive.due_after', 1, None),
     UnitBound('recorder.postgres.initial_retention', 1, 168),

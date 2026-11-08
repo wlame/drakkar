@@ -810,6 +810,14 @@ recorder_buffer_size = Gauge(
     ),
 )
 
+# The byte side of the file queue: the characters of the large fields (stdout,
+# stderr, metadata, args) of the rows waiting for the recorder file, bounded by
+# ``recorder.sqlite.max_queue``.
+recorder_file_queue_bytes = Gauge(
+    'drakkar_recorder_file_queue_bytes',
+    'Characters of the large fields of the rows waiting to be written to the recorder file',
+)
+
 recorder_dropped_events = Counter(
     'drakkar_recorder_dropped_events_total',
     (
@@ -884,6 +892,11 @@ recorder_memory_write_failures = Counter(
 recorder_postgres_queue_rows = Gauge(
     'drakkar_recorder_postgres_queue_rows',
     'Rows waiting to be written to the recorder Postgres table',
+)
+
+recorder_postgres_queue_bytes = Gauge(
+    'drakkar_recorder_postgres_queue_bytes',
+    'Characters of text of the rows in the recorder Postgres queue, bounded by recorder.postgres.max_queue',
 )
 
 recorder_postgres_rows_written = Counter(

@@ -649,6 +649,8 @@ recorder:
     state_snapshots: true          # periodic worker-state snapshots. env: DK_RECORDER__SQLITE__STATE_SNAPSHOTS
     state_interval: 10s            # snapshot and resource-sample frequency, whole seconds.
                                    # env: DK_RECORDER__SQLITE__STATE_INTERVAL
+    max_queue: 128MiB              # most text in the file queue (stdout, stderr, metadata, args), 16MiB to 1GiB;
+                                   # past it the oldest rows leave the file queue. env: DK_RECORDER__SQLITE__MAX_QUEUE
 
   # --- Archives of sealed files; used only with provider sqlite (see local-databases.md#archiving) ---
   archive:

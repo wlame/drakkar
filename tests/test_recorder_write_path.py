@@ -5,6 +5,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections import deque
 from unittest.mock import AsyncMock
 
 import pytest
@@ -14,6 +15,7 @@ from drakkar.config import RecorderConfig
 from drakkar.metrics import (
     recorder_buffer_size,
     recorder_dropped_events,
+    recorder_file_queue_bytes,
     recorder_memory_evicted_rows,
     recorder_memory_write_failures,
 )
@@ -347,6 +349,104 @@ async def test_buffer_size_gauge_reports_intake_plus_file_queue(sqlite_recorder)
     _record_many(rec, 2, first_offset=5)
 
     assert recorder_buffer_size._value.get() == 7
+
+
+# --- the byte bound of the file queue ---
+
+
+def _heavy_pair(row_id: int, stdout_chars: int) -> tuple[int, tuple]:
+    event = {'ts': time.time(), 'event': 'task_completed', 'stdout': 'x' * stdout_chars, 'metadata': '{}'}
+    return row_id, core_mod._row_tuple(row_id, event)
+
+
+def _queued_ids(rec: EventRecorder) -> list[int]:
+    return [row_id for row_id, _ in rec._file_queue]
+
+
+async def test_file_queue_bytes_stay_exact_across_append_pop_requeue_and_clear(sqlite_recorder, monkeypatch):
+    rec = sqlite_recorder
+    rec._append_file_queue([_heavy_pair(1, 10), _heavy_pair(2, 20), _heavy_pair(3, 30)])
+    assert rec._file_queue_bytes == 66
+    real_commit = rec._db.commit
+    monkeypatch.setattr(rec._db, 'commit', AsyncMock(side_effect=sqlite3.OperationalError('disk I/O error')))
+
+    await rec._stage_file()
+    assert _queued_ids(rec) == [1, 2, 3]
+    assert rec._file_queue_bytes == 66
+
+    monkeypatch.setattr(rec._db, 'commit', real_commit)
+    await rec._stage_file()
+    assert rec._file_queue_bytes == 0
+
+    rec._append_file_queue([_heavy_pair(4, 40)])
+    rec._last_breath_flush()
+    assert rec._file_queue_bytes == 0
+
+
+def test_file_queue_requeue_into_a_full_queue_takes_off_the_bytes_of_the_rows_pushed_out(tmp_path):
+    rec = _recorder('sqlite', storage_dir=str(tmp_path))
+    rec._file_queue = deque(maxlen=3)
+    rec._append_file_queue([_heavy_pair(1, 10)])
+    batch = [rec._pop_file_queue()]
+    rec._append_file_queue([_heavy_pair(2, 20), _heavy_pair(3, 30), _heavy_pair(4, 40)])
+
+    rec._requeue_front(rec._file_queue, batch)
+
+    assert _queued_ids(rec) == [1, 2, 3]
+    assert rec._file_queue_bytes == 12 + 22 + 32
+
+
+def test_file_queue_past_the_byte_bound_drops_the_oldest_rows_and_counts_them(tmp_path):
+    rec = _recorder('sqlite', storage_dir=str(tmp_path), sqlite={'max_queue': '16MiB'})
+    six_mib = 6 * 1024 * 1024
+    before = recorder_dropped_events._value.get()
+
+    rec._append_file_queue([_heavy_pair(1, six_mib), _heavy_pair(2, six_mib), _heavy_pair(3, six_mib)])
+
+    assert _queued_ids(rec) == [2, 3]
+    assert rec._file_queue_bytes == 2 * (six_mib + 2)
+    assert recorder_dropped_events._value.get() - before == 1
+
+
+def test_file_queue_drops_one_row_larger_than_the_byte_bound_alone(tmp_path):
+    rec = _recorder('sqlite', storage_dir=str(tmp_path), sqlite={'max_queue': '16MiB'})
+    rec._append_file_queue([_heavy_pair(1, 10)])
+    before = recorder_dropped_events._value.get()
+
+    rec._append_file_queue([_heavy_pair(2, 17 * 1024 * 1024), _heavy_pair(3, 10)])
+
+    assert _queued_ids(rec) == [1, 3]
+    assert rec._file_queue_bytes == 24
+    assert recorder_dropped_events._value.get() - before == 1
+
+
+async def test_file_wait_returns_at_half_the_byte_bound(tmp_path):
+    rec = _recorder('sqlite', storage_dir=str(tmp_path), flush_interval='600s', sqlite={'max_queue': '16MiB'})
+    # Not started: the real file loop would drain the queue out from under the wait.
+    rec._running = True
+    rec._append_file_queue([_heavy_pair(1, 8 * 1024 * 1024)])
+
+    await asyncio.wait_for(rec._wait_until_due(rec._file_queue, bytes_due=rec._file_queue_bytes_due), WAIT_SECONDS)
+
+
+async def test_file_wait_holds_below_half_the_byte_bound(tmp_path):
+    rec = _recorder('sqlite', storage_dir=str(tmp_path), flush_interval='600s', sqlite={'max_queue': '16MiB'})
+    rec._running = True
+    rec._append_file_queue([_heavy_pair(1, 7 * 1024 * 1024)])
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(rec._wait_until_due(rec._file_queue, bytes_due=rec._file_queue_bytes_due), 0.6)
+
+
+async def test_file_queue_bytes_gauge_reports_the_large_fields_of_the_queued_rows(sqlite_recorder):
+    rec = sqlite_recorder
+    rec._record({**_event(0), 'stdout': 'x' * 100, 'stderr': 'y' * 20})
+
+    await rec.flush_memory()
+
+    assert len(rec._file_queue) == 1
+    assert recorder_file_queue_bytes._value.get() == 120
+    assert recorder_file_queue_bytes._name == 'drakkar_recorder_file_queue_bytes'
 
 
 # --- failure matrix ---

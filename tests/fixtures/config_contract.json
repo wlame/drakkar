@@ -1689,6 +1689,30 @@
       "path": "recorder.postgres.max_queue"
     },
     {
+      "name": "sqlite_queue_too_small",
+      "yaml": {
+        "recorder": {
+          "sqlite": {
+            "max_queue": "15MiB"
+          }
+        }
+      },
+      "message": "recorder.sqlite.max_queue must be from 16MiB to 1GiB, got 15MiB",
+      "path": "recorder.sqlite.max_queue"
+    },
+    {
+      "name": "sqlite_queue_too_large",
+      "yaml": {
+        "recorder": {
+          "sqlite": {
+            "max_queue": "1025MiB"
+          }
+        }
+      },
+      "message": "recorder.sqlite.max_queue must be from 16MiB to 1GiB, got 1025MiB",
+      "path": "recorder.sqlite.max_queue"
+    },
+    {
       "name": "postgres_initial_retention_fraction",
       "yaml": {
         "recorder": {
