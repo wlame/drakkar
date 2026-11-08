@@ -126,7 +126,7 @@ esac
 slice_check=$(python3 -c '
 import sqlite3, sys
 db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
-tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = \"table\"")}
+tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type = ?", ("table",))}
 missing = [name for name in ("events", "slice", "slice_sources") if name not in tables]
 if missing:
     print("missing tables " + ", ".join(missing))

@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Scenario: backpressure in tasks and bytes holds under load.
+# Scenario: the backpressure task cap holds under load.
+#
+# Only the task cap is exercised. The byte cap cannot be reached by this
+# handler (16 MiB, the least the config allows, against at most a few
+# pending tasks with stdin under 1 KiB), so the byte check below is a
+# sanity bound, not a test of the byte path.
 #
 # fast-worker-1 runs with small caps (docker-compose.yml):
 # executor.max_pending_tasks 4 and executor.max_pending_bytes 16MiB. The fast
@@ -240,4 +245,4 @@ read -r distinct_keys missing_count missing_sample <<<"$delivery"
     || fail "${missing_count} of ${TOTAL_MESSAGES} request ids have no record on ${SINK_TOPIC} (${distinct_keys} distinct keys); first missing: ${missing_sample}"
 ok "every one of ${TOTAL_MESSAGES} request ids is on ${SINK_TOPIC} (${distinct_keys} distinct keys)"
 
-pass "peak ${max_tasks} pending tasks (cap ${task_cap}, allowed ${task_bound}), peak ${max_bytes} pending bytes (cap ${byte_cap}), Prometheus peak ${prometheus_peak}, admission wait ${admission_wait}s at the task cap, ${TOTAL_MESSAGES} request ids delivered to ${SINK_TOPIC}"
+pass "task cap: peak ${max_tasks} pending tasks (cap ${task_cap}, allowed ${task_bound}); byte sanity bound only: peak ${max_bytes} pending bytes (cap ${byte_cap}, not reachable here); Prometheus peak ${prometheus_peak}, admission wait ${admission_wait}s at the task cap, ${TOTAL_MESSAGES} request ids delivered to ${SINK_TOPIC}"
