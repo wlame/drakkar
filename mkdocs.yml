@@ -75,6 +75,7 @@ nav:
   - Webapp: webapp.md
   - Executor: executor.md
   - Observability: observability.md
+  - Operator UI Reference (every value on every page): ui-reference.md
   - Kafka Read API (inspect topics from the UI server): kafka-read.md
   - Consume Pause (timed debug pause from the Live page): consume-pause.md
   - Debugging Bottlenecks: debugging-bottlenecks.md

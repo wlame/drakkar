@@ -253,6 +253,10 @@ the steps of the upgrade and the changes of behaviour.
   `drakkar_recorder_dropped_events_total`; the memory store keeps them. The file
   loop also starts at half of the bound. New gauges:
   `drakkar_recorder_file_queue_bytes` and `drakkar_recorder_postgres_queue_bytes`.
+- **Docs: Operator UI reference and full metrics reference.** A new page lists every
+  value of every UI page and tab, its source, its refresh and its metric. The
+  metrics reference names every metric, the default process and Python metrics, and
+  what counts toward the memory of a worker.
 - **Databases tab: where the data is.** `GET /api/v1/debug/databases` answers
   `worker`, and two new parts: `recorder` (the effective provider, the memory
   bounds, the rotation and the next archive slot, or the Postgres table and this
