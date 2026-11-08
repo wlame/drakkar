@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-11-09
+
 ### Security
 
 - Update `certifi` to 2026.10.23, `dnspython` to 2.9.1 and `pymongo` to 4.18.3. These versions fix the advisories that `pip-audit` reports for the earlier versions.
