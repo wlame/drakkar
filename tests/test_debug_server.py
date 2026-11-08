@@ -365,10 +365,29 @@ class TestBuildPrometheusLinks:
         links = resp.json()['links']
         assert set(links) >= {'card_links', 'worker_links', 'cluster_links'}
         urls = ' '.join(_all_link_urls(links))
-        assert 'drakkar_offset_lag' in urls
         assert 'drakkar_messages_consumed_total' in urls
         # cluster links are present when prometheus.cluster_label is set
         assert links['cluster_links']
+
+    async def test_prometheus_lag_links_use_broker_lag_and_pending_offsets(self, mock_recorder, mock_app):
+        cfg = UIConfig(
+            enabled=True,
+            prometheus={'url': 'http://prom:9090', 'rate_interval': '5m', 'cluster_label': 'cluster="prod"'},
+        )
+        mock_recorder.storage_dir = '/tmp'
+        fastapi_app = create_ui_app(cfg, mock_recorder, mock_app)
+
+        transport = ASGITransport(app=fastapi_app)
+        async with AsyncClient(transport=transport, base_url='http://test') as c:
+            resp = await c.get('/api/v1/dashboard')
+
+        links = resp.json()['links']
+        assert 'drakkar_consumer_lag' in links['card_links']['lag']
+        health = next(g for g in links['worker_links'] if g['category'] == 'Health')
+        by_name = dict(health['links'])
+        assert 'drakkar_consumer_lag' in by_name['Consumer lag']
+        assert 'drakkar_offset_lag' in by_name['Pending offsets']
+        assert 'drakkar_consumer_lag' in dict(links['cluster_links'])['Total lag (cluster)']
 
     async def test_prometheus_links_no_cluster_label(self, mock_recorder, mock_app):
         """When prometheus.cluster_label is empty, cluster_links should be empty."""

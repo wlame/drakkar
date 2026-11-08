@@ -191,3 +191,48 @@ async def test_start_logs_the_wall_clock_alignment_window(monkeypatch):
     interval = source._context().config.sources.kafka.startup_align.interval
     assert waiting['target_wall_unix'] % interval == 0
     assert done['slept_seconds'] == 0.25
+
+
+async def test_lag_refresh_sets_gauge_for_assigned_partitions(monkeypatch):
+    from drakkar.metrics import consumer_lag
+
+    source, fake = _source_with_fake_consumer(monkeypatch)
+    fake.cached_broker_lag = AsyncMock(return_value={7: 42})
+    await source.start()
+    source.processors[7] = MagicMock()
+
+    await source._refresh_lag_once()
+
+    assert consumer_lag.labels(partition='7')._value.get() == 42
+    fake.cached_broker_lag.assert_awaited_once_with([7])
+    consumer_lag.remove('7')
+    await source.stop(time.monotonic() + 1)
+
+
+async def test_revoke_removes_the_lag_label(monkeypatch):
+    from drakkar.metrics import consumer_lag
+
+    source, _ = _source_with_fake_consumer(monkeypatch)
+    consumer_lag.labels(partition='8').set(5)
+    processor = MagicMock()
+    processor.stop = AsyncMock()
+    source.processors[8] = processor
+
+    await source.on_revoke([8])
+
+    assert '8' not in {sample.labels['partition'] for sample in consumer_lag.collect()[0].samples}
+
+
+async def test_lag_refresh_failure_is_logged_once_and_not_raised(monkeypatch):
+    source, fake = _source_with_fake_consumer(monkeypatch)
+    fake.cached_broker_lag = AsyncMock(side_effect=RuntimeError('boom'))
+    await source.start()
+
+    with capture_logs() as logs:
+        await source._refresh_lag_once()
+        await source._refresh_lag_once()
+
+    failures = [entry for entry in logs if entry['event'] == 'consumer_lag_refresh_failed']
+    assert len(failures) == 1
+    assert failures[0]['error'] == 'boom'
+    await source.stop(time.monotonic() + 1)

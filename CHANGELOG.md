@@ -240,6 +240,12 @@ the steps of the upgrade and the changes of behaviour.
   `drakkar_storage_free_bytes`. The host metrics are set at each `resource_sample`.
   Fix: `drakkar_runtime_health_state` is read at scrape time, so it shows 2 during
   a hard stall; before, it kept the last state that the event loop set.
+- **Broker lag metric.** New: `drakkar_consumer_lag{partition}`, the high watermark
+  minus the offset this worker committed. The Kafka source refreshes it every 10
+  seconds from cached watermarks, so it sends no broker request. The Prometheus links
+  "Consumer lag" and "Total lag (cluster)" and the lag tile use it. A new link
+  "Pending offsets" shows `drakkar_offset_lag`, which counts the pending offsets of
+  this worker.
 - **Databases tab: where the data is.** `GET /api/v1/debug/databases` answers
   `worker`, and two new parts: `recorder` (the effective provider, the memory
   bounds, the rotation and the next archive slot, or the Postgres table and this

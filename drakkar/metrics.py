@@ -280,7 +280,17 @@ partition_queue_size = Gauge(
 
 offset_lag = Gauge(
     'drakkar_offset_lag',
-    'Number of pending (uncommitted) offsets per partition',
+    'Number of pending (uncommitted) offsets of this worker per partition',
+    ['partition'],
+)
+
+# Broker lag: the high watermark minus the offset this worker committed, the
+# value of the Dashboard lag tile. Set every 10 s from cached watermarks, so
+# it costs no broker request; a partition without a cached watermark or a
+# commit has no sample, and a revoked partition's sample is removed.
+consumer_lag = Gauge(
+    'drakkar_consumer_lag',
+    'Broker lag per partition: high watermark minus the offset this worker committed',
     ['partition'],
 )
 

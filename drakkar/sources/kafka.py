@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import time
 from collections.abc import Coroutine
@@ -17,12 +18,14 @@ from drakkar.metrics import (
     assigned_partitions,
     backpressure_active,
     consumer_idle,
+    consumer_lag,
     drain_timeout_hit,
     executor_idle_waste,
     messages_unassigned_dropped,
     total_queued,
 )
 from drakkar.partition import PartitionProcessor
+from drakkar.providers.resilience import RateLimitedLog
 from drakkar.timefmt import format_rfc3339_micro
 from drakkar.utils import wait_for_aligned_startup
 
@@ -41,6 +44,9 @@ POLL_IDLE_SLEEP = 0.05
 # let a step that is only waiting on an already-settled future finish, so it
 # never gets zero.
 MIN_TEARDOWN_STEP_SECONDS = 0.5
+
+# How often the broker-lag gauge is refreshed from the cached watermarks.
+LAG_REFRESH_INTERVAL_SECONDS = 10.0
 
 
 def _remaining(deadline: float) -> float:
@@ -86,6 +92,9 @@ class KafkaSource:
         # Set by ``drain``; ``stop`` commits final offsets only when it is True.
         self._drained_cleanly = False
         self._ctx: SourceContext | None = None
+        self._lag_refresh_task: asyncio.Task | None = None
+        # One failure line per 60 s, however many refreshes fail.
+        self._lag_failure_log = RateLimitedLog(time.monotonic)
 
     def bind(self, ctx: SourceContext) -> None:
         """Receive the worker context. Called once, before ``start``."""
@@ -129,6 +138,36 @@ class KafkaSource:
             on_revoke=self.on_revoke,
         )
         await self.consumer.subscribe()
+        self._lag_refresh_task = asyncio.create_task(self._refresh_lag_forever(), name='kafka:lag-refresh')
+
+    async def _refresh_lag_forever(self) -> None:
+        """Refresh the broker-lag gauge every ``LAG_REFRESH_INTERVAL_SECONDS`` until cancelled."""
+        while True:
+            await asyncio.sleep(LAG_REFRESH_INTERVAL_SECONDS)
+            await self._refresh_lag_once()
+
+    async def _refresh_lag_once(self) -> None:
+        """Set ``drakkar_consumer_lag`` for the assigned partitions; a failure is logged and never raised."""
+        consumer = self.consumer
+        if consumer is None:
+            return
+        try:
+            lag = await consumer.cached_broker_lag(sorted(self.processors))
+        except Exception as exc:
+            suppressed = self._lag_failure_log.admit('lag_refresh')
+            if suppressed is not None:
+                logger.warning(
+                    'consumer_lag_refresh_failed',
+                    category='kafka',
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    suppressed=suppressed,
+                )
+            return
+        for pid, value in lag.items():
+            # A revoke during the read removed the label; do not bring it back.
+            if pid in self.processors:
+                consumer_lag.labels(partition=str(pid)).set(value)
 
     async def run(self) -> None:
         """Main polling loop with backpressure via Kafka pause/resume.
@@ -406,6 +445,11 @@ class KafkaSource:
                     count=len(bg_snapshot),
                 )
 
+        if self._lag_refresh_task is not None:
+            self._lag_refresh_task.cancel()
+            await asyncio.gather(self._lag_refresh_task, return_exceptions=True)
+            self._lag_refresh_task = None
+
         if self.consumer:
             try:
                 await self.consumer.close()
@@ -530,6 +574,8 @@ class KafkaSource:
             self.stalled_partitions.discard(pid)
             self.dead_partitions_paused.discard(pid)
             processor = self.processors.pop(pid, None)
+            with contextlib.suppress(KeyError):
+                consumer_lag.remove(str(pid))
             if processor:
                 to_stop.append(processor)
 

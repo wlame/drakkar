@@ -569,3 +569,47 @@ def test_consumer_reads_group_and_topic_from_source_config(mock_cls):
     )
     assert consumer.source_topic == 't'
     assert consumer.consumer_group == 'g'
+
+
+def _consumer_with_cached_watermarks(mock_cls, kafka_config, kafka_source_config, watermarks, committed):
+    """A consumer whose cached watermark reads come from ``watermarks`` (partition -> (low, high))."""
+    mock_inner = AsyncMock()
+
+    async def cached_read(tp, **kwargs):
+        assert kwargs == {'cached': True}
+        return watermarks[tp.partition]
+
+    mock_inner.get_watermark_offsets.side_effect = cached_read
+    mock_cls.return_value = mock_inner
+    consumer = KafkaConsumer(connection=kafka_config, source=kafka_source_config)
+    consumer._offsets_committed_here.update(committed)
+    return consumer, mock_inner
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_cached_broker_lag_is_high_watermark_minus_own_commit(mock_cls, kafka_config, kafka_source_config):
+    consumer, mock_inner = _consumer_with_cached_watermarks(
+        mock_cls, kafka_config, kafka_source_config, {0: (0, 150), 1: (0, 90)}, {0: 100, 1: 120}
+    )
+
+    lag = await consumer.cached_broker_lag([0, 1])
+
+    assert lag == {0: 50, 1: 0}
+    mock_inner.committed.assert_not_called()
+
+
+@patch('drakkar.consumer.AIOConsumer')
+async def test_cached_broker_lag_skips_partition_without_cached_watermark_or_commit(
+    mock_cls, kafka_config, kafka_source_config
+):
+    consumer, _ = _consumer_with_cached_watermarks(
+        mock_cls,
+        kafka_config,
+        kafka_source_config,
+        {0: (OFFSET_INVALID, OFFSET_INVALID), 1: (0, 80), 2: (0, 80)},
+        {0: 10, 2: 70},
+    )
+
+    lag = await consumer.cached_broker_lag([0, 1, 2])
+
+    assert lag == {2: 10}

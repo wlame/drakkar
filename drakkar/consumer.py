@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import structlog
-from confluent_kafka import KafkaError, TopicPartition
+from confluent_kafka import OFFSET_INVALID, KafkaError, TopicPartition
 from confluent_kafka.aio import AIOConsumer
 
 from drakkar.config import KafkaConnectionConfig, KafkaSourceConfig
@@ -255,6 +255,27 @@ class KafkaConsumer:
                 'lag': max(0, high - start),
             }
         return result
+
+    async def cached_broker_lag(self, partition_ids: list[int]) -> dict[int, int]:
+        """Broker lag per partition from cached watermarks and this worker's own commits.
+
+        Sends no broker request: the high watermark is the value librdkafka
+        keeps from its fetch responses, and the committed offset is this
+        worker's last commit. A partition with no cached watermark yet, or
+        with no commit made here, is left out. Lag is computed as in
+        ``get_partition_lag``. A failed read raises to the caller.
+        """
+        lag: dict[int, int] = {}
+        for pid in partition_ids:
+            committed = self._offsets_committed_here.get(pid)
+            if committed is None:
+                continue
+            tp = TopicPartition(self._source.topic, pid)
+            _low, high = await self._consumer.get_watermark_offsets(tp, cached=True)
+            if high == OFFSET_INVALID:
+                continue
+            lag[pid] = max(0, high - committed)
+        return lag
 
     async def _fetch_committed(self, partition_ids: list[int]) -> dict[int, int]:
         """Committed offsets the broker reports, by partition, from one batched call.

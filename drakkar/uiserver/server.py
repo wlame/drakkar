@@ -494,7 +494,7 @@ class UIDeps:
 
         # Links for dashboard stat cards (worker-filtered)
         card_links = {
-            'lag': _graph_url(f'drakkar_offset_lag{{{wf}}}'),
+            'lag': _graph_url(f'drakkar_consumer_lag{{{wf}}}'),
             'consumed': _graph_url(f'rate(drakkar_messages_consumed_total{{{wf}}}[{rate}])'),
             'completed': _graph_url(f'rate(drakkar_executor_tasks_total{{{wf},status="completed"}}[{rate}])'),
             'failed': _graph_url(f'rate(drakkar_executor_tasks_total{{{wf},status="failed"}}[{rate}])'),
@@ -547,7 +547,8 @@ class UIDeps:
             {
                 'category': 'Health',
                 'links': [
-                    ('Consumer lag', _graph_url(f'drakkar_offset_lag{{{wf}}}')),
+                    ('Consumer lag', _graph_url(f'drakkar_consumer_lag{{{wf}}}')),
+                    ('Pending offsets', _graph_url(f'drakkar_offset_lag{{{wf}}}')),
                     ('Queue sizes', _graph_url(f'drakkar_partition_queue_size{{{wf}}}')),
                     ('Backpressure', _graph_url(f'drakkar_backpressure_active{{{wf}}}')),
                     ('Pending tasks', _graph_url(f'drakkar_pending_tasks{{{wf}}}')),
@@ -577,7 +578,7 @@ class UIDeps:
         if cf:
             cluster_links = [
                 ('Consume rate (cluster)', _graph_url(f'sum(rate(drakkar_messages_consumed_total{{{cf}}}[{rate}]))')),
-                ('Total lag (cluster)', _graph_url(f'sum(drakkar_offset_lag{{{cf}}})')),
+                ('Total lag (cluster)', _graph_url(f'sum(drakkar_consumer_lag{{{cf}}})')),
                 (
                     'Task failures (cluster)',
                     _graph_url(f'sum(rate(drakkar_executor_tasks_total{{{cf},status="failed"}}[{rate}]))'),
