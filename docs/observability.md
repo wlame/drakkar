@@ -50,6 +50,7 @@ metrics:
 | `drakkar_executor_timeouts_total` | Counter | -- | Total tasks that exceeded `executor.task_timeout` and were killed |
 | `drakkar_executor_output_truncated_total` | Counter | `stream` (`stdout`, `stderr`) | Output streams truncated to `executor.max_stdout` / `executor.max_stderr`. One increment per truncated stream per task. Divide by the `drakkar_executor_tasks_total` rate for the fraction of tasks being truncated. |
 | `drakkar_task_retries_total` | Counter | -- | Total tasks retried after failure (via [on_error](handler.md#on_error) returning RETRY) |
+| `drakkar_executor_priority_fn_errors_total` | Counter | -- | Times `handler.task_priority(task)` raised while the pool computed a priority for a waiting task. The task keeps the default priority (its lowest source offset) and still runs. Any non-zero rate is almost always a handler bug. See [Executor](executor.md). |
 
 Average and percentiles come from the histograms with standard PromQL —
 task duration shown here, and the same shapes work for
@@ -157,6 +158,7 @@ Prometheus needed for a quick read.
 | `drakkar_consumer_lag` | Gauge | `partition` | Broker lag: the high watermark minus the offset this worker committed. This is the value of the Dashboard lag tile. The Kafka source refreshes it every 10 seconds from cached watermarks and sends no broker request for an active partition; a paused partition (backpressure, debug pause, stall) is queried from the broker, because it fetches nothing and its cached watermark goes stale. A partition with no cached watermark yet, or with no commit made by this worker, has no sample. The sample is removed when the partition is revoked |
 | `drakkar_partition_processor_deaths_total` | Counter | `partition`, `outcome` | Partition loops that exited on an unexpected error. `outcome="restarted"` came back; `outcome="dead"` gave up and now fails `/readyz`. Alert on any non-zero rate — see [Deployment](deployment.md#dead-partition-loops) |
 | `drakkar_backpressure_active` | Gauge | -- | Whether Kafka fetching is paused because queued messages reached `sources.kafka.max_queued_messages` (see [backpressure](performance.md#backpressure)). `1` = paused, `0` = flowing |
+| `drakkar_consume_pause_active` | Gauge | -- | Whether an operator [debug pause](consume-pause.md) from the Live page holds consuming. `1` = paused, `0` = flowing |
 | `drakkar_total_queued` | Gauge | -- | Total messages buffered in all partition queues plus in-flight tasks |
 | `drakkar_pending_tasks` | Gauge | -- | Tasks created and not yet settled: waiting for an executor slot, running, or in `on_task_complete` and its delivery. The actual count; reservations are not in it. New windows wait while it plus the reserved tasks reach `executor.max_pending_tasks`; it can pass the limit by the admitted window's fan-out beyond its estimate (normally one message) |
 | `drakkar_pending_bytes` | Gauge | -- | Bytes held for pending tasks and their results: task stdin plus stdout and stderr of results in hooks and delivery or kept for `on_message_complete` and `on_window_complete`. The actual count, reservations not included; new windows wait while it plus the reserved bytes reach `executor.max_pending_bytes` |
@@ -295,7 +297,7 @@ Emitted only when the worker has a recorder (`recorder.enabled` or `ui.enabled`,
 | `drakkar_recorder_requeue_overflow_total` | Counter | -- | Rows evicted from the tail of a full queue (`recorder.max_buffer_rows`) while a chunk is put back at its front. With a recorder file, a failed or cancelled file write puts its chunk back at the front of the file queue; a transient memory error (busy or locked) puts its chunk back at the front of the intake, and so does a cancelled memory write without a file. Rows recorded during the write can fill the queue. Any non-zero value is data loss; alert alongside `flush_batches_dropped_total`. |
 | `drakkar_recorder_memory_rows` | Gauge | -- | Rows in the events table of the recorder memory store |
 | `drakkar_recorder_memory_bytes` | Gauge | -- | Bytes of data in the recorder memory store: pages in use times the page size |
-| `drakkar_recorder_memory_allocated_bytes` | Gauge | -- | Database size of the recorder memory store, free pages included; the memory it holds is at least this. The process RSS is larger; see [RAM to plan](recent-events.md#ram-to-plan). |
+| `drakkar_recorder_memory_allocated_bytes` | Gauge | -- | Database size of the recorder memory store, free pages included; the memory it holds is at least this. The gauge counts SQLite pages. The in-memory buffer behind them grows by doubling and never shrinks, so it can be up to twice the largest size the database had, and at most 1 GiB. The process RSS is larger; see [RAM to plan](recent-events.md#ram-to-plan). |
 | `drakkar_recorder_memory_oldest_age_seconds` | Gauge | -- | Age in seconds of the oldest event in the recorder memory store, 0 when it is empty. Shows how much time the store really covers when the row cap or the budget binds first. |
 | `drakkar_recorder_memory_evicted_rows_total` | Counter | `reason` | Rows removed from the recorder memory store, by reason: `window`, `rows`, `bytes`, `gap`. |
 | `drakkar_recorder_memory_write_failures_total` | Counter | -- | Event chunks that could not be written to the recorder memory store. Final errors only; a busy or locked store is retried and logs `recorder_memory_write_retry`. |
@@ -366,9 +368,13 @@ Every call from the worker to a provider is one **operation**: the registry make
 | `drakkar_provider_breaker_open` | Gauge | `feature`, `provider` | `1` while the circuit breaker of that provider is open. A breaker that stays open means the provider is down; the operations are skipped and the log carries `provider_breaker_opened`. Alert on it. |
 | `drakkar_fleet_registry_errors_total` | Counter | `op` | Registry operations that failed or timed out, and loop iterations that raised. An operation counts once, retries included, and an operation with no attempt (open breaker, not started) does not count. `op` is `start`, `publish`, `list`, `withdraw` or `stop`. |
 | `drakkar_fleet_registry_duration_seconds` | Histogram | `op` | Duration of registry operations, all attempts included. |
+| `drakkar_fleet_peers` | Gauge | `state` (`online`, `offline`, `unknown`) | Peers in the last registry snapshot, by liveness state. This worker is not counted. See [Liveness](#liveness). |
+| `drakkar_fleet_registry_snapshot_age_seconds` | Gauge | -- | Seconds since the last successful registry refresh; 0 right after one. It grows while the provider does not answer. |
+| `drakkar_fleet_duplicate_worker_name_total` | Counter | -- | Other live instances seen publishing this worker's name. See [Duplicate worker names](fleet.md#duplicate-worker-names). |
+| `drakkar_fleet_peer_requests_total` | Counter | `endpoint` (`cache_changes`), `outcome` (`ok`, `http_error`, `timeout`, `transport_error`, `bad_body`) | Requests this worker sent to peer workers, by endpoint and outcome. |
+| `drakkar_fleet_peer_request_duration_seconds` | Histogram | `endpoint` | Time of one request this worker sent to a peer worker. |
 
-The other `drakkar_fleet_*` metrics (peers, snapshot age, duplicate worker
-names, peer requests) are in [Fleet registry — Metrics](fleet.md#metrics).
+More detail is in [Fleet registry — Metrics](fleet.md#metrics).
 
 The provider log events:
 
@@ -462,10 +468,66 @@ with `drakkar_uncommitted_offsets_at_stop` and
 the last-set value across restarts) to gauge how much in-flight work
 was lost.
 
-Some feature-specific metrics are documented on their own pages rather
-than here: [runtime health](runtime-health.md#what-you-see) (event-loop
-lag gauges and stall counters) and
-[consume pause](consume-pause.md#observability).
+#### Process and Python runtime metrics
+
+The metrics port also serves the default collectors of the Prometheus
+client library. They are not `drakkar_` metrics and carry no worker label of
+their own; Prometheus adds the target labels.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `process_resident_memory_bytes` | Gauge | Resident memory (RSS) of the worker process. |
+| `process_virtual_memory_bytes` | Gauge | Virtual memory size of the worker process. It includes reserved address space that uses no RAM, so it is much larger than RSS. |
+| `process_cpu_seconds_total` | Counter | User and system CPU time of the worker process. `rate()` of it is the number of cores the worker uses. |
+| `process_open_fds` | Gauge | Open file descriptors of the worker process. |
+| `process_max_fds` | Gauge | The limit on open file descriptors of the worker process. |
+| `process_start_time_seconds` | Gauge | Start time of the worker process, in seconds since the Unix epoch. `time() - process_start_time_seconds` is the uptime. |
+| `python_info` | Gauge | Always `1`. The labels `implementation`, `major`, `minor`, `patchlevel` and `version` name the Python interpreter. |
+| `python_gc_objects_collected_total` | Counter | Objects collected by the garbage collector, by `generation`. |
+| `python_gc_objects_uncollectable_total` | Counter | Objects the garbage collector found and could not free, by `generation`. A rising value points at a leak. |
+| `python_gc_collections_total` | Counter | Garbage collector runs, by `generation`. |
+
+Points to keep in mind:
+
+- The `process_*` metrics read `/proc`, so they exist on Linux only. On
+  other systems the port serves no `process_*` metric.
+- They cover the worker process only. Task subprocesses are separate
+  processes: their memory and CPU are not in `process_resident_memory_bytes`
+  or `process_cpu_seconds_total`. The subprocesses run in the same container
+  and count toward its memory limit. `drakkar_children_cpu_seconds_total`
+  gives the CPU time of the subprocesses that ended.
+- The Metrics tab of the Debug page hides the `process_*`, `python_*` and
+  `gc_*` families. Read them from the metrics port or from Prometheus.
+
+#### Memory of a worker
+
+A container memory limit counts more than the worker process:
+
+| Part | What it holds | Metric today |
+|------|---------------|--------------|
+| The worker process | The Python heap, the recorder memory store, the cache in memory, task stdin and outputs in flight | `process_resident_memory_bytes` for the whole process (Linux). Parts of it: `drakkar_recorder_memory_allocated_bytes` (a lower bound of the memory store, see the note on that row), `drakkar_cache_bytes_in_memory` (the size of the cached values, without object overhead), `drakkar_pending_bytes` (stdin and outputs of pending tasks) |
+| Task subprocesses | Everything the task programs allocate | None. The worker does not measure the memory of its subprocesses. |
+| Page cache | File pages the kernel keeps after reads and writes in the container: recorder files, the cache file, task files | None. The kernel can reclaim these pages, but they count in the cgroup usage until it does. |
+
+To split the usage of a container, read its cgroup (v2) files:
+
+- `memory.current`: the total memory charged to the cgroup, page cache
+  included. This is the value the limit `memory.max` is compared with.
+- `memory.stat`, line `anon`: anonymous memory (heaps and stacks) of every
+  process in the cgroup: the worker and its task subprocesses.
+- `memory.stat`, line `file`: page cache charged to the cgroup.
+
+`anon` minus `process_resident_memory_bytes` gives a rough figure for the
+task subprocesses; RSS also counts some file pages, so the figure is only an
+estimate. A worker killed by the memory limit is counted in
+`drakkar_suspected_oom_kills_total` at its next start (see
+[OOM / SIGKILL detection](#oom-sigkill-detection)).
+
+Feature pages explain some of these metrics in more depth:
+[runtime health](runtime-health.md#what-you-see),
+[host pressure](host-pressure.md),
+[consume pause](consume-pause.md#observability) and
+[fleet registry](fleet.md#metrics).
 
 ### User-Defined Metrics
 
@@ -649,6 +711,8 @@ ui:
 ```
 
 ### Pages
+
+The [Operator UI reference](ui-reference.md) lists every value of every page and tab: what it means, where it comes from, how often it updates, and the Prometheus metric that carries it.
 
 #### `/` -- Dashboard
 
