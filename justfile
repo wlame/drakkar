@@ -96,11 +96,18 @@ vendor-swagger version:
     echo "{{ version }}" > "$dir/VERSION"
     echo "vendored swagger-ui-dist {{ version }}; run 'just test'"
 
-# Dependency CVE scan (pip-audit against the installed environment).
+# Dependency CVE scan (pip-audit against the locked dependencies of every group).
 # Deliberately NOT part of `just ci`: a newly published CVE must fail the
 # security job without blocking every unrelated PR behind an unrelated gate.
 audit:
-    uv run --with=pip-audit pip-audit
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Audit exactly the locked dependencies (every group), not the
+    # environment pip-audit itself runs in: its own tools are not shipped.
+    requirements=$(mktemp)
+    trap 'rm -f "$requirements"' EXIT
+    uv export --frozen --all-groups --no-emit-project --format=requirements-txt --output-file="$requirements" >/dev/null
+    uvx pip-audit --requirement="$requirements" --disable-pip
 
 # ---------------------------------------------------------------------------
 # Tests

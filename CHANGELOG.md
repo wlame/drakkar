@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Update `certifi` to 2026.10.23, `dnspython` to 2.9.1 and `pymongo` to 4.18.3. These versions fix the advisories that `pip-audit` reports for the earlier versions.
+- `just audit` now checks the locked dependencies of every group. It no longer checks the tools of `pip-audit` itself.
+
 ## [3.0.0] - 2026-11-09
 
 Changes since 2.4.0. `docs/upgrading.md` has a row for every 2.4.0 config key,
