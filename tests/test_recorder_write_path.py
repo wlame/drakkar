@@ -408,6 +408,21 @@ def test_file_queue_past_the_byte_bound_drops_the_oldest_rows_and_counts_them(tm
     assert recorder_dropped_events._value.get() - before == 1
 
 
+def test_file_queue_requeue_past_the_byte_bound_drops_the_oldest_rows_and_counts_them_once(tmp_path):
+    rec = _recorder('sqlite', storage_dir=str(tmp_path), sqlite={'max_queue': '16MiB'})
+    six_mib = 6 * 1024 * 1024
+    rec._append_file_queue([_heavy_pair(1, six_mib)])
+    batch = [rec._pop_file_queue()]
+    rec._append_file_queue([_heavy_pair(2, six_mib), _heavy_pair(3, six_mib)])
+    before = recorder_dropped_events._value.get()
+
+    rec._requeue_front(rec._file_queue, batch)
+
+    assert _queued_ids(rec) == [2, 3]
+    assert rec._file_queue_bytes == 2 * (six_mib + 2)
+    assert recorder_dropped_events._value.get() - before == 1
+
+
 def test_file_queue_drops_one_row_larger_than_the_byte_bound_alone(tmp_path):
     rec = _recorder('sqlite', storage_dir=str(tmp_path), sqlite={'max_queue': '16MiB'})
     rec._append_file_queue([_heavy_pair(1, 10)])

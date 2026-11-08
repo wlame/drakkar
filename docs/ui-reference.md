@@ -55,7 +55,7 @@ times in a row shows "stale since" with the time of its last good answer.
 | Partitions | Partitions assigned to this worker now. | `drakkar_assigned_partitions` |
 | Executor Pool | Tasks running now / the size of the pool (`executor.max_executors`). | `drakkar_executor_pool_active` / `drakkar_executor_pool_max` |
 | Total Events | The sum of the consumed, completed, failed, produced and committed counters since the worker started. A commit counts once per commit. | UI only |
-| Consumer Lag | Broker lag summed over the assigned partitions: high watermark minus committed offset. The worker asks the broker at each poll. See [Operator UI](observability.md#operator-ui) for the rule when the broker reports no committed offset. | `sum(drakkar_consumer_lag)` |
+| Consumer Lag | Broker lag summed over the assigned partitions: high watermark minus committed offset. The worker asks the broker at each poll. See [Operator UI](observability.md#operator-ui) for the rule when the broker reports no committed offset. The tile uses the broker's committed offset, while `drakkar_consumer_lag` uses the commits of this worker only, so a partition that this worker has not committed yet has a value here and no metric sample. | `sum(drakkar_consumer_lag)` |
 | Consumed | Messages consumed since the worker started. | `drakkar_messages_consumed_total` |
 | Completed | Tasks whose subprocess exited with code 0, since the worker started. | `drakkar_executor_tasks_total{status="completed"}` |
 | Failed | Tasks that failed, since the worker started. | `drakkar_executor_tasks_total{status="failed"}` |
@@ -106,7 +106,7 @@ this worker no longer holds.
 | Last Consumed, Last Committed | Time of the newest `consumed` and `committed` row of the partition. | UI only |
 | Committed | The committed offset, from the broker; the worker's own last commit when the broker reports none. | UI only |
 | High WM | The high watermark, from the broker. | UI only |
-| Lag | High WM minus Committed. | `drakkar_consumer_lag{partition}` (refreshed every 10 seconds from cached watermarks, so it can differ a little) |
+| Lag | High WM minus Committed. The page uses the broker's committed offset, while `drakkar_consumer_lag` uses the commits of this worker only, so a partition that this worker has not committed yet has a value here and no metric sample. | `drakkar_consumer_lag{partition}` (refreshed every 10 seconds from cached watermarks, so it can differ a little) |
 | Queue | Messages waiting in the partition queue. | `drakkar_partition_queue_size{partition}` |
 | Pending | Offsets taken and not yet committed. | `drakkar_offset_lag{partition}` |
 | Consumed, Completed, Failed | Counts of the `consumed`, `task_completed` and `task_failed` rows that the recorder holds for the partition. With a recorder file, the rows of the live file; with the recorder off or on `postgres`, the rows of the memory window. See [what reads memory](recent-events.md#what-reads-memory-and-what-reads-the-file). | Partial: `drakkar_messages_consumed_total{partition}` (since start) |

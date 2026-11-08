@@ -2067,11 +2067,18 @@ class EventRecorder(EventWriter):
                 dropped += 1
             queue.append(pair)
             self._file_queue_bytes += size
-        while queue and self._file_queue_bytes > max_bytes:
-            self._file_queue_bytes -= _row_weight(queue.popleft()[1])
-            dropped += 1
+        dropped += self._trim_file_queue_bytes()
         if dropped:
             recorder_dropped_events.inc(dropped)
+
+    def _trim_file_queue_bytes(self) -> int:
+        """Drop the oldest pairs of the file queue until its bytes fit ``recorder.sqlite.max_queue``; return how many."""
+        queue = self._file_queue
+        dropped = 0
+        while queue and self._file_queue_bytes > self._file_queue_max_bytes:
+            self._file_queue_bytes -= _row_weight(queue.popleft()[1])
+            dropped += 1
+        return dropped
 
     def _pop_file_queue(self) -> tuple[int, tuple]:
         """Pop the oldest pair of the file queue and take its bytes off the total."""
@@ -2207,9 +2214,16 @@ class EventRecorder(EventWriter):
         """
         len_before = len(queue)
         batch_len = len(batch)
-        if queue is self._file_queue:
+        is_file_queue = queue is self._file_queue
+        if is_file_queue:
             self._requeue_file_bytes(batch)
         queue.extendleft(reversed(batch))
+        if is_file_queue:
+            # Rows appended while the write awaited can leave the queue above
+            # its byte bound; the oldest rows go, as in ``_append_file_queue``.
+            trimmed = self._trim_file_queue_bytes()
+            if trimmed:
+                recorder_dropped_events.inc(trimmed)
         maxlen = queue.maxlen
         if maxlen is not None:
             overflow = (len_before + batch_len) - maxlen

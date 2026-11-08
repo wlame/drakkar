@@ -1074,7 +1074,7 @@ Used only with provider `sqlite`; with provider `postgres` the block loads and i
 | `max_flush_retries` | `int` | `3` | >= 1 | How many times a flush batch is re-queued on a transient `OperationalError` (database is locked, disk I/O error) before the batch is dropped. On a drop `drakkar_recorder_flush_batches_dropped_total` ticks; on each retry `drakkar_recorder_flush_retries_total` ticks. |
 | `state_snapshots` | `bool` | `true` | | Periodically snapshot worker state (uptime, partitions, pool utilization, queue depth, counters) to the `worker_state` table. |
 | `state_interval` | duration | `10s` | whole seconds, >= `1s` | Time between worker state snapshots. |
-| `max_queue` | size | `128MiB` | `16MiB` to `1GiB` | The byte bound of the file queue: the characters of the stdout, stderr, metadata and args fields of the rows that wait for the file. Past it the oldest rows leave the file queue (the memory store keeps them) and count on `drakkar_recorder_dropped_events_total`; one row larger than the bound is dropped alone. The file loop starts early at half of it. See [Buffer Mechanics](observability.md#buffer-mechanics). |
+| `max_queue` | size | `128MiB` | `16MiB` to `1GiB` | The byte bound of the file queue: the characters of the stdout, stderr, metadata and args fields of the rows that wait for the file. Past it the oldest rows leave the file queue (the memory store keeps them) and count on `drakkar_recorder_dropped_events_total`; one row larger than the bound is dropped alone. A failed write puts its rows back at the front and the same trim runs. The file loop starts early at half of it. See [Buffer Mechanics](observability.md#buffer-mechanics). |
 
 ### History search (`recorder.search`)
 
