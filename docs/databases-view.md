@@ -57,7 +57,7 @@ The tab itself stays in the hash (`#databases`), and every other query key
 |---|---|---|
 | `db_view` | `files`, `postgres`, `slice`, `autodiscover` | `files` |
 | `db_worker` | a worker name, or `*` for every worker of the cluster | the serving worker |
-| `db_cluster`, `db_kind` | a history folder name; `sealed`, `archive` or `merged` | all |
+| `db_history_worker` | a worker name: the Files view shows only that worker's sealed files in the shared history | every worker |
 | `db_range` | `5m`, `15m`, `1h`, `6h`, `24h` | `15m` |
 | `db_from`, `db_to` | epoch seconds, whole numbers; both together replace `db_range` | none |
 | `db_scope` | `worker`, `cluster` | `worker` |
