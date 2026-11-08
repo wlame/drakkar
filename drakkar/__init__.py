@@ -1,6 +1,6 @@
 """Drakkar — Kafka subprocess orchestration framework."""
 
-__version__ = '2.4.0'
+__version__ = '3.0.0'
 
 from drakkar.annotations import AnnotatorLike
 from drakkar.app import DrakkarApp
