@@ -93,8 +93,12 @@ class KafkaSource:
         self._drained_cleanly = False
         self._ctx: SourceContext | None = None
         self._lag_refresh_task: asyncio.Task | None = None
-        # One failure line per 60 s, however many refreshes fail.
+        # One failure line per 60 s, however many refreshes or queries fail.
         self._lag_failure_log = RateLimitedLog(time.monotonic)
+        # Revoke drains running now. The lag refresh sends nothing while one
+        # runs (or after a stop request): its drain and final commit share one
+        # deadline and the consumer pool with every broker read.
+        self._revokes_in_progress = 0
 
     def bind(self, ctx: SourceContext) -> None:
         """Receive the worker context. Called once, before ``start``."""
@@ -149,25 +153,43 @@ class KafkaSource:
     async def _refresh_lag_once(self) -> None:
         """Set ``drakkar_consumer_lag`` for the assigned partitions; a failure is logged and never raised."""
         consumer = self.consumer
-        if consumer is None:
+        if consumer is None or not self._lag_refresh_allowed():
             return
         try:
-            lag = await consumer.cached_broker_lag(sorted(self.processors), self._paused_partitions())
+            lag = await consumer.cached_broker_lag(
+                sorted(self.processors),
+                self._paused_partitions(),
+                may_query=self._lag_refresh_allowed,
+                on_query_failure=self._log_lag_query_failure,
+            )
         except Exception as exc:
-            suppressed = self._lag_failure_log.admit('lag_refresh')
-            if suppressed is not None:
-                logger.warning(
-                    'consumer_lag_refresh_failed',
-                    category='kafka',
-                    error=str(exc),
-                    error_type=type(exc).__name__,
-                    suppressed=suppressed,
-                )
+            self._log_lag_refresh_failure(exc)
             return
         for pid, value in lag.items():
             # A revoke during the read removed the label; do not bring it back.
             if pid in self.processors:
                 consumer_lag.labels(partition=str(pid)).set(value)
+
+    def _lag_refresh_allowed(self) -> bool:
+        """Whether the lag refresh may send a broker read now: no revoke drain and no stop in progress."""
+        return not self._stop_requested and self._revokes_in_progress == 0
+
+    def _log_lag_query_failure(self, partition_id: int, exc: Exception) -> None:
+        """Log one failed watermark query of the refresh, under the refresh's one-line-per-60-s limit."""
+        self._log_lag_refresh_failure(exc, partition=partition_id)
+
+    def _log_lag_refresh_failure(self, exc: Exception, **context: int) -> None:
+        """Log a failure of the lag refresh at most once per 60 s; the gauge keeps its last values."""
+        suppressed = self._lag_failure_log.admit('lag_refresh')
+        if suppressed is not None:
+            logger.warning(
+                'consumer_lag_refresh_failed',
+                category='kafka',
+                error=str(exc),
+                error_type=type(exc).__name__,
+                suppressed=suppressed,
+                **context,
+            )
 
     def _paused_partitions(self) -> frozenset[int]:
         """Assigned partitions the consumer does not fetch from right now."""
@@ -588,7 +610,11 @@ class KafkaSource:
         assigned_partitions.set(len(self.processors))
 
         if to_stop:
-            await asyncio.gather(*(self._stop_processor(p) for p in to_stop))
+            self._revokes_in_progress += 1
+            try:
+                await asyncio.gather(*(self._stop_processor(p) for p in to_stop))
+            finally:
+                self._revokes_in_progress -= 1
 
         async def _on_revoke_with_ctx() -> None:
             bind_contextvars(hook='on_revoke', partitions=partition_ids)

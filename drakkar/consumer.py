@@ -5,7 +5,7 @@ Rebalance callbacks run on the event loop — no call_soon_threadsafe needed.
 """
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 import structlog
@@ -50,6 +50,18 @@ CONSUMER_MAX_WORKERS = 8
 # value starts at the low watermark — including ``error``, which never starts
 # reading on its own, so every retained message is backlog.
 AUTO_OFFSET_RESET_TO_END = frozenset({'largest', 'latest', 'end'})
+
+# The broker-lag refresh shares the consumer pool with ``poll`` (which runs the
+# rebalance callbacks) and the synchronous commit. Under backpressure every
+# partition is paused and needs a real watermark query, so the refresh queries
+# at most this many paused partitions per round, rotating through them across
+# rounds (the others keep their last sample), with at most two queries in
+# flight at once. A slow broker then holds at most two pool threads.
+LAG_REFRESH_MAX_QUERIED_PARTITIONS = 8
+LAG_REFRESH_MAX_QUERIES_IN_FLIGHT = 2
+
+# Called by the lag refresh for each failed watermark query: partition, error.
+LagQueryFailureCallback = Callable[[int, Exception], None]
 
 
 def _milliseconds(seconds: float) -> int:
@@ -113,6 +125,10 @@ class KafkaConsumer:
         # The last offset this worker committed per partition: the lag
         # fallback when the broker's committed() answer lacks a partition.
         self._offsets_committed_here: dict[int, int] = {}
+        # The lag refresh: the bound on its watermark queries in flight, and
+        # the last paused partition it queried, where the next round resumes.
+        self._lag_query_slots = asyncio.Semaphore(LAG_REFRESH_MAX_QUERIES_IN_FLIGHT)
+        self._last_lag_queried: int | None = None
         self._consumer = AIOConsumer(client_config, max_workers=CONSUMER_MAX_WORKERS)
 
     @property
@@ -257,36 +273,80 @@ class KafkaConsumer:
         return result
 
     async def cached_broker_lag(
-        self, partition_ids: list[int], paused_ids: frozenset[int] = frozenset()
+        self,
+        partition_ids: list[int],
+        paused_ids: frozenset[int] = frozenset(),
+        *,
+        may_query: Callable[[], bool] = lambda: True,
+        on_query_failure: LagQueryFailureCallback | None = None,
     ) -> dict[int, int]:
         """Broker lag per partition from this worker's own commits and the high watermark.
 
         An active partition uses the watermark librdkafka caches from its
         fetch responses and sends no broker request. A paused partition
         fetches nothing, so its cached watermark goes stale exactly while its
-        backlog grows; it gets a real query, run concurrently with the others
-        and bounded by ``LAG_QUERY_TIMEOUT_SECONDS``. A partition with no
-        commit made here, no cached watermark yet, or a failed query is left
-        out. Lag is computed as in ``get_partition_lag``. A failed cached
-        read raises to the caller.
+        backlog grows; it gets a real query bounded by
+        ``LAG_QUERY_TIMEOUT_SECONDS``. One call queries at most
+        ``LAG_REFRESH_MAX_QUERIED_PARTITIONS`` paused partitions, the next
+        ones after those of the previous call, with at most
+        ``LAG_REFRESH_MAX_QUERIES_IN_FLIGHT`` in flight; a paused partition
+        not queried this time is left out, so its gauge keeps its last value.
+
+        ``may_query`` is asked before every broker read; once it answers
+        False nothing more is sent and the partitions not read yet are left
+        out. A failed query leaves its partition out and goes to
+        ``on_query_failure``; it is not counted as a consumer error. A
+        partition with no commit made here or no cached watermark yet is left
+        out. A failed cached read raises to the caller.
         """
         committed = {
             pid: self._offsets_committed_here[pid] for pid in partition_ids if pid in self._offsets_committed_here
         }
-        queried_ids = [pid for pid in committed if pid in paused_ids]
-        queried = await asyncio.gather(*[self._query_watermarks(pid) for pid in queried_ids])
-        highs: dict[int, int | None] = {
-            pid: None if marks is None else marks[1] for pid, marks in zip(queried_ids, queried, strict=True)
-        }
+        queried_ids = self._next_lag_queries(sorted(pid for pid in committed if pid in paused_ids))
+        queried = await asyncio.gather(
+            *[self._query_refresh_watermark(pid, may_query, on_query_failure) for pid in queried_ids]
+        )
+        highs: dict[int, int | None] = dict(zip(queried_ids, queried, strict=True))
         for pid in committed:
-            if pid not in paused_ids:
-                tp = TopicPartition(self._source.topic, pid)
-                highs[pid] = (await self._consumer.get_watermark_offsets(tp, cached=True))[1]
+            if pid in paused_ids or not may_query():
+                continue
+            tp = TopicPartition(self._source.topic, pid)
+            highs[pid] = (await self._consumer.get_watermark_offsets(tp, cached=True))[1]
         return {
             pid: max(0, high - offset)
             for pid, offset in committed.items()
-            if (high := highs[pid]) is not None and high != OFFSET_INVALID
+            if (high := highs.get(pid)) is not None and high != OFFSET_INVALID
         }
+
+    def _next_lag_queries(self, candidates: Sequence[int]) -> list[int]:
+        """The paused partitions to query this round: the ones after the last queried, wrapping around."""
+        last = self._last_lag_queried
+        if last is not None:
+            later = [pid for pid in candidates if pid > last]
+            candidates = later + [pid for pid in candidates if pid <= last]
+        chosen = list(candidates[:LAG_REFRESH_MAX_QUERIED_PARTITIONS])
+        if chosen:
+            self._last_lag_queried = chosen[-1]
+        return chosen
+
+    async def _query_refresh_watermark(
+        self,
+        partition_id: int,
+        may_query: Callable[[], bool],
+        on_query_failure: LagQueryFailureCallback | None,
+    ) -> int | None:
+        """The high watermark of one paused partition from the broker, or ``None`` (skipped or failed)."""
+        async with self._lag_query_slots:
+            if not may_query():
+                return None
+            try:
+                tp = TopicPartition(self._source.topic, partition_id)
+                _, high = await self._consumer.get_watermark_offsets(tp, timeout=LAG_QUERY_TIMEOUT_SECONDS)
+            except Exception as e:
+                if on_query_failure is not None:
+                    on_query_failure(partition_id, e)
+                return None
+        return high
 
     async def _fetch_committed(self, partition_ids: list[int]) -> dict[int, int]:
         """Committed offsets the broker reports, by partition, from one batched call.

@@ -246,6 +246,8 @@ the steps of the upgrade and the changes of behaviour.
   "Consumer lag" and "Total lag (cluster)" and the lag tile use it. A new link
   "Pending offsets" shows `drakkar_offset_lag`, which counts the pending offsets of
   this worker.
+  A paused partition gets a real broker query: at most 8 partitions per refresh, in
+  turn, at most 2 queries at once, and no query during a revoke or a stop.
 - **Byte bound of the recorder file queue.** New key `recorder.sqlite.max_queue`
   (default `128MiB`, from `16MiB` to `1GiB`). It counts the characters of the
   stdout, stderr, metadata and args fields of the rows that wait for the file.

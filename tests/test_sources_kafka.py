@@ -204,7 +204,9 @@ async def test_lag_refresh_sets_gauge_for_assigned_partitions(monkeypatch):
     await source._refresh_lag_once()
 
     assert consumer_lag.labels(partition='7')._value.get() == 42
-    fake.cached_broker_lag.assert_awaited_once_with([7], frozenset())
+    args, kwargs = fake.cached_broker_lag.await_args
+    assert args == ([7], frozenset())
+    assert kwargs['may_query']() is True
     consumer_lag.remove('7')
     await source.stop(time.monotonic() + 1)
 
@@ -238,12 +240,20 @@ async def test_lag_refresh_failure_is_logged_once_and_not_raised(monkeypatch):
     await source.stop(time.monotonic() + 1)
 
 
-async def test_paused_partition_lag_uses_a_real_watermark_query(monkeypatch):
-    from drakkar.consumer import KafkaConsumer
+def _bare_consumer(committed: dict[int, int]):
+    """A KafkaConsumer with no client behind it, its own commits set to ``committed``."""
+    from drakkar.consumer import LAG_REFRESH_MAX_QUERIES_IN_FLIGHT, KafkaConsumer
 
     consumer = KafkaConsumer.__new__(KafkaConsumer)
     consumer._source = MagicMock(topic='t')
-    consumer._offsets_committed_here = {0: 10, 1: 10}
+    consumer._offsets_committed_here = dict(committed)
+    consumer._lag_query_slots = asyncio.Semaphore(LAG_REFRESH_MAX_QUERIES_IN_FLIGHT)
+    consumer._last_lag_queried = None
+    return consumer
+
+
+async def test_paused_partition_lag_uses_a_real_watermark_query(monkeypatch):
+    consumer = _bare_consumer({0: 10, 1: 10})
     calls = []
 
     async def watermarks(tp, **kwargs):
@@ -260,11 +270,7 @@ async def test_paused_partition_lag_uses_a_real_watermark_query(monkeypatch):
 
 
 async def test_failed_real_query_skips_only_that_paused_partition():
-    from drakkar.consumer import KafkaConsumer
-
-    consumer = KafkaConsumer.__new__(KafkaConsumer)
-    consumer._source = MagicMock(topic='t')
-    consumer._offsets_committed_here = {0: 10, 1: 10}
+    consumer = _bare_consumer({0: 10, 1: 10})
 
     async def watermarks(tp, **kwargs):
         if tp.partition == 1:
@@ -284,3 +290,138 @@ async def test_paused_partitions_are_all_assigned_ones_under_backpressure(monkey
     assert source._paused_partitions() == frozenset({2})
     source.paused = True
     assert source._paused_partitions() == frozenset({1, 2})
+
+
+def _real_query_recorder(consumer, delay: float = 0.0):
+    """Answer every real query with high watermark 500; return the queried partitions and the peak in flight."""
+    seen: dict = {'queried': [], 'in_flight': 0, 'peak': 0}
+
+    async def watermarks(tp, **kwargs):
+        if kwargs.get('cached'):
+            return (0, 100)
+        seen['queried'].append(tp.partition)
+        seen['in_flight'] += 1
+        seen['peak'] = max(seen['peak'], seen['in_flight'])
+        await asyncio.sleep(delay)
+        seen['in_flight'] -= 1
+        return (0, 500)
+
+    consumer._consumer = MagicMock(get_watermark_offsets=watermarks)
+    return seen
+
+
+async def test_lag_refresh_queries_at_most_eight_paused_partitions_rotating_across_rounds():
+    consumer = _bare_consumer({pid: 0 for pid in range(10)})
+    seen = _real_query_recorder(consumer)
+    paused = frozenset(range(10))
+
+    first = await consumer.cached_broker_lag(list(range(10)), paused)
+    second = await consumer.cached_broker_lag(list(range(10)), paused)
+
+    assert sorted(first) == list(range(8))
+    assert sorted(second) == [0, 1, 2, 3, 4, 5, 8, 9]
+    assert seen['queried'] == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5]
+
+
+async def test_lag_refresh_keeps_at_most_two_real_queries_in_flight():
+    consumer = _bare_consumer({pid: 0 for pid in range(8)})
+    seen = _real_query_recorder(consumer, delay=0.01)
+
+    lag = await consumer.cached_broker_lag(list(range(8)), frozenset(range(8)))
+
+    assert len(lag) == 8
+    assert seen['peak'] == 2
+
+
+async def test_lag_refresh_sends_nothing_once_may_query_answers_false():
+    consumer = _bare_consumer({0: 10, 1: 10})
+    seen = _real_query_recorder(consumer)
+
+    lag = await consumer.cached_broker_lag([0, 1], frozenset({1}), may_query=lambda: False)
+
+    assert lag == {}
+    assert seen['queried'] == []
+
+
+async def test_lag_refresh_query_failure_goes_to_the_callback_and_is_not_a_consumer_error():
+    from drakkar.metrics import consumer_errors
+
+    consumer = _bare_consumer({1: 10})
+
+    async def watermarks(tp, **kwargs):
+        raise RuntimeError('timed out')
+
+    consumer._consumer = MagicMock(get_watermark_offsets=watermarks)
+    failures = []
+    errors_before = consumer_errors._value.get()
+
+    with capture_logs() as logs:
+        lag = await consumer.cached_broker_lag(
+            [1], frozenset({1}), on_query_failure=lambda pid, exc: failures.append((pid, str(exc)))
+        )
+
+    assert lag == {}
+    assert failures == [(1, 'timed out')]
+    assert consumer_errors._value.get() == errors_before
+    assert not [entry for entry in logs if entry['event'] == 'lag_query_failed']
+
+
+async def test_lag_refresh_does_nothing_while_a_revoke_drains(monkeypatch):
+    source, fake = _source_with_fake_consumer(monkeypatch)
+    fake.cached_broker_lag = AsyncMock(return_value={})
+    await source.start()
+    source.processors[3] = MagicMock()
+    release = asyncio.Event()
+    revoked = MagicMock()
+
+    async def slow_stop(processor):
+        await release.wait()
+
+    monkeypatch.setattr(source, '_stop_processor', slow_stop)
+    source.processors[4] = revoked
+    revoke = asyncio.create_task(source.on_revoke([4]))
+    await asyncio.sleep(0)
+
+    await source._refresh_lag_once()
+    assert source._lag_refresh_allowed() is False
+    fake.cached_broker_lag.assert_not_awaited()
+
+    release.set()
+    await revoke
+    await source._refresh_lag_once()
+    fake.cached_broker_lag.assert_awaited_once()
+    await source.stop(time.monotonic() + 1)
+
+
+async def test_lag_refresh_does_nothing_after_a_stop_request(monkeypatch):
+    source, fake = _source_with_fake_consumer(monkeypatch)
+    fake.cached_broker_lag = AsyncMock(return_value={})
+    await source.start()
+
+    source.signal_stop()
+    await source._refresh_lag_once()
+
+    fake.cached_broker_lag.assert_not_awaited()
+    await source.stop(time.monotonic() + 1)
+
+
+async def test_lag_refresh_query_failures_share_one_rate_limited_line(monkeypatch):
+    source, fake = _source_with_fake_consumer(monkeypatch)
+
+    async def failing_refresh(partition_ids, paused_ids, *, may_query, on_query_failure):
+        on_query_failure(1, RuntimeError('slow broker'))
+        on_query_failure(2, RuntimeError('slow broker'))
+        return {}
+
+    fake.cached_broker_lag = failing_refresh
+    await source.start()
+
+    with capture_logs() as logs:
+        await source._refresh_lag_once()
+        await source._refresh_lag_once()
+
+    failures = [entry for entry in logs if entry['event'] == 'consumer_lag_refresh_failed']
+    assert len(failures) == 1
+    assert failures[0]['partition'] == 1
+    assert failures[0]['error'] == 'slow broker'
+    await source.stop(time.monotonic() + 1)
