@@ -61,9 +61,9 @@ the debug UI with its stacks expandable.
 
 Recovery back to `healthy` needs several consecutive clean ticks
 (hysteresis), so a loop hovering around the threshold emits one
-transition, not dozens. Every transition is logged, recorded as a
-`runtime_health` event, and reflected in the
-`drakkar_runtime_health_state` gauge.
+transition, not dozens. Every transition is logged and recorded as a
+`runtime_health` event. The `drakkar_runtime_health_state` gauge shows the
+state, and `stalled` as soon as the heartbeat is silent for `stall`.
 
 ## Lag episodes and verdicts
 
@@ -99,6 +99,10 @@ PSI, load) — and the **verdict**:
 | `starved` | little loop CPU, no dominant site (throttle/PSI evidence strengthens it) | the process wanted CPU and did not get it — host-level contention, not your code; see [Host Pressure](host-pressure.md) |
 | `inconclusive` | none of the above dominates | mixed or short episode; look at the raw numbers |
 
+Each closed episode also adds one to
+`drakkar_runtime_lag_episodes_total{verdict}`, so a dashboard can show
+how often the worker was `starved` against `blocked`.
+
 The `/runtime/health` snapshot carries `current_episode` (with a running
 verdict) and `recent_episodes` **from monitor memory**, so the Runtime
 tab shows the diagnosis *during* the incident even when the recorder's
@@ -126,8 +130,17 @@ button that runs the task census.
 | Metric | Type | Meaning |
 |---|---|---|
 | `drakkar_loop_lag_seconds` | histogram | lag per heartbeat tick |
+| `drakkar_loop_lag_peak_seconds` | gauge | largest tick lag of the last 60 s (the maximum of the lag window) |
 | `drakkar_runtime_health_state` | gauge | 0 = healthy, 1 = degraded, 2 = stalled |
+| `drakkar_runtime_heartbeat_age_seconds` | gauge | seconds since the last heartbeat |
 | `drakkar_runtime_stalls_total` | counter | stalls detected |
+| `drakkar_runtime_lag_episodes_total` | counter | lag episodes that ended, by `verdict` |
+
+The state, the heartbeat age and the lag peak are read at scrape time on
+the metrics server thread, not by the event loop. So a scrape during a
+hard stall reports state 2 and a growing heartbeat age, with the same
+rule as `GET /api/v1/runtime/health`. The executor queue has its own
+gauge, `drakkar_executor_pool_waiting`.
 
 **Flight recorder**: `runtime_health` events (state transitions +
 periodic samples), `runtime_stall` events (duration, captured stacks,

@@ -11,8 +11,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from prometheus_client import REGISTRY
 
-from drakkar import hostinfo
+from drakkar import hostinfo, metrics
 from drakkar.hostinfo import HostSampler
 
 MIB = 1024 * 1024
@@ -198,3 +199,118 @@ class TestNfsMountDeltas:
         meta = sampler.sample()
 
         assert [row['mount'] for row in meta['nfs_mounts']] == ['/mnt/data']
+
+
+def _metric(name: str, **labels: str) -> float:
+    """A sample value of the default registry; 0.0 for a series not created yet."""
+    return REGISTRY.get_sample_value(name, labels) or 0.0
+
+
+class TestPrometheusMetrics:
+    """The host and process metrics the sampler sets from the values it read.
+
+    Counters live in the process-wide registry, so these tests compare the
+    value before and after, and use mount names no other test uses.
+    """
+
+    def test_gauges_are_set_from_a_sample(self, monkeypatch):
+        monkeypatch.setattr(hostinfo, 'read_self_stats', lambda: (None, 17))
+        monkeypatch.setattr(hostinfo, 'read_open_fd_count', lambda: None)
+        monkeypatch.setattr(hostinfo, 'read_loadavg', lambda: (4.214, 3.051, 2.0))
+        monkeypatch.setattr(
+            hostinfo, 'read_pressure', lambda: {'cpu_some_avg10': 12.5, 'io_full_avg10': 3.1, 'mem_some_avg10': 0.7}
+        )
+        monkeypatch.setattr(hostinfo, 'read_cpu_throttle', lambda: None)
+        monkeypatch.setattr(hostinfo, 'read_nfs_mount_stats', lambda: None)
+        monkeypatch.setattr(hostinfo.os, 'statvfs', lambda _path: SimpleNamespace(f_bavail=10, f_frsize=4096))
+
+        HostSampler(storage_dir='/var/lib/drakkar/main/worker-1').sample()
+
+        assert _metric('drakkar_process_threads') == 17
+        assert _metric('drakkar_host_load', period='1m') == 4.214
+        assert _metric('drakkar_host_load', period='5m') == 3.051
+        assert _metric('drakkar_host_pressure_percent', resource='cpu', kind='some') == 12.5
+        assert _metric('drakkar_host_pressure_percent', resource='io', kind='full') == 3.1
+        assert _metric('drakkar_host_pressure_percent', resource='memory', kind='some') == 0.7
+        assert _metric('drakkar_storage_free_bytes') == 40960
+
+    def test_absent_values_leave_their_metrics_untouched(self, sampler):
+        metrics.process_threads.set(123)
+        metrics.host_load.labels(period='1m').set(7)
+        metrics.host_pressure_percent.labels(resource='io', kind='full').set(9)
+        metrics.storage_free_bytes.set(55)
+
+        sampler.sample()
+        sampler.sample()
+
+        assert _metric('drakkar_process_threads') == 123
+        assert _metric('drakkar_host_load', period='1m') == 7
+        assert _metric('drakkar_host_pressure_percent', resource='io', kind='full') == 9
+        assert _metric('drakkar_storage_free_bytes') == 55
+
+    def test_throttle_and_children_cpu_counters_add_the_deltas(self, sampler, monkeypatch):
+        throttle = iter([(100, 500_000), (103, 750_000)])
+        monkeypatch.setattr(hostinfo, 'read_cpu_throttle', lambda: next(throttle))
+        usages = iter(
+            [
+                SimpleNamespace(ru_utime=1.0, ru_stime=0.0),  # self, tick 1
+                SimpleNamespace(ru_utime=2.0, ru_stime=0.0),  # children, tick 1
+                SimpleNamespace(ru_utime=1.5, ru_stime=0.0),  # self, tick 2
+                SimpleNamespace(ru_utime=5.0, ru_stime=1.5),  # children, tick 2 (+4.5 s)
+            ]
+        )
+        monkeypatch.setattr(hostinfo.resource, 'getrusage', lambda _which: next(usages))
+        periods = _metric('drakkar_cgroup_cpu_throttled_periods_total')
+        throttled = _metric('drakkar_cgroup_cpu_throttled_seconds_total')
+        children = _metric('drakkar_children_cpu_seconds_total')
+
+        sampler.sample()
+        sampler.sample()
+
+        assert _metric('drakkar_cgroup_cpu_throttled_periods_total') == periods + 3
+        assert _metric('drakkar_cgroup_cpu_throttled_seconds_total') == pytest.approx(throttled + 0.25)
+        assert _metric('drakkar_children_cpu_seconds_total') == pytest.approx(children + 4.5)
+
+    def test_negative_deltas_are_skipped(self, sampler, monkeypatch):
+        throttle = iter([(100, 500_000), (2, 1_000)])
+        monkeypatch.setattr(hostinfo, 'read_cpu_throttle', lambda: next(throttle))
+        nfs = iter([{'/mnt/reset-case': (1000, 1000, 40_000)}, {'/mnt/reset-case': (10, 10, 100)}])
+        monkeypatch.setattr(hostinfo, 'read_nfs_mount_stats', lambda: next(nfs))
+        usages = iter(
+            [
+                SimpleNamespace(ru_utime=1.0, ru_stime=0.0),
+                SimpleNamespace(ru_utime=9.0, ru_stime=0.0),
+                SimpleNamespace(ru_utime=1.0, ru_stime=0.0),
+                SimpleNamespace(ru_utime=3.0, ru_stime=0.0),  # children went backwards
+            ]
+        )
+        monkeypatch.setattr(hostinfo.resource, 'getrusage', lambda _which: next(usages))
+        periods = _metric('drakkar_cgroup_cpu_throttled_periods_total')
+        throttled = _metric('drakkar_cgroup_cpu_throttled_seconds_total')
+        children = _metric('drakkar_children_cpu_seconds_total')
+
+        sampler.sample()
+        sampler.sample()
+
+        assert _metric('drakkar_cgroup_cpu_throttled_periods_total') == periods
+        assert _metric('drakkar_cgroup_cpu_throttled_seconds_total') == throttled
+        assert _metric('drakkar_children_cpu_seconds_total') == children
+        assert REGISTRY.get_sample_value('drakkar_nfs_operations_total', {'mount': '/mnt/reset-case'}) is None
+
+    def test_nfs_counters_are_labelled_per_mount(self, sampler, monkeypatch):
+        readings = iter(
+            [
+                {'/mnt/label-data': (1000, 1010, 40_000), '/mnt/label-quiet': (500, 500, 1_000)},
+                {'/mnt/label-data': (1100, 1130, 90_000), '/mnt/label-quiet': (500, 500, 1_000)},
+            ]
+        )
+        monkeypatch.setattr(hostinfo, 'read_nfs_mount_stats', lambda: next(readings))
+
+        sampler.sample()
+        sampler.sample()
+
+        assert _metric('drakkar_nfs_operations_total', mount='/mnt/label-data') == 100
+        assert _metric('drakkar_nfs_rtt_seconds_total', mount='/mnt/label-data') == 50.0
+        assert _metric('drakkar_nfs_retransmits_total', mount='/mnt/label-data') == 20
+        # A quiet mount has its series, at 0, from its first full interval.
+        assert REGISTRY.get_sample_value('drakkar_nfs_operations_total', {'mount': '/mnt/label-quiet'}) == 0

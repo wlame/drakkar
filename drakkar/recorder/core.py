@@ -509,8 +509,10 @@ class EventRecorder(EventWriter):
         # attribute so tests can shorten it.
         self._leftover_floor_seconds = LEFTOVER_FLOOR_SECONDS
         # Host resource sampling (RSS/CPU/fds/pressure/NFS) with the
-        # previous-tick state its rate fields need.
-        self._host_sampler = HostSampler()
+        # previous-tick state its rate fields need. The own folder sits
+        # under storage.dir, so its filesystem is the one whose free space
+        # the sampler reports.
+        self._host_sampler = HostSampler(storage_dir=storage_dir)
         self._running = False
         self._state_provider: Callable[[], dict] | None = None
         self._drakkar_config: DrakkarConfig | None = None

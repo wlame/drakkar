@@ -34,6 +34,27 @@ fail worker startup.
 PSI values are the kernel's precomputed 10-second averages, so the
 default 10-second sampling cadence reads them loss-free.
 
+### Prometheus metrics
+
+The same sample sets Prometheus metrics, so dashboards and alerts do not
+need the recorder. A key that is absent leaves its metric unset. The
+counters add the raw change since the previous sample (not the rounded
+values of the event), and a counter reset adds nothing for its interval.
+
+| Keys | Metric |
+|------|--------|
+| `load1`, `load5` | `drakkar_host_load{period="1m"}`, `drakkar_host_load{period="5m"}` |
+| `psi_*_avg10` | `drakkar_host_pressure_percent{resource, kind}`, with `resource` `cpu`, `io` or `memory` and `kind` `some` or `full` |
+| `cpu_throttled_periods`, `cpu_throttled_ms` | `drakkar_cgroup_cpu_throttled_periods_total`, `drakkar_cgroup_cpu_throttled_seconds_total` |
+| `nfs_mounts[]` | `drakkar_nfs_operations_total{mount}`, `drakkar_nfs_rtt_seconds_total{mount}`, `drakkar_nfs_retransmits_total{mount}` |
+| `threads` | `drakkar_process_threads` |
+| `cpu_children_pct` | `drakkar_children_cpu_seconds_total` (CPU seconds of reaped task subprocesses) |
+| none (metric only) | `drakkar_storage_free_bytes`: bytes free on the filesystem that holds `storage.dir` |
+
+The average NFS round trip per operation over five minutes is
+`rate(drakkar_nfs_rtt_seconds_total[5m]) / rate(drakkar_nfs_operations_total[5m])`.
+A quiet mount has its series at 0 from its first full interval.
+
 ## Reading it during an incident
 
 The pattern that motivated this page: tasks that normally track input

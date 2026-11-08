@@ -229,6 +229,17 @@ the steps of the upgrade and the changes of behaviour.
 
 ### Added
 
+- **Runtime and host metrics.** New: `drakkar_runtime_heartbeat_age_seconds`,
+  `drakkar_loop_lag_peak_seconds`, `drakkar_runtime_lag_episodes_total{verdict}`,
+  `drakkar_executor_pool_waiting`, `drakkar_host_load{period}`,
+  `drakkar_host_pressure_percent{resource,kind}`,
+  `drakkar_cgroup_cpu_throttled_periods_total`,
+  `drakkar_cgroup_cpu_throttled_seconds_total`, `drakkar_nfs_operations_total{mount}`,
+  `drakkar_nfs_rtt_seconds_total{mount}`, `drakkar_nfs_retransmits_total{mount}`,
+  `drakkar_process_threads`, `drakkar_children_cpu_seconds_total` and
+  `drakkar_storage_free_bytes`. The host metrics are set at each `resource_sample`.
+  Fix: `drakkar_runtime_health_state` is read at scrape time, so it shows 2 during
+  a hard stall; before, it kept the last state that the event loop set.
 - **Databases tab: where the data is.** `GET /api/v1/debug/databases` answers
   `worker`, and two new parts: `recorder` (the effective provider, the memory
   bounds, the rotation and the next archive slot, or the Postgres table and this

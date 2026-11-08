@@ -48,7 +48,14 @@ from typing import TYPE_CHECKING, Any, Literal
 import structlog
 
 from drakkar.hostinfo import read_cpu_throttle, read_loadavg, read_pressure, read_thread_cpu_ms
-from drakkar.metrics import loop_lag_seconds, runtime_health_state, runtime_stalls
+from drakkar.metrics import (
+    loop_lag_peak_seconds,
+    loop_lag_seconds,
+    runtime_health_state,
+    runtime_heartbeat_age_seconds,
+    runtime_lag_episodes,
+    runtime_stalls,
+)
 
 if TYPE_CHECKING:
     from drakkar.config import RuntimeHealthConfig
@@ -69,6 +76,10 @@ RECOVERY_TICKS = 5
 # from this field and never hardcodes it, so the readout stays correct if
 # the unit ever changes.
 UNIT_LABEL = 'tasks'
+
+# The span of drakkar_loop_lag_peak_seconds: the largest tick lag of the
+# last minute, read from the per-second lag window.
+LAG_PEAK_WINDOW_SECONDS = 60
 
 Verdict = Literal['blocked', 'cpu_bound', 'starved', 'inconclusive']
 
@@ -159,6 +170,18 @@ class _LagWindow:
                 bucket[3] += 1
             else:
                 self._buckets.append([second, lag, lag, 1])
+
+    def peak(self, wall_now: float, seconds: int) -> float:
+        """The largest lag (seconds) of the buckets of the last ``seconds`` seconds; 0.0 when none."""
+        oldest = int(wall_now) - seconds
+        peak = 0.0
+        with self._lock:
+            # Newest first: stop at the first bucket older than the span.
+            for bucket in reversed(self._buckets):
+                if bucket[0] <= oldest:
+                    break
+                peak = max(peak, bucket[1])
+        return peak
 
     def snapshot(self) -> list[dict[str, float]]:
         with self._lock:
@@ -311,6 +334,9 @@ class RuntimeHealthMonitor:
         # Last unit count the heartbeat computed; probes reuse it because
         # counting tasks from another thread is not possible.
         self._last_unit_count = -1
+        # True while the gauges read this monitor at scrape time; a monitor
+        # that never started leaves another monitor's functions alone.
+        self._scrape_installed = False
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -322,7 +348,7 @@ class RuntimeHealthMonitor:
         self._task = asyncio.get_running_loop().create_task(self._run(), name='runtime-health-heartbeat')
         self._thread = threading.Thread(target=self._sampler, name='runtime-health-sampler', daemon=True)
         self._thread.start()
-        runtime_health_state.set(STATE_VALUES['healthy'])
+        self._install_scrape_functions()
         logger.info(
             'runtime_health_started',
             category='runtime_health',
@@ -346,6 +372,36 @@ class RuntimeHealthMonitor:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        if self._scrape_installed:
+            self._freeze_scrape_functions()
+            self._scrape_installed = False
+
+    def _install_scrape_functions(self) -> None:
+        """Make the gauges read the monitor at scrape time.
+
+        The scrape runs on the metrics server thread, so a scrape during a
+        hard stall still sees the heartbeat age grow, while the heartbeat
+        task (which would set a value) cannot run. The functions read plain
+        attributes and the internally-locked lag window, as ``snapshot()``.
+        """
+        runtime_health_state.set_function(lambda: STATE_VALUES[self._effective_state()])
+        runtime_heartbeat_age_seconds.set_function(self._heartbeat_age)
+        loop_lag_peak_seconds.set_function(lambda: self._window.peak(time.time(), LAG_PEAK_WINDOW_SECONDS))
+        self._scrape_installed = True
+
+    def _freeze_scrape_functions(self) -> None:
+        """Replace the scrape-time functions with the values read at stop.
+
+        A function that kept reading a stopped monitor would report a
+        heartbeat age that grows for ever and, past ``stall``, a stall that
+        is not there.
+        """
+        state_value = STATE_VALUES[self._effective_state()]
+        heartbeat_age = self._heartbeat_age()
+        lag_peak = self._window.peak(time.time(), LAG_PEAK_WINDOW_SECONDS)
+        runtime_health_state.set_function(lambda: state_value)
+        runtime_heartbeat_age_seconds.set_function(lambda: heartbeat_age)
+        loop_lag_peak_seconds.set_function(lambda: lag_peak)
 
     # -- heartbeat task --------------------------------------------------------
 
@@ -466,6 +522,7 @@ class RuntimeHealthMonitor:
         dominant_share, top_location = _dominant_site_share(stacks)
         evidence, has_pressure = self._episode_evidence(episode)
         verdict = classify_episode(cpu_ratio, dominant_share, has_pressure)
+        runtime_lag_episodes.labels(verdict=verdict).inc()
         summary = {
             't': wall_now,
             'duration_ms': round(duration_ms, 1),
@@ -504,7 +561,6 @@ class RuntimeHealthMonitor:
             return
         old_state = self.state
         self.state = new_state
-        runtime_health_state.set(STATE_VALUES[new_state])
         log = logger.warning if new_state != 'healthy' else logger.info
         log(
             'runtime_health_transition',
@@ -639,9 +695,9 @@ class RuntimeHealthMonitor:
         is therefore -1 here (counting tasks needs the loop); the census
         endpoint reports exact numbers when the loop is responsive.
         """
-        heartbeat_age = time.monotonic() - self._heartbeat
+        heartbeat_age = self._heartbeat_age()
         return {
-            'state': ('stalled' if heartbeat_age >= self._config.stall else self.state),
+            'state': self._effective_state(heartbeat_age),
             'unit_label': UNIT_LABEL,
             'current_lag_ms': round(self._current_lag * 1000, 3),
             'heartbeat_age_ms': round(heartbeat_age * 1000, 3),
@@ -657,9 +713,20 @@ class RuntimeHealthMonitor:
         For the recorder's worker_state sync, which runs every tick and
         must stay cheap; the heartbeat-age override matches snapshot().
         """
-        heartbeat_age = time.monotonic() - self._heartbeat
-        state: HealthState = 'stalled' if heartbeat_age >= self._config.stall else self.state
-        return state, round(self._current_lag * 1000, 3)
+        return self._effective_state(), round(self._current_lag * 1000, 3)
+
+    def _heartbeat_age(self) -> float:
+        """Seconds since the last completed heartbeat tick."""
+        return time.monotonic() - self._heartbeat
+
+    def _effective_state(self, heartbeat_age: float | None = None) -> HealthState:
+        """The state every reader reports: ``stalled`` while the heartbeat is silent for ``stall``.
+
+        The state machine itself moves only on heartbeat ticks, so during a
+        hard stall it still says what it said before the loop stopped.
+        """
+        age = self._heartbeat_age() if heartbeat_age is None else heartbeat_age
+        return 'stalled' if age >= self._config.stall else self.state
 
     def _current_episode_view(self) -> dict[str, Any] | None:
         """The open episode with a running verdict, or None while healthy.

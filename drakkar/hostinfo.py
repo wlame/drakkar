@@ -23,6 +23,19 @@ import time
 from pathlib import Path
 from typing import Any
 
+from drakkar.metrics import (
+    cgroup_cpu_throttled_periods,
+    cgroup_cpu_throttled_seconds,
+    children_cpu_seconds,
+    host_load,
+    host_pressure_percent,
+    nfs_operations,
+    nfs_retransmits,
+    nfs_rtt_seconds,
+    process_threads,
+    storage_free_bytes,
+)
+
 # Per-mount NFS client counters; Linux only. The recorder's resource
 # sampler reads it every state-sync tick for per-mount RTT/retransmits.
 PROC_MOUNTSTATS = Path('/proc/self/mountstats')
@@ -88,6 +101,19 @@ _PSI_ROWS = (
 )
 
 
+# The PSI sample key of each (resource, kind) label pair of
+# drakkar_host_pressure_percent, from the same rows as the reader.
+_PSI_GAUGE_LABELS = {key: (resource_name, kind) for resource_name, kind, key in _PSI_ROWS}
+
+
+def _set_pressure_gauges(pressure: dict[str, float]) -> None:
+    """Set one pressure gauge per PSI value that was read; absent values stay as they were."""
+    for key, (resource_name, kind) in _PSI_GAUGE_LABELS.items():
+        value = pressure.get(key)
+        if value is not None:
+            host_pressure_percent.labels(resource=resource_name, kind=kind).set(value)
+
+
 def effective_cpu_count() -> int:
     """CPUs this process can actually use, as a whole number (min 1).
 
@@ -141,6 +167,22 @@ def cgroup_cpu_quota(
         # than failing worker startup over a diagnostic.
         return None
     return None
+
+
+def read_free_bytes(path: str) -> int | None:
+    """Bytes free for an unprivileged user on the filesystem that holds *path*, or None.
+
+    ``f_bavail * f_frsize`` of ``statvfs``: the blocks reserved for root do
+    not count, because the worker cannot write them. None for an empty path
+    or when the path cannot be read.
+    """
+    if not path:
+        return None
+    try:
+        stats = os.statvfs(path)
+    except OSError:
+        return None
+    return stats.f_bavail * stats.f_frsize
 
 
 def read_self_stats(status_path: Path = PROC_SELF_STATUS) -> tuple[int | None, int | None]:
@@ -402,7 +444,10 @@ class HostSampler:
     but small ``/proc`` reads.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, storage_dir: str = '') -> None:
+        # The folder whose filesystem drakkar_storage_free_bytes reports;
+        # empty means no storage folder, and the gauge is never set.
+        self._storage_dir = storage_dir
         # Previous (self_cpu_seconds, children_cpu_seconds, monotonic) for
         # the CPU-percent deltas. None until primed — the first sample
         # carries no CPU fields.
@@ -435,6 +480,10 @@ class HostSampler:
           source is unavailable.
         - The first sample after start carries no ``cpu_*_pct`` — percents
           are deltas and there is nothing to diff against yet.
+
+        The same values also set the host and process Prometheus metrics.
+        A value that is unavailable leaves its metric as it was, and a
+        counter that went backwards (a reset) adds nothing for the interval.
         """
         now = time.monotonic()
         self_ru = resource.getrusage(resource.RUSAGE_SELF)
@@ -450,6 +499,7 @@ class HostSampler:
             meta['rss_bytes'] = rss_bytes
         if threads is not None:
             meta['threads'] = threads
+            process_threads.set(threads)
         open_fds = read_open_fd_count()
         if open_fds is not None:
             meta['open_fds'] = open_fds
@@ -459,16 +509,22 @@ class HostSampler:
                 meta['cpu_self_pct'] = round(100 * (cpu_self - prev[0]) / elapsed, 1)
                 meta['cpu_children_pct'] = round(100 * (cpu_children - prev[1]) / elapsed, 1)
                 meta['interval_s'] = round(elapsed, 1)
+            children_delta = cpu_children - prev[1]
+            if children_delta >= 0:
+                children_cpu_seconds.inc(children_delta)
 
         # Host-pressure keys (contract v1.15): which resource is the host
         # fighting for. All best-effort and optional, like everything above.
         loadavg = read_loadavg()
         if loadavg is not None:
             meta['load1'], meta['load5'] = round(loadavg[0], 2), round(loadavg[1], 2)
+            host_load.labels(period='1m').set(loadavg[0])
+            host_load.labels(period='5m').set(loadavg[1])
         pressure = read_pressure()
         if pressure is not None:
             for key, value in pressure.items():
                 meta[f'psi_{key}'] = value
+            _set_pressure_gauges(pressure)
         throttle = read_cpu_throttle()
         throttle_prev = self._throttle_prev
         self._throttle_prev = throttle
@@ -480,7 +536,12 @@ class HostSampler:
             if periods_delta >= 0 and usec_delta >= 0:
                 meta['cpu_throttled_periods'] = periods_delta
                 meta['cpu_throttled_ms'] = round(usec_delta / 1000, 1)
+                cgroup_cpu_throttled_periods.inc(periods_delta)
+                cgroup_cpu_throttled_seconds.inc(usec_delta / 1_000_000)
         meta.update(self._nfs_mount_deltas())
+        free_bytes = read_free_bytes(self._storage_dir)
+        if free_bytes is not None:
+            storage_free_bytes.set(free_bytes)
         return meta
 
     def _nfs_mount_deltas(self) -> dict[str, Any]:
@@ -512,6 +573,11 @@ class HostSampler:
             if ops_delta < 0 or trans_delta < 0 or rtt_delta < 0:
                 continue  # counter reset (remount)
             retrans = trans_delta - ops_delta
+            # Quiet mounts count too (adding 0), so each mount has a series
+            # from its first full interval and rate() works from there.
+            nfs_operations.labels(mount=mount).inc(ops_delta)
+            nfs_rtt_seconds.labels(mount=mount).inc(rtt_delta / 1000)
+            nfs_retransmits.labels(mount=mount).inc(max(0, retrans))
             if ops_delta == 0 and retrans <= 0:
                 continue  # quiet mount — no signal, no row
             mounts.append(

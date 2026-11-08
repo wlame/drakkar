@@ -46,6 +46,7 @@ metrics:
 | `drakkar_host_effective_cpus` | Gauge | -- | CPUs this worker process can actually use: the affinity mask capped by any cgroup CPU quota, read once at startup. `drakkar_executor_pool_max` above this value means concurrent tasks time-share cores; startup also logs an `executor_pool_exceeds_cpus` warning then. |
 | `drakkar_task_label_value` | Histogram | `label` | Numeric values of the task labels named in `metrics.task_label_histograms`, observed once per completed task. Log-spaced buckets from 0.001 to 1e9 (unitless — a label can hold bytes, line counts, ratios). Values that do not parse as finite numbers are skipped. |
 | `drakkar_executor_pool_active` | Gauge | -- | Number of tasks currently running in the executor pool |
+| `drakkar_executor_pool_waiting` | Gauge | -- | Tasks waiting for a free executor slot (the "waiting" count of the Live page header). Sustained non-zero values mean `executor.max_executors` is the limit of the worker. |
 | `drakkar_executor_timeouts_total` | Counter | -- | Total tasks that exceeded `executor.task_timeout` and were killed |
 | `drakkar_executor_output_truncated_total` | Counter | `stream` (`stdout`, `stderr`) | Output streams truncated to `executor.max_stdout` / `executor.max_stderr`. One increment per truncated stream per task. Divide by the `drakkar_executor_tasks_total` rate for the fraction of tasks being truncated. |
 | `drakkar_task_retries_total` | Counter | -- | Total tasks retried after failure (via [on_error](handler.md#on_error) returning RETRY) |
@@ -247,6 +248,36 @@ CPU-bound hook work moved off the event loop via [`handler.offload()`](offload.m
 | `drakkar_offload_running` | Gauge | -- | Offloaded computations currently executing on the offload thread pool |
 | `drakkar_offload_queued` | Gauge | -- | Offloaded calls waiting for a free pool thread. Sustained non-zero values mean `threads.offload` is undersized for how often hooks offload concurrently |
 | `drakkar_offload_duration_seconds` | Histogram | `hook` | Execution time of offloaded computations, queue wait excluded. Buckets reach 120s — offloaded work is expected to be seconds-scale |
+
+#### Runtime health
+
+The event-loop monitor of [Runtime Health](runtime-health.md). The state, the heartbeat age and the lag peak are read when Prometheus scrapes, on the thread of the metrics server, so a scrape during a hard stall reports the stall even though the event loop cannot run.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `drakkar_loop_lag_seconds` | Histogram | -- | Event-loop lag per heartbeat tick (`runtime_health.tick`): how late the loop woke the monitor. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10. |
+| `drakkar_loop_lag_peak_seconds` | Gauge | -- | The largest lag of one heartbeat tick in the last 60 seconds. Compare it with `runtime_health.warn_lag` and `runtime_health.stall`. |
+| `drakkar_runtime_health_state` | Gauge | -- | 0 = healthy, 1 = degraded, 2 = stalled. Reads 2 while the heartbeat is silent for at least `runtime_health.stall`, with the same rule as `GET /api/v1/runtime/health`. |
+| `drakkar_runtime_heartbeat_age_seconds` | Gauge | -- | Seconds since the last heartbeat. A value at or above `runtime_health.stall` means the loop is stalled now. |
+| `drakkar_runtime_stalls_total` | Counter | -- | Stalls detected: the loop was silent for longer than `runtime_health.stall`. Each one has its stacks in a `runtime_stall` event. |
+| `drakkar_runtime_lag_episodes_total` | Counter | `verdict` (`blocked`, `cpu_bound`, `starved`, `inconclusive`) | Lag episodes that ended, by verdict. An episode longer than `runtime_health.max_episode` counts once per part. See [Lag episodes and verdicts](runtime-health.md#lag-episodes-and-verdicts). |
+
+#### Host and process
+
+Set at each `resource_sample` of the recorder (every `recorder.sqlite.state_interval` with a recorder file, else every 10 s), from the values described in [Host Pressure](host-pressure.md). Emitted only when the worker has a recorder. A value that the host cannot give (no `/proc`, no PSI, no cgroup quota, no NFS mount, no `storage.dir`) leaves its metric unset, never at a false zero. The counters add the change of the kernel's counters since the previous sample; a counter that went backwards (a remount, a new cgroup) adds nothing for that interval.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `drakkar_host_load` | Gauge | `period` (`1m`, `5m`) | Host load average: runnable and uninterruptible tasks of the whole host. |
+| `drakkar_host_pressure_percent` | Gauge | `resource` (`cpu`, `io`, `memory`), `kind` (`some`, `full`) | Kernel pressure stall information, 10-second average: percent of time in which some (or all) non-idle tasks waited for the resource. `cpu` has only `some`. |
+| `drakkar_cgroup_cpu_throttled_periods_total` | Counter | -- | Enforcement periods in which the cgroup CPU quota descheduled this container. |
+| `drakkar_cgroup_cpu_throttled_seconds_total` | Counter | -- | Time the cgroup CPU quota kept this container descheduled. A `rate()` near the CPU count of the quota means the container is CPU-capped. |
+| `drakkar_nfs_operations_total` | Counter | `mount` | NFS operations completed on the mount, by every process of the host that uses it. |
+| `drakkar_nfs_rtt_seconds_total` | Counter | `mount` | Total server round-trip time of those operations. `rate(drakkar_nfs_rtt_seconds_total[5m]) / rate(drakkar_nfs_operations_total[5m])` is the average round trip per operation. |
+| `drakkar_nfs_retransmits_total` | Counter | `mount` | NFS requests sent again because the server did not answer in time. |
+| `drakkar_process_threads` | Gauge | -- | Threads of the worker process. |
+| `drakkar_children_cpu_seconds_total` | Counter | -- | CPU time (user and system) of task subprocesses that ended and were reaped. It moves when a task ends, so read it as a rate over a few minutes. |
+| `drakkar_storage_free_bytes` | Gauge | -- | Bytes free for the worker on the filesystem that holds `storage.dir` (blocks reserved for root do not count). Not set without a `storage.dir`. |
 
 #### Recorder
 

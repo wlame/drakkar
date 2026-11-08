@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from prometheus_client import REGISTRY
 from structlog.testing import capture_logs
 
 from drakkar.executor import ExecutorPool, ExecutorTaskError, _trim_incomplete_utf8
@@ -327,6 +328,23 @@ async def test_waiting_count_tracks_queued_tasks():
     await fast_future
     assert pool.waiting_count == 0
     assert pool.active_count == 0
+
+
+async def test_waiting_gauge_follows_queued_and_cancelled_tasks():
+    """drakkar_executor_pool_waiting moves with waiting_count, a cancelled wait included."""
+    pool = ExecutorPool(binary_path=sys.executable, max_executors=1, task_timeout_seconds=10)
+    slow = asyncio.create_task(pool.execute(make_task('slow', args=['-c', 'import time; time.sleep(0.5)'])))
+    await wait_for(lambda: pool.active_count == 1)
+
+    queued = asyncio.create_task(pool.execute(make_task('queued', args=['-c', 'print("ok")'])))
+    await wait_for(lambda: pool.waiting_count == 1)
+    assert REGISTRY.get_sample_value('drakkar_executor_pool_waiting') == 1
+
+    queued.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await queued
+    assert REGISTRY.get_sample_value('drakkar_executor_pool_waiting') == 0
+    await slow
 
 
 async def test_execute_records_task_started_with_recorder():

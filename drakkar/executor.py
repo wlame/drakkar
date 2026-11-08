@@ -17,6 +17,7 @@ import structlog
 
 from drakkar.metrics import (
     executor_exit_notice,
+    executor_pool_waiting,
     executor_priority_fn_errors,
     executor_queue_wait,
     output_truncated,
@@ -453,7 +454,7 @@ class ExecutorPool:
         # ``_compute_priority`` which logs + ticks a metric and falls back
         # to the default on raise.
         priority = self._compute_priority(task)
-        self._waiting_count += 1
+        self._change_waiting(1)
         waiting_decremented = False
         try:
             # `async with` would also work, but we need to guarantee
@@ -468,7 +469,7 @@ class ExecutorPool:
                 # Transition from "waiting" to "active". These two lines run
                 # with no `await` between them, so they are atomic w.r.t.
                 # cancellation on a single event loop.
-                self._waiting_count -= 1
+                self._change_waiting(-1)
                 waiting_decremented = True
                 self._active_count += 1
                 slot = heapq.heappop(self._available_slots)
@@ -497,7 +498,12 @@ class ExecutorPool:
             if not waiting_decremented:
                 # Cancelled before (or while) acquiring — the increment above
                 # was never paired with the inner decrement. Rollback now.
-                self._waiting_count -= 1
+                self._change_waiting(-1)
+
+    def _change_waiting(self, delta: int) -> None:
+        """Move the waiting count and its gauge together."""
+        self._waiting_count += delta
+        executor_pool_waiting.set(self._waiting_count)
 
     def _compute_priority(self, task: ExecutorTask) -> Any:
         """Evaluate ``priority_fn(task)`` with a graceful fallback.

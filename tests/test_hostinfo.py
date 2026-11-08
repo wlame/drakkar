@@ -1,6 +1,7 @@
 """Tests for best-effort host-fact discovery (drakkar.hostinfo)."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +11,7 @@ from drakkar.hostinfo import (
     detect_network_fs,
     effective_cpu_count,
     read_cpu_throttle,
+    read_free_bytes,
     read_loadavg,
     read_nfs_mount_stats,
     read_pressure,
@@ -283,3 +285,15 @@ class TestDetectNetworkFS:
 
     def test_missing_mounts_file_is_unavailable(self, tmp_path):
         assert detect_network_fs('/mnt/data', mounts_path=missing(tmp_path)) is None
+
+
+class TestReadFreeBytes:
+    def test_reports_blocks_available_to_unprivileged_users(self, monkeypatch):
+        monkeypatch.setattr(hostinfo.os, 'statvfs', lambda _path: SimpleNamespace(f_bavail=25, f_frsize=4096))
+        assert read_free_bytes('/var/lib/drakkar') == 25 * 4096
+
+    def test_empty_path_is_unavailable(self):
+        assert read_free_bytes('') is None
+
+    def test_unreadable_path_is_unavailable(self, tmp_path):
+        assert read_free_bytes(str(missing(tmp_path))) is None

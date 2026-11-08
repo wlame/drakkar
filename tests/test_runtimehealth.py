@@ -12,6 +12,7 @@ import sys
 import time
 
 import pytest
+from prometheus_client import REGISTRY
 
 from drakkar.config import RuntimeHealthConfig
 from drakkar.runtimehealth import (
@@ -535,3 +536,75 @@ def test_probe_first_capture_ignores_host_uptime(monkeypatch):
 
     with mon._probe_lock:
         assert len(mon._pending_probes) == 1
+
+
+# ---- Prometheus metrics read at scrape time ---------------------------------
+
+
+def _metric(name: str, **labels: str) -> float | None:
+    return REGISTRY.get_sample_value(name, labels)
+
+
+def test_lag_window_peak_covers_only_the_last_seconds():
+    window = _LagWindow(900)
+    window.add(1000.0, 5.0)  # 120 s before "now": outside the span
+    window.add(1090.0, 0.3)
+    window.add(1120.0, 0.1)
+
+    assert window.peak(1120.0, 60) == 0.3
+    assert _LagWindow(900).peak(1120.0, 60) == 0.0
+
+
+async def test_state_gauge_reads_stalled_at_scrape_while_state_machine_is_healthy(monitor):
+    mon, _ = monitor
+    mon.start()
+    try:
+        mon._window.add(time.time(), 0.4)
+        # No await below: the heartbeat task cannot move the heartbeat, as
+        # in a real hard stall.
+        mon._heartbeat = time.monotonic() - 5.0
+
+        assert mon.state == 'healthy'
+        assert _metric('drakkar_runtime_health_state') == 2
+        assert _metric('drakkar_runtime_heartbeat_age_seconds') >= 5.0
+        assert _metric('drakkar_loop_lag_peak_seconds') == 0.4
+    finally:
+        await mon.stop()
+
+
+async def test_scrape_functions_are_replaced_by_constants_at_stop(monitor):
+    mon, _ = monitor
+    mon.start()
+    await mon.stop()
+    age_at_stop = _metric('drakkar_runtime_heartbeat_age_seconds')
+
+    mon._heartbeat = time.monotonic() - 60.0
+    mon.state = 'degraded'
+
+    assert _metric('drakkar_runtime_health_state') == 0
+    assert _metric('drakkar_runtime_heartbeat_age_seconds') == age_at_stop
+    assert age_at_stop < 5.0
+
+
+async def test_stop_of_a_monitor_that_never_started_keeps_the_running_monitor_gauges(monitor):
+    mon, _ = monitor
+    other = RuntimeHealthMonitor(RuntimeHealthConfig(tick='250ms', stall='1s'), recorder=None)
+    mon.start()
+    try:
+        await other.stop()
+        mon._heartbeat = time.monotonic() - 5.0
+
+        assert _metric('drakkar_runtime_health_state') == 2
+    finally:
+        await mon.stop()
+
+
+async def test_closed_episode_counts_by_verdict(monitor):
+    mon, _ = monitor
+    before = _metric('drakkar_runtime_lag_episodes_total', verdict='inconclusive') or 0.0
+
+    mon._advance_state(0.2, 100.0)
+    for i in range(RECOVERY_TICKS):
+        mon._advance_state(0.001, 101.0 + i)
+
+    assert _metric('drakkar_runtime_lag_episodes_total', verdict='inconclusive') == before + 1

@@ -200,6 +200,14 @@ executor_pool_active = Gauge(
     'Currently active executor tasks',
 )
 
+executor_pool_waiting = Gauge(
+    'drakkar_executor_pool_waiting',
+    (
+        'Tasks waiting for a free executor slot. Sustained non-zero values '
+        'mean executor.max_executors is the limit of the worker.'
+    ),
+)
+
 executor_pool_max = Gauge(
     'drakkar_executor_pool_max',
     'Configured executor pool size (executor.max_executors)',
@@ -1231,6 +1239,95 @@ loop_lag_seconds = Histogram(
 runtime_health_state = Gauge(
     'drakkar_runtime_health_state',
     'Current runtime health state: 0=healthy, 1=degraded, 2=stalled',
+)
+
+runtime_heartbeat_age_seconds = Gauge(
+    'drakkar_runtime_heartbeat_age_seconds',
+    (
+        'Seconds since the last heartbeat of the runtime health monitor. '
+        'A value at or above runtime_health.stall means the event loop is stalled now.'
+    ),
+)
+
+loop_lag_peak_seconds = Gauge(
+    'drakkar_loop_lag_peak_seconds',
+    (
+        'The largest event-loop lag of one heartbeat tick in the last 60 seconds. '
+        'Compare it with runtime_health.warn_lag and runtime_health.stall.'
+    ),
+)
+
+runtime_lag_episodes = Counter(
+    'drakkar_runtime_lag_episodes_total',
+    (
+        'Lag episodes that ended, by verdict (blocked, cpu_bound, starved, inconclusive). '
+        'An episode longer than runtime_health.max_episode counts once per part.'
+    ),
+    ['verdict'],
+)
+
+
+# --- Host and process (set at each resource_sample) ---
+
+host_load = Gauge(
+    'drakkar_host_load',
+    'Host load average over the period (1m or 5m): runnable and uninterruptible tasks of the whole host',
+    ['period'],
+)
+
+host_pressure_percent = Gauge(
+    'drakkar_host_pressure_percent',
+    (
+        'Kernel pressure stall information, 10-second average: percent of time in which some '
+        'or all non-idle tasks waited for the resource (cpu, io, memory)'
+    ),
+    ['resource', 'kind'],
+)
+
+cgroup_cpu_throttled_periods = Counter(
+    'drakkar_cgroup_cpu_throttled_periods_total',
+    'Enforcement periods in which the cgroup CPU quota descheduled this container',
+)
+
+cgroup_cpu_throttled_seconds = Counter(
+    'drakkar_cgroup_cpu_throttled_seconds_total',
+    'Time the cgroup CPU quota kept this container descheduled',
+)
+
+nfs_operations = Counter(
+    'drakkar_nfs_operations_total',
+    'NFS operations completed on the mount, by every process of the host that uses it',
+    ['mount'],
+)
+
+nfs_rtt_seconds = Counter(
+    'drakkar_nfs_rtt_seconds_total',
+    (
+        'Total server round-trip time of the NFS operations on the mount. '
+        'rate of this metric over rate of drakkar_nfs_operations_total is the average round trip.'
+    ),
+    ['mount'],
+)
+
+nfs_retransmits = Counter(
+    'drakkar_nfs_retransmits_total',
+    'NFS requests sent again on the mount because the server did not answer in time',
+    ['mount'],
+)
+
+process_threads = Gauge(
+    'drakkar_process_threads',
+    'Threads of the worker process',
+)
+
+children_cpu_seconds = Counter(
+    'drakkar_children_cpu_seconds_total',
+    'CPU time (user and system) of the task subprocesses that ended and were reaped',
+)
+
+storage_free_bytes = Gauge(
+    'drakkar_storage_free_bytes',
+    'Bytes free for this worker on the filesystem that holds storage.dir',
 )
 
 runtime_stalls = Counter(
