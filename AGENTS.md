@@ -160,6 +160,18 @@ parametrize).
    (`drakkar/recorder/orphans.py`) only when its lock is free, its files are
    idle, and the registry shows the name is not online; without a registry
    nothing proves a name dead, so the folder is only logged.
+9. The pending budget (`drakkar/budget.py`) is shared by every partition loop
+   and the HTTP source. A loop checks the room and reserves the window's
+   estimate with no `await` in between, before `arrange` runs; otherwise
+   every loop that checked meanwhile would pass on the same room. A task's
+   stdin and its charge are freed at its last pending run, never earlier, so
+   a task object scheduled twice never runs without its input.
+10. The exit watcher (`drakkar/procwatch.py`) is one daemon thread per
+    process; `watch()` is called right after the spawn returns, with no
+    `await` in between, and the thread never reaps a child (asyncio keeps the
+    exit status). A timeout kills the group of the child pid with `killpg`,
+    never looks a group up with `getpgid`, and never signals the worker's
+    own group.
 
 ## API server footguns
 
@@ -205,7 +217,10 @@ drakkar/
   app.py, lifecycle.py     DrakkarApp wiring + startup/shutdown ordering
   handler.py, models.py    user extension points + typed messages
   consumer.py, partition.py, offsets.py   poll loop, per-partition pipeline, watermarks
+  budget.py                the worker's pending budget: tasks and bytes, reservations, the FIFO of waiting loops
   executor.py              subprocess pool (argv exec, process-group kill)
+  procwatch.py             the exit watcher: one daemon thread reads each task's exit time off the loop
+  reported_run.py          the optional task_run_seconds hook: call it and check its answer
   sinks/                   sink implementations + DLQ + circuit breaker
   sources/                 input-source protocol, registry, handler validation
   cache/                   LWW SQLite cache + the HTTP cache exchange (client and query parsing)
@@ -215,8 +230,14 @@ drakkar/
   cluster_tasks.py         cluster slot loop, slot lease, the worker's one election service, hash checker
   schedule.py, cronexpr.py slot math, scopes, definition hash; the cron subset check (a library computes fire times)
   ownerlock.py             the own folder: creation, owner lock, start sweep
-  recorder/                flight recorder (SQLite event log), archive pass, election providers, task lock, orphan folders
-  uiserver/                API server: routes + message probe runner
+  slices.py, slice_build.py the slice download: request rules, file names and tables; the builder
+  sqlitebatch.py           reading a SQLite table in bounded keyset batches (merge, archive, slices)
+  recorder/                flight recorder (SQLite event log), archive pass, election providers, task lock,
+                           orphan folders, lease holder reads (lease.py)
+  uiserver/                API server: routes + message probe runner; routes_databases.py (slice, Postgres
+                           partitions, autodiscover), databases_status.py and autodiscover_status.py (their
+                           answers), streaming.py (download streams and the open-download bound),
+                           files_in_use.py (merge results being sent or merged)
   webapp/                  synchronous HTTP ingress pipeline
   uihost/                  drakkar-ui bundle fetch/cache/serve engine
   config/                  pydantic-settings config (YAML + DK_ env overrides),
