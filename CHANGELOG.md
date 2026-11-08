@@ -191,8 +191,12 @@ the steps of the upgrade and the changes of behaviour.
 - **One own folder per worker.** A worker keeps its own files in
   `<storage.dir>/<cluster>/<worker>/` and holds an owner lock (`flock`) on
   `.owner.lock` there; a second process with the same name on the host does not
-  start. `storage.dir` must be a local filesystem. Own files of the flat layout
-  are not found again; see `docs/upgrading.md`.
+  start. When the lock is held, the start tries again for 2 s before it
+  refuses, so the Databases tab of another worker, which tests the lock for a
+  moment, never stops a restart. At start the worker deletes the download temps
+  an earlier process of its name left there. `storage.dir` must be a local
+  filesystem. Own files of the flat layout are not found again; see
+  `docs/upgrading.md`.
 - **Worker and cluster names.** A worker name must be 1 to 128 letters, digits,
   `_` or `-`; the start fails with the safe form otherwise. With no name, the
   worker uses its host name made safe, or `drakkar-<8 hex>`. A cluster name whose
@@ -215,7 +219,9 @@ the steps of the upgrade and the changes of behaviour.
   `executor.backpressure_high_multiplier` and `backpressure_low_multiplier` are
   removed. Queued messages are no longer arranged at stop or revoke: they are
   dropped and read again by the next owner. A dead partition is paused and its
-  queue does not count.
+  queue does not count. New metrics: `drakkar_pending_tasks`,
+  `drakkar_pending_bytes`, `drakkar_window_admission_wait_seconds_total{limit}`,
+  `drakkar_window_messages` and `drakkar_queued_messages_dropped_at_stop_total`.
 - **`task.stdin` is `None` in the message and window hooks.** The framework
   frees a task's stdin at its last outcome, so `on_message_complete`,
   `on_window_complete` and `on_http_request_complete` see `None`; `arrange`,
@@ -274,13 +280,9 @@ the steps of the upgrade and the changes of behaviour.
   call `skipped_open`; one batch of reads runs per worker at a time (others
   answer `busy`); the `filesystem` read writes nothing, runs on a thread of
   its own and reports an approximate age. It never starts the provider, and
-  logs `ui_read_provider_failed` when it fails. A merge source that fails part
-  way is rolled back whole. The
+  logs `ui_read_provider_failed` when it fails. The
   Postgres statement `holder` and the Redis `PTTL` are in
   `tests/fixtures/fleet_providers.json` (contract v1.30).
-- **A start waits out a short lock.** When the owner lock of its folder is held,
-  a worker tries again for 2 s before it refuses to start, so the Databases tab
-  of another worker, which tests the lock for a moment, never stops a restart.
 - **Orphan folders.** The leftover pass seals the recorder files of another
   worker name's own folder in the same cluster when no process holds the folder,
   its files are idle for 300 s and the registry shows the name is not online, then
@@ -289,8 +291,6 @@ the steps of the upgrade and the changes of behaviour.
   error in one folder is logged (`recorder_orphan_folder_failed`), counted in
   `drakkar_recorder_orphan_failures_total`, and the pass goes on. With
   `autodiscover` off it only logs the folder (`recorder_orphan_folder_found`).
-- **Download temps are swept.** A worker deletes the download temps an earlier
-  process of its name left in its own folder at start.
 - **Task run time measured off the event loop.** A thread reads the exit time
   of each task subprocess when the kernel reports it (a pidfd on Linux, kqueue
   on macOS) and never reaps the child. `task_completed` and `task_failed` gain
@@ -419,9 +419,6 @@ the steps of the upgrade and the changes of behaviour.
 - **Databases View docs page.** `docs/databases-view.md` describes the
   Databases tab: its views, the address, the slice download, the limits, the
   actions and their keys, and what cleans itself.
-- **Backpressure metrics:** `drakkar_pending_tasks`, `drakkar_pending_bytes`,
-  `drakkar_window_admission_wait_seconds_total{limit}`,
-  `drakkar_window_messages` and `drakkar_queued_messages_dropped_at_stop_total`.
 
 ### Changed
 
@@ -451,7 +448,7 @@ the steps of the upgrade and the changes of behaviour.
   archive pass copied the events and the state rows of each source with one read
   of the whole table, so a large sealed file was held in memory at once. They now
   read batches of at most 5000 rows or 8 MiB of text, the same batches as the
-  slice download.
+  slice download. A merge source that fails part way is rolled back whole.
 - **A timeout kills the task's descendants also when the child already
   exited.** Before, a task whose child had exited while a background
   grandchild still held its pipes ran into the timeout, and the grandchild was

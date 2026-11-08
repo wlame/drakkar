@@ -323,7 +323,7 @@ hits its deadline. With `autodiscover` off, an enabled exchange logs
 
 #### Fleet registry and provider operations
 
-Every call from the worker to a provider is one **operation**: the registry makes `start`, `publish`, `list`, `withdraw` and `stop`, and the election of [cluster periodic tasks](periodic-tasks.md#the-election) (the archive included) makes `start`, `acquire`, `refresh`, `is_held`, `release` and `stop`. With [provider `postgres`](recorder-postgres.md) the recorder makes `start`, `copy` and `partitions` with `feature="recorder"` and `provider="postgres"`; `drakkar_provider_call_duration_seconds` of `op="copy"` is the COPY duration. Retries and the circuit breaker are explained in [Fleet registry — Resilience](fleet.md#resilience).
+Every call from the worker to a provider is one **operation**: the registry makes `start`, `publish`, `list`, `withdraw` and `stop`, and the election of [cluster periodic tasks](periodic-tasks.md#the-election) (the archive included) makes `start`, `acquire`, `refresh`, `is_held`, `release` and `stop`. With [provider `postgres`](recorder-postgres.md) the recorder makes `start`, `copy` and `partitions` with `feature="recorder"` and `provider="postgres"`; `drakkar_provider_call_duration_seconds` of `op="copy"` is the COPY duration. The lease reads of the [Autodiscover view](fleet.md#autodiscover-view) make `holder` with `feature="ui"`, through a caller and a breaker of their own. Retries and the circuit breaker are explained in [Fleet registry — Resilience](fleet.md#resilience).
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|

@@ -39,6 +39,8 @@ changes these things:
   `executor.max_pending_tasks` and `executor.max_pending_bytes`, and the Kafka
   fetch pauses at `sources.kafka.max_queued_messages`. The two
   `executor.backpressure_*_multiplier` keys are removed.
+- A task's `duration` ends at the process exit, read off the event loop, so
+  it can be shorter on a busy worker (see [Task run time](#task-run-time)).
 
 ### 1. Plan the upgrade {#plan}
 
@@ -1079,6 +1081,39 @@ What to do and what to expect:
    The help text of `drakkar_backpressure_active` changed.
 5. **`task.stdin` is `None` in the message and window hooks** (see the
    handler changes).
+
+#### Task run time {#task-run-time}
+
+`duration` (on `ExecutorResult`, in the `task_completed` / `task_failed`
+events and in the timeline bars) and `drakkar_executor_duration_seconds` now
+run from the spawn to the process exit, and the exit time is read off the
+event loop (see
+[Task run time and the exit notice](observability.md#task-run-time-and-the-exit-notice)).
+Before, they ended when the busy event loop got round to the exit, so:
+
+1. **The values can drop after the upgrade.** On a busy worker the old values
+   included the time the loop took to handle the exit. Check alerts and
+   dashboards on `drakkar_executor_duration_seconds`: a lower value is the
+   task's real run time, not a faster binary.
+2. **A task whose descendant holds the output pipes ends when the pipes
+   close.** A child that starts a background process and exits is timed until
+   that process closes its stdout and stderr (more than 50 ms after the exit),
+   and counted on `drakkar_executor_exit_watch_fallbacks_total{reason="descendant_held_pipes"}`.
+3. **Each worker starts one more thread**, `drakkar-exit-watcher`, which waits
+   for task subprocesses to exit. It costs about 2 to 3 % of one core at
+   1200 spawns per second on Linux. When the host cannot watch, tasks are
+   timed on the loop as before and counted on
+   `drakkar_executor_exit_watch_fallbacks_total{reason}`; the worker logs
+   `exit_watcher_started` or `exit_watcher_off` at startup.
+4. **New metadata keys** in `task_completed` / `task_failed`:
+   `run_started_at` (the spawn time; the bar starts there) and
+   `exit_notice_ms` (from the exit to the moment the worker handled it, a
+   loop-stall indicator, also on the histogram
+   `drakkar_executor_exit_notice_seconds`).
+5. **The optional hook `task_run_seconds(result)`** lets a handler report the
+   run time its binary measured; it sets the bar length and
+   `reported_run_seconds`, and the metrics keep the framework measure. See
+   [task_run_seconds](handler.md#task_run_seconds).
 
 #### Autodiscover {#autodiscover}
 

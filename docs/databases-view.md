@@ -140,7 +140,9 @@ registry state (online, offline, or not known). The view only reads them.
 A note says when such a folder goes away: the
 [orphan pass](local-databases.md#orphan-folders) of any worker of the
 cluster seals and removes a folder whose lock is free, whose files are
-idle for 5 minutes, and whose worker is not online. Testing the lock takes
+idle for 5 minutes, and whose worker is not online. With autodiscover off
+nothing proves a worker is not online, so the pass only logs such a folder
+and the folder stays. Testing the lock takes
 a shared lock for a moment; an orphan pass that looks at the folder at that
 moment skips it for one round.
 

@@ -49,7 +49,7 @@ network access.
 | **WebSocket Origin check** | Runs on every `/ws` handshake, token or not. A page that is not itself on loopback cannot open a socket to a worker on the browser's loopback — the one route that would otherwise reach past the loopback bind. |
 | **UI bearer token** | `ui.auth_token` gates every page and API route (`Authorization: Bearer`, or `?token=` for browser navigation), compared with `secrets.compare_digest`. `/healthz` and `/readyz` stay public for Kubernetes, and the routes under `/api/v1/peer/` stay public for the cache exchange (see [below](#the-public-peer-route)). |
 | **WebSocket handshake auth** | With a token set, `/ws` authenticates inside the handshake and validates `Origin` against `ui.allowed_origins` (or the `Host` header), rejecting every other cross-origin handshake. |
-| **Cross-origin read rule** | Only three read paths answer cross-origin browser requests: `/api/v1/debug/trace`, `/api/v1/debug/trace-by-label` and `/api/v1/debug/databases`, which the UI reads from every worker of the cluster. They use the same origin rule as `/ws`. The preflight needs no token; the read itself still needs one when a token is set. No other path sends CORS headers. See [below](#cross-origin-reads). |
+| **Cross-origin read rule** | Only three read paths answer cross-origin browser requests: `/api/v1/debug/trace`, `/api/v1/debug/trace-by-label` and `/api/v1/debug/databases`, which the UI reads from other workers of the cluster when you open a cluster view or pick them. They use the same origin rule as `/ws`. The preflight needs no token; the read itself still needs one when a token is set. No other path sends CORS headers. See [below](#cross-origin-reads). |
 | **Startup warning** | A worker running the UI without a token logs `ui_unauthenticated` at startup, naming the bind and both opt-in paths. |
 | **Independent kill switches** | `ui.probe.enabled` and `ui.merge_enabled` close the two non-read-only endpoints that are on by default, whether or not a token is set. `ui.delete_enabled` (off by default) opens the third: `DELETE /api/v1/debug/files/{path}`, which deletes one merge result (`merged/<name>.db`) and nothing else. A sealed file, an archive or any other path answers `404`; a merge result this worker is sending or merging from answers `409`. |
 | **Webapp auth + rate limits** | Per-client bearer tokens and a per-client rpm sliding window on the HTTP ingress, with `max_concurrent` shedding over-capacity requests. |
@@ -164,7 +164,8 @@ of any peer. Protect the card folder like the token.
 ### Cross-origin reads
 
 The UI page served by one worker reads the trace, the label trace and the
-databases list from every worker of its cluster. Those reads are
+databases list from other workers of its cluster when you open a cluster
+view or pick them. Those reads are
 cross-origin, so three paths answer CORS: `/api/v1/debug/trace`,
 `/api/v1/debug/trace-by-label` and `/api/v1/debug/databases`. They use the
 origin rule of `/ws` and the same `ui.allowed_origins` key:
