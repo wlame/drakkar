@@ -590,8 +590,13 @@ class PartitionProcessor:
         return self._offset_tracker.pending_count > len(self._stalled_offsets)
 
     async def drain(self) -> None:
-        """Wait for all in-flight work and queued messages to complete,
+        """Wait for in-flight work to complete and for the queue to empty,
         then commit the progress that work earned.
+
+        The queue empties because the loop takes the messages into a window,
+        or, once a stop is signalled, drops them unarranged: their offsets
+        were never registered, so the commit stays below them and the next
+        owner of the partition reads them again.
 
         The commit is forced rather than coalesced. A caller drains because
         it is about to give the partition up — a rebalance revoke, a

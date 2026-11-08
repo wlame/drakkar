@@ -615,10 +615,12 @@ async def test_collect_exception_does_not_stall_window(echo_pool):
 
 
 async def test_drain_waits_for_queued_messages(echo_pool):
-    """drain() must wait for messages in the queue to be processed,
-    not just in-flight tasks. A message enqueued but not yet dequeued
-    by the processor must still get committed.
-    (Reproduces: one partition lag=1 per worker after all work is done)
+    """drain() must wait for a window the loop already took, not only for tasks in flight.
+
+    Messages the loop has taken off the queue before the stop must be
+    processed and committed. (Reproduces: one partition lag=1 per worker
+    after all work is done.) Messages still in the queue at the stop are
+    dropped and read again by the next owner; a separate test covers them.
     """
     committed: list[tuple[int, int]] = []
 
@@ -653,7 +655,11 @@ async def test_drain_waits_for_queued_messages(echo_pool):
     proc.enqueue(make_msg(offset=51))
     proc.enqueue(make_msg(offset=52))
 
-    # immediately signal stop and drain
+    # The loop takes the whole window in one step (no await between the first
+    # get and the rest), so an empty queue means the window is taken. Stopping
+    # earlier would test the drop at stop instead, and which path runs would
+    # depend on the event loop's scheduling order.
+    await wait_for(lambda: proc.queue_size == 0)
     proc._running = False
     await asyncio.wait_for(proc.drain(), timeout=5.0)
 
@@ -665,9 +671,9 @@ async def test_drain_waits_for_queued_messages(echo_pool):
 async def test_full_shutdown_commits_queued_messages(echo_pool):
     """Reproduces the real shutdown path with slow tasks.
 
-    Messages enqueued just before shutdown must be processed and committed
-    even when executor tasks take time (simulated with sleep).
-    stop() must wait for the drain loop to finish, not cancel it.
+    Messages the loop took into a window just before shutdown must be
+    processed and committed even when executor tasks take time (simulated
+    with sleep). stop() must wait for the drain loop to finish, not cancel it.
     """
     committed: list[tuple[int, int]] = []
 
@@ -708,7 +714,9 @@ async def test_full_shutdown_commits_queued_messages(echo_pool):
     proc.enqueue(make_msg(offset=100))
     proc.enqueue(make_msg(offset=101))
 
-    # full shutdown sequence: _running=False, drain, then stop
+    # Wait until the loop has taken the window (see the test above), then
+    # run the full shutdown sequence: _running=False, drain, then stop.
+    await wait_for(lambda: proc.queue_size == 0)
     proc._running = False
     await asyncio.wait_for(proc.drain(), timeout=10.0)
     await proc.stop()
