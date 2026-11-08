@@ -130,9 +130,9 @@ button that runs the task census.
 | Metric | Type | Meaning |
 |---|---|---|
 | `drakkar_loop_lag_seconds` | histogram | lag per heartbeat tick |
-| `drakkar_loop_lag_peak_seconds` | gauge | largest tick lag of the last 60 s (the maximum of the lag window) |
-| `drakkar_runtime_health_state` | gauge | 0 = healthy, 1 = degraded, 2 = stalled |
-| `drakkar_runtime_heartbeat_age_seconds` | gauge | seconds since the last heartbeat |
+| `drakkar_loop_lag_peak_seconds` | gauge | largest tick lag of the last 60 s (the maximum of the lag window); no sample with the monitor off |
+| `drakkar_runtime_health_state` | gauge | 0 = healthy, 1 = degraded, 2 = stalled; 0 with the monitor off |
+| `drakkar_runtime_heartbeat_age_seconds` | gauge | seconds since the last heartbeat; no sample with the monitor off |
 | `drakkar_runtime_stalls_total` | counter | stalls detected |
 | `drakkar_runtime_lag_episodes_total` | counter | lag episodes that ended, by `verdict` |
 

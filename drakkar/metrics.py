@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
 from prometheus_client import Counter, Gauge, Histogram, Info, start_http_server
+from prometheus_client.core import GaugeMetricFamily
 from prometheus_client.metrics import MetricWrapperBase
-from prometheus_client.registry import REGISTRY
+from prometheus_client.registry import REGISTRY, Collector
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -1249,6 +1251,43 @@ periodic_cluster_mismatch_peers = Gauge(
 )
 
 
+class UnknownUntilSetGauge(Collector):
+    """An unlabelled gauge that exports no sample until its value is known.
+
+    A plain ``Gauge`` reads 0 from import, and a false 0 looks like a real
+    reading (no free disk, no threads, no lag). This one exports its family
+    with no sample until ``set`` or ``set_function`` gives it a value, and
+    again when the function answers ``None``. It is registered on the default
+    registry like any other metric.
+    """
+
+    def __init__(self, name: str, documentation: str) -> None:
+        self._name = name
+        self._documentation = documentation
+        self._read: Callable[[], float | None] = lambda: None
+        REGISTRY.register(self)
+
+    def set(self, value: float) -> None:
+        """Export ``value`` from now on."""
+        self._read = lambda: value
+
+    def set_function(self, read: Callable[[], float | None]) -> None:
+        """Export what ``read`` answers at each scrape; ``None`` exports no sample."""
+        self._read = read
+
+    def describe(self) -> list[GaugeMetricFamily]:
+        """The family with no sample, so the registry learns the name without reading the value."""
+        return [GaugeMetricFamily(self._name, self._documentation)]
+
+    def collect(self) -> Iterator[GaugeMetricFamily]:
+        """The family, with one sample when the value is known."""
+        family = GaugeMetricFamily(self._name, self._documentation)
+        value = self._read()
+        if value is not None:
+            family.add_metric([], value)
+        yield family
+
+
 # --- Runtime health ---
 
 loop_lag_seconds = Histogram(
@@ -1266,7 +1305,8 @@ runtime_health_state = Gauge(
     'Current runtime health state: 0=healthy, 1=degraded, 2=stalled',
 )
 
-runtime_heartbeat_age_seconds = Gauge(
+# No sample with runtime_health.enabled false: the monitor never ran.
+runtime_heartbeat_age_seconds = UnknownUntilSetGauge(
     'drakkar_runtime_heartbeat_age_seconds',
     (
         'Seconds since the last heartbeat of the runtime health monitor. '
@@ -1274,7 +1314,7 @@ runtime_heartbeat_age_seconds = Gauge(
     ),
 )
 
-loop_lag_peak_seconds = Gauge(
+loop_lag_peak_seconds = UnknownUntilSetGauge(
     'drakkar_loop_lag_peak_seconds',
     (
         'The largest event-loop lag of one heartbeat tick in the last 60 seconds. '
@@ -1340,7 +1380,8 @@ nfs_retransmits = Counter(
     ['mount'],
 )
 
-process_threads = Gauge(
+# No sample until a host sample read it (Linux only; the sampler runs with the recorder on).
+process_threads = UnknownUntilSetGauge(
     'drakkar_process_threads',
     'Threads of the worker process',
 )
@@ -1350,7 +1391,8 @@ children_cpu_seconds = Counter(
     'CPU time (user and system) of the task subprocesses that ended and were reaped',
 )
 
-storage_free_bytes = Gauge(
+# No sample until a host sample read it: a false 0 would fire low-disk alerts.
+storage_free_bytes = UnknownUntilSetGauge(
     'drakkar_storage_free_bytes',
     'Bytes free for this worker on the filesystem that holds storage.dir',
 )

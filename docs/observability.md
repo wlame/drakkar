@@ -259,9 +259,9 @@ The event-loop monitor of [Runtime Health](runtime-health.md). The state, the he
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `drakkar_loop_lag_seconds` | Histogram | -- | Event-loop lag per heartbeat tick (`runtime_health.tick`): how late the loop woke the monitor. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10. |
-| `drakkar_loop_lag_peak_seconds` | Gauge | -- | The largest lag of one heartbeat tick in the last 60 seconds. Compare it with `runtime_health.warn_lag` and `runtime_health.stall`. |
-| `drakkar_runtime_health_state` | Gauge | -- | 0 = healthy, 1 = degraded, 2 = stalled. Reads 2 while the heartbeat is silent for at least `runtime_health.stall`, with the same rule as `GET /api/v1/runtime/health`. |
-| `drakkar_runtime_heartbeat_age_seconds` | Gauge | -- | Seconds since the last heartbeat. A value at or above `runtime_health.stall` means the loop is stalled now. |
+| `drakkar_loop_lag_peak_seconds` | Gauge | -- | The largest lag of one heartbeat tick in the last 60 seconds. Compare it with `runtime_health.warn_lag` and `runtime_health.stall`. No sample until known: none with `runtime_health.enabled: false`. |
+| `drakkar_runtime_health_state` | Gauge | -- | 0 = healthy, 1 = degraded, 2 = stalled. Reads 2 while the heartbeat is silent for at least `runtime_health.stall`, with the same rule as `GET /api/v1/runtime/health`. Reads 0 with `runtime_health.enabled: false`. |
+| `drakkar_runtime_heartbeat_age_seconds` | Gauge | -- | Seconds since the last heartbeat. A value at or above `runtime_health.stall` means the loop is stalled now. No sample until known: none with `runtime_health.enabled: false`. |
 | `drakkar_runtime_stalls_total` | Counter | -- | Stalls detected: the loop was silent for longer than `runtime_health.stall`. Each one has its stacks in a `runtime_stall` event. |
 | `drakkar_runtime_lag_episodes_total` | Counter | `verdict` (`blocked`, `cpu_bound`, `starved`, `inconclusive`) | Lag episodes that ended, by verdict. An episode longer than `runtime_health.max_episode` counts once per part. See [Lag episodes and verdicts](runtime-health.md#lag-episodes-and-verdicts). |
 
@@ -278,9 +278,9 @@ Set at each `resource_sample` of the recorder (every `recorder.sqlite.state_inte
 | `drakkar_nfs_operations_total` | Counter | `mount` | NFS operations completed on the mount, by every process of the host that uses it. |
 | `drakkar_nfs_rtt_seconds_total` | Counter | `mount` | Total server round-trip time of those operations. `rate(drakkar_nfs_rtt_seconds_total[5m]) / rate(drakkar_nfs_operations_total[5m])` is the average round trip per operation. |
 | `drakkar_nfs_retransmits_total` | Counter | `mount` | NFS requests sent again because the server did not answer in time. |
-| `drakkar_process_threads` | Gauge | -- | Threads of the worker process. |
+| `drakkar_process_threads` | Gauge | -- | Threads of the worker process. No sample until known: none until the first host sample reads it (Linux only, with the recorder on). |
 | `drakkar_children_cpu_seconds_total` | Counter | -- | CPU time (user and system) of task subprocesses that ended and were reaped. It moves when a task ends, so read it as a rate over a few minutes. |
-| `drakkar_storage_free_bytes` | Gauge | -- | Bytes free for the worker on the filesystem that holds `storage.dir` (blocks reserved for root do not count). Not set without a `storage.dir`. |
+| `drakkar_storage_free_bytes` | Gauge | -- | Bytes free for the worker on the filesystem that holds `storage.dir` (blocks reserved for root do not count). No sample until known: none without a `storage.dir`, with the recorder off, or before the first host sample. |
 
 #### Recorder
 

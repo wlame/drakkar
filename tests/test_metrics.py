@@ -948,3 +948,79 @@ def test_recorder_requeue_overflow_help_text():
         'max_buffer_rows) while a chunk was put back at its front after a failed or cancelled write. '
         'Any nonzero value indicates data loss.'
     )
+
+
+# --- Gauges with no sample until known ---
+
+
+@pytest.fixture
+def unknown_gauge():
+    """A fresh UnknownUntilSetGauge on the default registry, removed after the test."""
+    from prometheus_client.registry import REGISTRY
+
+    from drakkar.metrics import UnknownUntilSetGauge
+
+    gauge = UnknownUntilSetGauge('drakkar_test_unknown_until_set', 'Help of the test gauge')
+    yield gauge
+    REGISTRY.unregister(gauge)
+
+
+def test_unknown_until_set_gauge_exports_no_sample_before_a_value(unknown_gauge):
+    from prometheus_client import generate_latest
+    from prometheus_client.registry import REGISTRY
+
+    assert REGISTRY.get_sample_value('drakkar_test_unknown_until_set') is None
+    text = generate_latest(REGISTRY).decode()
+    assert '# HELP drakkar_test_unknown_until_set Help of the test gauge' in text
+    assert '# TYPE drakkar_test_unknown_until_set gauge' in text
+    assert '\ndrakkar_test_unknown_until_set ' not in text
+
+
+def test_unknown_until_set_gauge_exports_a_set_value(unknown_gauge):
+    from prometheus_client.registry import REGISTRY
+
+    unknown_gauge.set(4096)
+
+    assert REGISTRY.get_sample_value('drakkar_test_unknown_until_set') == 4096
+
+
+def test_unknown_until_set_gauge_function_answering_none_exports_no_sample(unknown_gauge):
+    from prometheus_client.registry import REGISTRY
+
+    answers = iter([1.5, None])
+    unknown_gauge.set_function(lambda: next(answers))
+
+    assert REGISTRY.get_sample_value('drakkar_test_unknown_until_set') == 1.5
+    assert REGISTRY.get_sample_value('drakkar_test_unknown_until_set') is None
+
+
+def test_collect_all_metrics_lists_a_gauge_with_no_sample(unknown_gauge):
+    from drakkar.metrics import collect_all_metrics
+
+    entry = next(m for m in collect_all_metrics() if m['name'] == 'drakkar_test_unknown_until_set')
+
+    assert entry == {
+        'name': 'drakkar_test_unknown_until_set',
+        'type': 'gauge',
+        'help': 'Help of the test gauge',
+        'source': 'framework',
+        'samples': [],
+    }
+
+
+@pytest.mark.parametrize(
+    ('attribute', 'name'),
+    [
+        ('storage_free_bytes', 'drakkar_storage_free_bytes'),
+        ('process_threads', 'drakkar_process_threads'),
+        ('runtime_heartbeat_age_seconds', 'drakkar_runtime_heartbeat_age_seconds'),
+        ('loop_lag_peak_seconds', 'drakkar_loop_lag_peak_seconds'),
+    ],
+)
+def test_gauges_that_can_be_unknown_export_no_sample_until_known(attribute, name):
+    import drakkar.metrics as metrics_module
+
+    gauge = getattr(metrics_module, attribute)
+
+    assert isinstance(gauge, metrics_module.UnknownUntilSetGauge)
+    assert [family.name for family in gauge.describe()] == [name]

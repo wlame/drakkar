@@ -49,7 +49,7 @@ values of the event), and a counter reset adds nothing for its interval.
 | `nfs_mounts[]` | `drakkar_nfs_operations_total{mount}`, `drakkar_nfs_rtt_seconds_total{mount}`, `drakkar_nfs_retransmits_total{mount}` |
 | `threads` | `drakkar_process_threads` |
 | `cpu_children_pct` | `drakkar_children_cpu_seconds_total` (CPU seconds of reaped task subprocesses) |
-| none (metric only) | `drakkar_storage_free_bytes`: bytes free on the filesystem that holds `storage.dir` |
+| none (metric only) | `drakkar_storage_free_bytes`: bytes free on the filesystem that holds `storage.dir`; no sample until known |
 
 The average NFS round trip per operation over five minutes is
 `rate(drakkar_nfs_rtt_seconds_total[5m]) / rate(drakkar_nfs_operations_total[5m])`.
