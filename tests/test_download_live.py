@@ -975,11 +975,17 @@ async def test_a_download_whose_client_leaves_during_the_copy_releases_its_reser
     assert (open_snapshots.bytes, open_snapshots.count) == (0, 0)
 
 
-# A memory-only worker never started: no live file and no memory store (404); its
-# cache path is a mock attribute, so the cache copy fails (500).
+# A memory-only worker never started: no live file and no memory store (404); the
+# cache copy is made to fail (500).
 @pytest.mark.parametrize(('source', 'status'), [('file', 404), ('memory', 404), ('cache', 500)])
 async def test_a_download_that_answers_an_error_releases_its_reservation(tmp_path, monkeypatch, source, status):
     seen = _recorded_snapshot_holders(monkeypatch)
+
+    def failed_copy(_cache_path, _worker_name):
+        raise OSError('disk full')
+
+    monkeypatch.setattr(routes_debug, '_cache_file_path', lambda _app: str(tmp_path / 'w-1-cache.db'))
+    monkeypatch.setattr(routes_debug, '_snapshot_cache_file', failed_copy)
     client, _recorder = _client(tmp_path, memory_only=True)
     async with client:
         resp = await client.get('/api/v1/debug/download-live', params={'source': source})
