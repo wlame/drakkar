@@ -718,12 +718,11 @@ The [Operator UI reference](ui-reference.md) lists every value of every page and
 
 The landing page with a high-level overview of worker health:
 
-- **Partition tiles** -- one tile per assigned partition showing queue depth and status.
-- **Pool utilization** -- active tasks vs. max workers.
-- **Event counters** -- consumed, completed, failed, produced, committed totals.
-- **Consumer lag** -- total lag across all assigned partitions.
+- **Stat tiles** -- uptime, assigned partition count, executor pool (active / max), total events and consumer lag, then consumed, completed, failed and produced counters since the worker started. The Produced tile counts only Kafka sink payloads.
+- **Assigned Partitions** -- one small tile per assigned partition, showing only the partition number.
+- **Task Stats** -- statistics of the recent tasks.
 - **Custom links** -- configurable via `ui.custom_links` with template variables (`{worker_id}`, `{cluster_name}`, `{metrics_port}`, `{debug_port}`).
-- **Prometheus graph links** -- when `ui.prometheus.url` is configured, each stat card links directly to a Prometheus graph filtered to this worker. Worker-scoped links are grouped by category (Throughput, Latency, Health, Errors). Cluster-wide links appear when `ui.prometheus.cluster_label` is set.
+- **Prometheus graph links** -- when `ui.prometheus.url` is configured, each stat tile links directly to a Prometheus graph filtered to this worker. Worker-scoped links are grouped by category (Throughput, Latency, Health, Errors). Cluster-wide links appear when `ui.prometheus.cluster_label` is set.
 
 The two tables below the tiles hold the per-partition and per-sink detail. There are no separate `/partitions` or `/sinks` pages.
 
@@ -758,22 +757,25 @@ the low watermark for `earliest` (the default), the high watermark for
 Real-time view of the processing pipeline, fed by WebSocket (`/ws`). Organized in tabbed sections:
 
 - **Arrange** -- active [arrange()](handler.md#arrange-required) calls with partition, duration, and [message labels](handler.md#message_label).
-- **Executors Timeline** -- visual timeline of running, pending, and recently finished tasks. Slot-based layout matching `max_executors`. Tasks shorter than `ui.ws_min_duration` are hidden (except failures, which are always shown). See [Duration Thresholds](#duration-thresholds) for threshold tuning.
-- **Collect** -- recently completed tasks with exit codes and durations.
+- **Executors** (the default tab) -- visual timeline of running, pending, and recently finished tasks. Slot-based layout matching `max_executors`. Tasks shorter than `ui.ws_min_duration` are hidden (except failures, which are always shown). See [Duration Thresholds](#duration-thresholds) for threshold tuning.
+- **Task Results**, **Message Results**, **Window Results** -- one row per call of `on_task_complete`, `on_message_complete` and `on_window_complete`. A tab appears only when the handler overrides that hook.
+- **Runtime** -- the runtime health and host sample of the worker. See [Runtime health](runtime-health.md).
 
-Pool utilization bar shows active, waiting, and available slot counts.
+The page header shows the WebSocket state, the offload pool (`threads.offload`) and the executor pool: active, maximum and waiting slots. See [Live](ui-reference.md#live-live) for every value.
 
 #### `/history` -- Event Browser
 
-Filterable, paginated event browser across all partitions:
+The newest recorder rows, at most `ui.max_rows`, with no paging:
 
-- Partition filter dropdown
-- Event type toggles (consumed, arranged, task_started, task_completed, task_failed, committed, etc.)
-- 100 events per page with forward/backward pagination
+- Partition toggle buttons
+- Event type checkboxes (consumed, arranged, task_started, task_completed, task_failed, committed, etc.)
+- Origin radio buttons (all, kafka, http)
+
+The rows load when the page opens and when you press **Apply**. See [History](ui-reference.md#history-history).
 
 #### `/debug` -- Debug Tools
 
-Multi-purpose debug page with:
+Multi-purpose debug page. Its tabs are Metrics, Periodic Tasks, Message Trace, Message Probe, DLQ, Cache, Databases and Configs; see [Debug](ui-reference.md#debug-debug) for every value. The main features:
 
 - **Metrics viewer** -- live snapshot of all registered Prometheus metrics (framework and user), accessible via the `/api/v1/debug/metrics` JSON endpoint.
 - **Periodic tasks** -- status of all `@periodic` handler methods: last run time, duration, success/error status, total counts, and a sparkline of recent runs.
@@ -799,7 +801,8 @@ Detailed view of a single task's lifecycle:
 - **PID** -- OS process ID
 - **CLI** -- reconstructed command line (`binary_path` + `args`)
 - **stdout/stderr** -- captured process output (subject to `recorder.capture.min_output_duration` threshold)
-- **Source offsets** -- which Kafka offsets this task covers
+- **Source offsets** -- which Kafka offsets this task covers (an HTTP task shows its client, request id and request and response bodies instead)
+- **Environment variables** and **stdin** -- when the recorder captured them
 - **Event timeline** -- chronological list of all events for this task_id (started, completed/failed, task_complete)
 
 ### API

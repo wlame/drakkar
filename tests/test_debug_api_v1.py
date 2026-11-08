@@ -1138,6 +1138,8 @@ class TestDashboardLinks:
         assert set(links['card_links']) == {'lag', 'consumed', 'completed', 'failed', 'produced'}
         for url in links['card_links'].values():
             assert url.startswith('http://prom:9090/graph?')
+        # the Produced tile counts Kafka sink payloads only, so its link filters on the sink type
+        assert 'sink_type%3D%22kafka%22' in links['card_links']['produced']
         # worker links: grouped {category, links:[[name, url], ...]} cards
         categories = [group['category'] for group in links['worker_links']]
         assert categories == ['Throughput', 'Latency', 'Health', 'Errors']

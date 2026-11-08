@@ -498,7 +498,7 @@ class UIDeps:
             'consumed': _graph_url(f'rate(drakkar_messages_consumed_total{{{wf}}}[{rate}])'),
             'completed': _graph_url(f'rate(drakkar_executor_tasks_total{{{wf},status="completed"}}[{rate}])'),
             'failed': _graph_url(f'rate(drakkar_executor_tasks_total{{{wf},status="failed"}}[{rate}])'),
-            'produced': _graph_url(f'rate(drakkar_sink_payloads_delivered_total{{{wf}}}[{rate}])'),
+            'produced': _graph_url(f'rate(drakkar_sink_payloads_delivered_total{{{wf},sink_type="kafka"}}[{rate}])'),
         }
 
         # Worker-scoped panel links (grouped by category)

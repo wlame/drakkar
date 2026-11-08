@@ -256,7 +256,8 @@ the steps of the upgrade and the changes of behaviour.
 - **Docs: Operator UI reference and full metrics reference.** A new page lists every
   value of every UI page and tab, its source, its refresh and its metric. The
   metrics reference names every metric, the default process and Python metrics, and
-  what counts toward the memory of a worker.
+  what counts toward the memory of a worker. The Prometheus link of the Dashboard
+  Produced tile now filters on `sink_type="kafka"`, as the tile counts only Kafka sink payloads.
 - **Databases tab: where the data is.** `GET /api/v1/debug/databases` answers
   `worker`, and two new parts: `recorder` (the effective provider, the memory
   bounds, the rotation and the next archive slot, or the Postgres table and this

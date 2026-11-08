@@ -59,7 +59,7 @@ times in a row shows "stale since" with the time of its last good answer.
 | Consumed | Messages consumed since the worker started. | `drakkar_messages_consumed_total` |
 | Completed | Tasks whose subprocess exited with code 0, since the worker started. | `drakkar_executor_tasks_total{status="completed"}` |
 | Failed | Tasks that failed, since the worker started. | `drakkar_executor_tasks_total{status="failed"}` |
-| Produced | Payloads delivered to Kafka sinks, since the worker started. | Partial: `drakkar_sink_payloads_delivered_total{sink_type="kafka"}`. The link of the tile graphs every sink type. |
+| Produced | Payloads delivered to Kafka sinks, since the worker started. | `drakkar_sink_payloads_delivered_total{sink_type="kafka"}` |
 
 With `ui.prometheus.url` set, a tile label has a small link to a Prometheus
 graph of the same value for this worker.
