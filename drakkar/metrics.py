@@ -287,10 +287,12 @@ offset_lag = Gauge(
 # Broker lag: the high watermark minus the offset this worker committed, the
 # value of the Dashboard lag tile. Set every 10 s from cached watermarks, so
 # it costs no broker request; a partition without a cached watermark or a
-# commit has no sample, and a revoked partition's sample is removed.
+# commit has no sample, and a revoked partition's sample is removed. A paused
+# partition fetches nothing, so its watermark is queried from the broker.
 consumer_lag = Gauge(
     'drakkar_consumer_lag',
-    'Broker lag per partition: high watermark minus the offset this worker committed',
+    'Broker lag per partition: high watermark minus the offset this worker committed; '
+    'paused partitions are queried from the broker',
     ['partition'],
 )
 

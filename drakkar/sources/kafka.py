@@ -152,7 +152,7 @@ class KafkaSource:
         if consumer is None:
             return
         try:
-            lag = await consumer.cached_broker_lag(sorted(self.processors))
+            lag = await consumer.cached_broker_lag(sorted(self.processors), self._paused_partitions())
         except Exception as exc:
             suppressed = self._lag_failure_log.admit('lag_refresh')
             if suppressed is not None:
@@ -168,6 +168,12 @@ class KafkaSource:
             # A revoke during the read removed the label; do not bring it back.
             if pid in self.processors:
                 consumer_lag.labels(partition=str(pid)).set(value)
+
+    def _paused_partitions(self) -> frozenset[int]:
+        """Assigned partitions the consumer does not fetch from right now."""
+        if self.paused or self._consume_pause.active:
+            return frozenset(self.processors)
+        return frozenset(self.stalled_partitions | self.dead_partitions_paused) & frozenset(self.processors)
 
     async def run(self) -> None:
         """Main polling loop with backpressure via Kafka pause/resume.

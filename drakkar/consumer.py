@@ -256,26 +256,37 @@ class KafkaConsumer:
             }
         return result
 
-    async def cached_broker_lag(self, partition_ids: list[int]) -> dict[int, int]:
-        """Broker lag per partition from cached watermarks and this worker's own commits.
+    async def cached_broker_lag(
+        self, partition_ids: list[int], paused_ids: frozenset[int] = frozenset()
+    ) -> dict[int, int]:
+        """Broker lag per partition from this worker's own commits and the high watermark.
 
-        Sends no broker request: the high watermark is the value librdkafka
-        keeps from its fetch responses, and the committed offset is this
-        worker's last commit. A partition with no cached watermark yet, or
-        with no commit made here, is left out. Lag is computed as in
-        ``get_partition_lag``. A failed read raises to the caller.
+        An active partition uses the watermark librdkafka caches from its
+        fetch responses and sends no broker request. A paused partition
+        fetches nothing, so its cached watermark goes stale exactly while its
+        backlog grows; it gets a real query, run concurrently with the others
+        and bounded by ``LAG_QUERY_TIMEOUT_SECONDS``. A partition with no
+        commit made here, no cached watermark yet, or a failed query is left
+        out. Lag is computed as in ``get_partition_lag``. A failed cached
+        read raises to the caller.
         """
-        lag: dict[int, int] = {}
-        for pid in partition_ids:
-            committed = self._offsets_committed_here.get(pid)
-            if committed is None:
-                continue
-            tp = TopicPartition(self._source.topic, pid)
-            _low, high = await self._consumer.get_watermark_offsets(tp, cached=True)
-            if high == OFFSET_INVALID:
-                continue
-            lag[pid] = max(0, high - committed)
-        return lag
+        committed = {
+            pid: self._offsets_committed_here[pid] for pid in partition_ids if pid in self._offsets_committed_here
+        }
+        queried_ids = [pid for pid in committed if pid in paused_ids]
+        queried = await asyncio.gather(*[self._query_watermarks(pid) for pid in queried_ids])
+        highs: dict[int, int | None] = {
+            pid: None if marks is None else marks[1] for pid, marks in zip(queried_ids, queried, strict=True)
+        }
+        for pid in committed:
+            if pid not in paused_ids:
+                tp = TopicPartition(self._source.topic, pid)
+                highs[pid] = (await self._consumer.get_watermark_offsets(tp, cached=True))[1]
+        return {
+            pid: max(0, high - offset)
+            for pid, offset in committed.items()
+            if (high := highs[pid]) is not None and high != OFFSET_INVALID
+        }
 
     async def _fetch_committed(self, partition_ids: list[int]) -> dict[int, int]:
         """Committed offsets the broker reports, by partition, from one batched call.
@@ -301,12 +312,16 @@ class KafkaConsumer:
 
     async def _fetch_watermarks(self, partition_id: int) -> tuple[int, int]:
         """Low and high watermark of one partition; ``(0, 0)`` when the query fails."""
+        return await self._query_watermarks(partition_id) or (0, 0)
+
+    async def _query_watermarks(self, partition_id: int) -> tuple[int, int] | None:
+        """Ask the broker for the watermarks of one partition; ``None`` when the query fails (reported)."""
         try:
             tp = TopicPartition(self._source.topic, partition_id)
             low, high = await self._consumer.get_watermark_offsets(tp, timeout=LAG_QUERY_TIMEOUT_SECONDS)
         except Exception as e:
             _report_lag_query_failure(op='watermark', error=e, partition=partition_id)
-            return 0, 0
+            return None
         return low, high
 
     def _committed_offset(self, partition_id: int, broker_committed: dict[int, int]) -> int | None:

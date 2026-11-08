@@ -204,7 +204,7 @@ async def test_lag_refresh_sets_gauge_for_assigned_partitions(monkeypatch):
     await source._refresh_lag_once()
 
     assert consumer_lag.labels(partition='7')._value.get() == 42
-    fake.cached_broker_lag.assert_awaited_once_with([7])
+    fake.cached_broker_lag.assert_awaited_once_with([7], frozenset())
     consumer_lag.remove('7')
     await source.stop(time.monotonic() + 1)
 
@@ -236,3 +236,51 @@ async def test_lag_refresh_failure_is_logged_once_and_not_raised(monkeypatch):
     assert len(failures) == 1
     assert failures[0]['error'] == 'boom'
     await source.stop(time.monotonic() + 1)
+
+
+async def test_paused_partition_lag_uses_a_real_watermark_query(monkeypatch):
+    from drakkar.consumer import KafkaConsumer
+
+    consumer = KafkaConsumer.__new__(KafkaConsumer)
+    consumer._source = MagicMock(topic='t')
+    consumer._offsets_committed_here = {0: 10, 1: 10}
+    calls = []
+
+    async def watermarks(tp, **kwargs):
+        calls.append((tp.partition, kwargs))
+        return (0, 100) if kwargs.get('cached') else (0, 500)
+
+    consumer._consumer = MagicMock(get_watermark_offsets=watermarks)
+
+    lag = await consumer.cached_broker_lag([0, 1], frozenset({1}))
+
+    assert lag == {0: 90, 1: 490}
+    assert (0, {'cached': True}) in calls
+    assert any(pid == 1 and 'timeout' in kw and 'cached' not in kw for pid, kw in calls)
+
+
+async def test_failed_real_query_skips_only_that_paused_partition():
+    from drakkar.consumer import KafkaConsumer
+
+    consumer = KafkaConsumer.__new__(KafkaConsumer)
+    consumer._source = MagicMock(topic='t')
+    consumer._offsets_committed_here = {0: 10, 1: 10}
+
+    async def watermarks(tp, **kwargs):
+        if tp.partition == 1:
+            raise RuntimeError('timed out')
+        return (0, 100)
+
+    consumer._consumer = MagicMock(get_watermark_offsets=watermarks)
+
+    assert await consumer.cached_broker_lag([0, 1], frozenset({1})) == {0: 90}
+
+
+async def test_paused_partitions_are_all_assigned_ones_under_backpressure(monkeypatch):
+    source, _ = _source_with_fake_consumer(monkeypatch)
+    source.processors.update({1: MagicMock(), 2: MagicMock()})
+    source.stalled_partitions.add(2)
+
+    assert source._paused_partitions() == frozenset({2})
+    source.paused = True
+    assert source._paused_partitions() == frozenset({1, 2})
