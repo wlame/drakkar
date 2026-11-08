@@ -254,11 +254,22 @@ async def test_mixed_run_returns_the_budget_to_zero(pool):
     assert (budget.tasks, budget.bytes, budget.reserved_tasks, budget.reserved_bytes) == (0, 0, 0, 0)
 
 
-def test_window_output_feeds_the_byte_estimate_per_message():
+async def test_output_held_by_task_hooks_does_not_feed_the_byte_estimate(pool):
+    budget = big_budget()
+    handler = OneTaskHandler(budget)
+    proc = processor(handler, budget, pool)
+    proc.enqueue(make_msg(0))
+
+    await run_until_settled(proc)
+
+    assert handler.bytes_in_on_task_complete == [STDIN_BYTES + OUTPUT_BYTES]
+    assert proc._shape.held_bytes == pytest.approx(STDIN_BYTES)
+    assert budget.shape.held_bytes == pytest.approx(STDIN_BYTES)
+
+
+def test_message_shape_estimate_is_stdin_plus_kept_output():
     shape = MessageShape()
     shape.note_window(message_count=2, task_count=4, stdin_bytes=200)
+    shape.note_window_kept(message_count=2, kept_bytes=600)
 
-    shape.note_window_output(message_count=2, output_bytes=600)
-
-    assert shape.output_bytes == 300
     assert shape.held_bytes == 100 + 300

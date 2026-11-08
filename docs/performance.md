@@ -534,10 +534,9 @@ What is left, stated plainly:
   messages x (1000 - 10), at most one window thanks to the floor. A smaller
   `executor.window_size` makes this worst case smaller.
 - **The byte limit can also be passed by the outputs of the pending tasks.**
-  The estimate includes the average output per message, but a reservation is
-  given back when the window has fanned out, and a task's output exists only
-  when the task ends. So the outputs of the tasks that were pending when a
-  window was admitted come on top. Set `executor.max_stdout` and
+  The estimate counts only stdin and kept output per message, and a task's
+  output exists only when the task ends. So the outputs of the pending tasks
+  come on top of the cap and one message's stdin. Set `executor.max_stdout` and
   `executor.max_stderr` when outputs can be large.
 
 The `drakkar_pending_tasks` and `drakkar_pending_bytes` gauges show the real

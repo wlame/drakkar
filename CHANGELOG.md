@@ -481,8 +481,8 @@ the steps of the upgrade and the changes of behaviour.
   or `on_error` and its sink delivery end, on every path (retry, `on_error`
   replacement and cancellation included). A result kept for a message or window
   hook keeps its charge until that hook has run; it is not counted twice. Large
-  outputs now slow admission. The window estimate includes the average output
-  per message, and the outputs of the pending tasks can pass the byte limit;
+  outputs now slow admission. The window estimate does not include these
+  outputs, so the outputs of the pending tasks can pass the byte limit;
   `executor.max_stdout` and `executor.max_stderr` bound each one. New help text
   for `drakkar_pending_bytes`.
 

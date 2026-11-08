@@ -195,9 +195,6 @@ class Window:
     # Bytes of the stdout and stderr in ``results``, charged to the pending
     # budget until on_window_complete has run.
     kept_bytes: int = 0
-    # Bytes of the stdout and stderr its tasks' outcomes held while their own
-    # hooks and delivery ran (results kept in ``results`` are in kept_bytes).
-    output_bytes: int = 0
 
     @property
     def is_complete(self) -> bool:
@@ -1016,14 +1013,6 @@ class PartitionProcessor:
         """Hand a charged outcome to the holder that keeps it, so its hook releases the bytes, not the task."""
         holder.kept_bytes += held
 
-    def _note_window_output(self, window: Window) -> None:
-        """Fold the output a window's tasks held in their hooks and delivery into the averages per message."""
-        if self._account is None:
-            return
-        message_count = max(1, len(window.source_messages))
-        self._shape.note_window_output(message_count, window.output_bytes)
-        self._account.budget.shape.note_window_output(message_count, window.output_bytes)
-
     def _release_kept_bytes(self, holder: Window | MessageTracker) -> None:
         """Give back the output bytes a window or tracker kept, once its hook has run.
 
@@ -1696,7 +1685,6 @@ class PartitionProcessor:
 
         finally:
             # Released on every path; a retry charges its own outcome when it ends.
-            window.output_bytes += charged_output
             if handed_off_to_retry and charged_output and self._account is not None:
                 self._account.release(0, charged_output)
             if not handed_off_to_retry:
@@ -1750,7 +1738,6 @@ class PartitionProcessor:
         window.completed_count += 1
 
         if window.is_complete:
-            self._note_window_output(window)
             duration = time.monotonic() - window.start_time
             batch_duration.observe(duration)
 
