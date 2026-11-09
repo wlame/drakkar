@@ -164,6 +164,8 @@ HEADER_TRUNCATED = 'X-Drakkar-Slice-Truncated'
 _NUMBER_RE = re.compile(r'-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?')
 _WHOLE_RE = re.compile(r'[0-9]+')
 _SIGNED_RE = re.compile(r'-?[0-9]+')
+# Every bound of a whole-number parameter fits a signed 64-bit integer: at most 19 digits.
+_MAX_BOUND_DIGITS = 19
 _EVENT_TYPES = frozenset(event.value for event in EventType)
 _OUTPUT_VALUES = {'0': False, '1': True}
 
@@ -306,9 +308,23 @@ def _whole(text: str | None, low: int, high: int, message: str) -> int | None:
     if text is None:
         return None
     pattern = _SIGNED_RE if low < 0 else _WHOLE_RE
-    if not pattern.fullmatch(text) or not low <= int(text) <= high:
+    value = _digits_value(text) if pattern.fullmatch(text) else None
+    if value is None or not low <= value <= high:
         raise SliceRequestError(message)
-    return int(text)
+    return value
+
+
+def _digits_value(text: str) -> int | None:
+    """The value of a text of digits with an optional ``-``; ``None`` when it is too long for any bound.
+
+    Leading zeros are dropped first: ``int()`` refuses a text of more than
+    4300 digits, and a value with more than ``_MAX_BOUND_DIGITS`` digits is
+    outside every bound anyway.
+    """
+    digits = text.removeprefix('-').lstrip('0') or '0'
+    if len(digits) > _MAX_BOUND_DIGITS:
+        return None
+    return -int(digits) if text.startswith('-') else int(digits)
 
 
 def _sources(text: str | None, available: tuple[str, ...], *, check: bool) -> tuple[str, ...]:
