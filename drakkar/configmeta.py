@@ -27,6 +27,7 @@ from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
 from drakkar.config import (
+    AgentConfig,
     APIConfig,
     AutodiscoverConfig,
     CacheConfig,
@@ -152,6 +153,7 @@ _GROUP_DEFS: list[tuple[str, str, str, type[BaseModel]]] = [
     ('runtime_health', 'Runtime health (runtime_health:)', 'runtime-health-runtime-health', RuntimeHealthConfig),
     ('api', 'API (api:)', 'api-api', APIConfig),
     ('ui', 'UI (ui:)', 'ui-ui', UIConfig),
+    ('agent', 'Agent (agent:)', 'agent-agent', AgentConfig),
 ]
 
 

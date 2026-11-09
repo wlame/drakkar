@@ -187,7 +187,7 @@ with `dk-` headers that say where and why it failed.
 The config-summary line names the enabled sources:
 
 ```
-[worker-1/analytics-prod] sources=[kafka:search-requests/drakkar-integration/50poll http:8091] exec=4w/10win retries=3/120s api=8081 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
+[worker-1/analytics-prod] sources=[kafka:search-requests/drakkar-integration/50poll http:8091] exec=4w/10win retries=3/120s api=8081 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
 ```
 
 The `sources=[...]` token lists the enabled sources in a fixed order, Kafka

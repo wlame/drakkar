@@ -2899,6 +2899,43 @@
           "group": "ui"
         }
       ]
+    },
+    {
+      "key": "agent",
+      "title": "Agent (agent:)",
+      "doc_anchor": "agent-agent",
+      "entries": [
+        {
+          "path": "agent.enabled",
+          "env": "DK_AGENT__ENABLED",
+          "description": "Serve the agent routes.",
+          "full_description": "Serve the agent routes. They need api.enabled. Off: every agent route answers 404.",
+          "type": "boolean",
+          "default": false,
+          "secret": false,
+          "group": "agent"
+        },
+        {
+          "path": "agent.auth_token",
+          "env": "DK_AGENT__AUTH_TOKEN",
+          "description": "Bearer token for the agent routes.",
+          "full_description": "Bearer token for the agent routes. Empty (the default) means no auth: the routes show the effective config and the worker state to anyone who can reach the API port, and the worker logs a warning at start. When set, every agent route needs \"Authorization: Bearer <token>\"; a missing or wrong token answers 401. Leading and trailing white space is stripped on load.",
+          "type": "string",
+          "default": "",
+          "secret": true,
+          "group": "agent"
+        },
+        {
+          "path": "agent.include_payloads",
+          "env": "DK_AGENT__INCLUDE_PAYLOADS",
+          "description": "Let the state answer include task output text in its recent failures.",
+          "full_description": "Let the state answer include task output text in its recent failures. Off: the answer carries sizes and ids only.",
+          "type": "boolean",
+          "default": false,
+          "secret": false,
+          "group": "agent"
+        }
+      ]
     }
   ]
 }

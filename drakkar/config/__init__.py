@@ -11,6 +11,7 @@ Everything is re-exported here, so ``from drakkar.config import X`` remains
 the one import path regardless of which module defines ``X``.
 """
 
+from drakkar.config.agent import AgentConfig
 from drakkar.config.api import APIConfig
 from drakkar.config.autodiscover import AUTODISCOVER_PROVIDERS, CONNECTION_PROVIDERS, AutodiscoverConfig
 from drakkar.config.base import ConfigModel
@@ -111,6 +112,7 @@ __all__ = [
     'TIMELINE_OPS',
     'TIMELINE_STRING_FIELDS',
     'APIConfig',
+    'AgentConfig',
     'AutodiscoverConfig',
     'ByteSize',
     'CacheConfig',

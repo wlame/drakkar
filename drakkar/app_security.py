@@ -123,3 +123,22 @@ def warn_if_ui_unauthenticated(config: DrakkarConfig) -> None:
             'ui.allowed_origins (or the request Host header).'
         ),
     )
+
+
+def warn_if_agent_unauthenticated(config: DrakkarConfig) -> None:
+    """Log a warning when the agent routes are on and ``agent.auth_token`` is empty.
+
+    The agent routes show the effective config and the worker state, so a
+    reachable API port with no token exposes both. The worker still starts: the
+    warning makes the posture visible in the logs.
+    """
+    if not config.agent.enabled or config.agent.auth_token != '':
+        return
+    logger.warning(
+        'agent_surface_unauthenticated',
+        category='agent',
+        hint=(
+            'set agent.auth_token; the agent routes show the effective config and the worker state '
+            'to anyone who can reach the API port'
+        ),
+    )

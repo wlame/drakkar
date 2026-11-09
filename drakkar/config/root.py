@@ -13,6 +13,7 @@ import yaml
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from drakkar.config.agent import AgentConfig
 from drakkar.config.api import APIConfig
 from drakkar.config.autodiscover import CONNECTION_PROVIDERS, FILESYSTEM_PROVIDER, AutodiscoverConfig
 from drakkar.config.cache import CacheConfig
@@ -59,6 +60,8 @@ FILESYSTEM_WITHOUT_SHARED_DIR_MESSAGE = 'autodiscover.provider filesystem needs 
 UI_WITHOUT_API_MESSAGE = 'ui.enabled needs api.enabled; set ui.enabled to false, or set api.enabled to true'
 
 AUTODISCOVER_WITHOUT_API_MESSAGE = 'autodiscover.enabled needs api.enabled: peers reach a worker through its API'
+
+AGENT_WITHOUT_API_MESSAGE = 'agent.enabled needs api.enabled: the agent routes are served by the API server'
 
 # The loader passes the whole tree, the ``DK_*`` values already in it with their
 # map names resolved. No variable name can start with NUL, so with this prefix the
@@ -140,6 +143,7 @@ class DrakkarConfig(BaseSettings):
     runtime_health: RuntimeHealthConfig = Field(default_factory=RuntimeHealthConfig)
     api: APIConfig = Field(default_factory=APIConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
+    agent: AgentConfig = Field(default_factory=AgentConfig)
     app: dict[str, Any] = Field(
         default_factory=dict,
         description=(
@@ -169,7 +173,7 @@ class DrakkarConfig(BaseSettings):
 
     @model_validator(mode='after')
     def _validate_what_needs_the_api(self) -> 'DrakkarConfig':
-        """The UI and ``autodiscover`` both need the API server."""
+        """The UI, ``autodiscover`` and the agent routes all need the API server."""
         self.check_what_needs_the_api()
         return self
 
@@ -298,13 +302,13 @@ class DrakkarConfig(BaseSettings):
         return self.declared_connection('dlq.connection', self.dlq.provider, self.dlq.connection)
 
     def check_what_needs_the_api(self) -> None:
-        """Refuse a UI or an ``autodiscover`` with no API server to serve them.
+        """Refuse a UI, an ``autodiscover`` or an agent surface with no API server to serve them.
 
         The load calls this, and so does the startup after ``on_startup``, which
         may have changed the keys: both give the same messages.
 
         Raises:
-            ValueError: ``ui`` or ``autodiscover`` is on while ``api`` is off.
+            ValueError: ``ui``, ``autodiscover`` or ``agent`` is on while ``api`` is off.
         """
         if self.api.enabled:
             return
@@ -312,6 +316,8 @@ class DrakkarConfig(BaseSettings):
             raise ValueError(UI_WITHOUT_API_MESSAGE)
         if self.autodiscover.enabled:
             raise ValueError(AUTODISCOVER_WITHOUT_API_MESSAGE)
+        if self.agent.enabled:
+            raise ValueError(AGENT_WITHOUT_API_MESSAGE)
 
     def check_recorder_provider(self) -> None:
         """An enabled ``sqlite`` recorder needs a ``storage.dir``; an enabled ``postgres`` one its connection.
@@ -390,13 +396,13 @@ class DrakkarConfig(BaseSettings):
         """One-line human-readable config summary for startup logging and debug UI.
 
         Format:
-        [worker/cluster] sources=[kafka:topic/group/100poll http:8090] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=consul cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
+        [worker/cluster] sources=[kafka:topic/group/100poll http:8090] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=consul cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
 
         ``sources=[...]`` lists the enabled input sources in fixed order
         (kafka, then http). ``api`` is the port of the API server, or ``off``;
         ``ui`` says whether its UI routes are served (the ``ui.release``
         bundle-fetch settings are left out: they never affect pipeline
-        behavior). ``storage`` is the own-files folder (``mem`` with none),
+        behavior). ``agent`` says whether the agent routes are served. ``storage`` is the own-files folder (``mem`` with none),
         and ``shared`` appears only when the shared folder differs from it.
         ``recorder`` is the durable store, or ``off``; ``autodiscover`` the
         provider, or ``off``. The cache token reads ``cache.exchange`` for
@@ -423,6 +429,7 @@ class DrakkarConfig(BaseSettings):
 
         api_part = str(self.api.port) if self.api.enabled else 'off'
         ui_part = 'on' if self.ui.enabled else 'off'
+        agent_part = 'on' if self.agent.enabled else 'off'
 
         storage_part = self.storage.dir or 'mem'
         shared_dir = self.storage.shared_dir
@@ -453,6 +460,7 @@ class DrakkarConfig(BaseSettings):
             f' retries={retries_part}'
             f' api={api_part}'
             f' ui={ui_part}'
+            f' agent={agent_part}'
             f' storage={storage_part}'
             f'{shared_token}'
             f' recorder={recorder_part}'

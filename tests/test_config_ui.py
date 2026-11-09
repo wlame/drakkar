@@ -129,7 +129,7 @@ def test_config_summary_ui_off():
 def test_config_summary_storage_recorder_and_autodiscover_tokens_follow_ui():
     cfg = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     summary = cfg.config_summary(worker_id='w1')
-    assert ' ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off ' in summary
+    assert ' ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off ' in summary
 
 
 def test_probe_and_merge_default_to_enabled():

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A new `agent` config section with `enabled`, `auth_token` and `include_payloads`. The summary line shows `agent=on` or `agent=off`. With `agent.enabled` and no token, the worker logs `agent_surface_unauthenticated`.
+
 ### Fixed
 
 - The upgrading guide now names the new key `recorder.sqlite.max_queue` and says that task output counts toward `executor.max_pending_bytes` while its hooks and sink delivery run.

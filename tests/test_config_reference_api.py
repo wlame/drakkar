@@ -121,6 +121,7 @@ class TestShape:
             'runtime_health',
             'api',
             'ui',
+            'agent',
         ]
 
     async def test_group_has_title_and_doc_anchor(self):

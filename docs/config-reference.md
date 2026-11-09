@@ -549,6 +549,23 @@ ui:
 
 ---
 
+## Agent (`agent:`)
+
+The agent routes: a read-only surface that explains the worker to an AI agent. They are served by the API server of the [`api` section](#api-api), whatever `ui.enabled` says.
+
+```yaml
+agent:
+  enabled: false                   # serve the agent routes. They need api.enabled. env: DK_AGENT__ENABLED
+  auth_token: ''                   # bearer token for every agent route; '' = no auth, and the worker logs
+                                   # agent_surface_unauthenticated at start. env: DK_AGENT__AUTH_TOKEN
+  include_payloads: false          # let the state answer carry task output text in its recent failures.
+                                   # env: DK_AGENT__INCLUDE_PAYLOADS
+```
+
+One load error follows from it, checked right after the `api` rules and again after `on_startup`:
+
+- `agent.enabled needs api.enabled: the agent routes are served by the API server`
+
 ## Cache (`cache:`)
 
 📚 [Deep details](configuration.md#cache-cache) · [Cache page](cache.md)

@@ -257,6 +257,9 @@ LAYOUT = [
     'ui.timeline.events[].show',
     'ui.timeline.events[].link',
     'ui.timeline.events[].action',
+    'agent.enabled',
+    'agent.auth_token',
+    'agent.include_payloads',
     'app',
 ]
 
@@ -278,6 +281,7 @@ ROOT_SECTIONS = [
     'runtime_health',
     'api',
     'ui',
+    'agent',
     'app',
 ]
 

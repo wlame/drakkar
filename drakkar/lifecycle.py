@@ -50,7 +50,7 @@ from drakkar.app import (
     reasons_for_settings,
     snapshot_consumed_settings,
 )
-from drakkar.app_security import warn_if_ui_unauthenticated
+from drakkar.app_security import warn_if_agent_unauthenticated, warn_if_ui_unauthenticated
 from drakkar.budget import PendingBudget
 from drakkar.cache import Cache, CacheEngine
 from drakkar.cluster_tasks import (
@@ -652,6 +652,8 @@ class AppLifecycle:
                 reason='api.enabled=false — /healthz and /readyz are not served; Kubernetes probes need the API server',
             )
             return
+
+        warn_if_agent_unauthenticated(config)
 
         from drakkar.uiserver.server import APIServer
 

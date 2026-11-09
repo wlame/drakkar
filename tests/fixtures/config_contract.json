@@ -209,7 +209,7 @@
       "yaml": {},
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "memory_only_no_shared",
@@ -223,7 +223,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=mem recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=mem recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "shared_differs",
@@ -235,7 +235,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/var/lib/drakkar shared=/mnt/fleet recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/var/lib/drakkar shared=/mnt/fleet recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "shared_equal_to_storage",
@@ -247,7 +247,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/var/lib/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/var/lib/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "shared_set_with_memory_only_storage",
@@ -262,7 +262,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=mem shared=/mnt/fleet recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=mem shared=/mnt/fleet recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "ui_off",
@@ -273,7 +273,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=off agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "cache_exchange_off",
@@ -287,7 +287,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=on:f=3s/s=off/c=60s/max=10000 metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=on:f=3s/s=off/c=60s/max=10000 metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "cache_exchange_fractional_interval",
@@ -301,14 +301,14 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=on:f=3s/s=12.5s/c=60s/max=10000 metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=on:f=3s/s=12.5s/c=60s/max=10000 metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "no_cluster",
       "yaml": {},
       "worker": "w-1",
       "cluster": "",
-      "line": "[w-1] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "recorder_off_with_storage_dir",
@@ -322,7 +322,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/var/lib/drakkar recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/var/lib/drakkar recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "recorder_off_memory_only",
@@ -336,7 +336,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=mem recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=mem recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "provider_sqlite_explicit",
@@ -350,7 +350,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/var/lib/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/var/lib/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "provider_postgres_memory_only",
@@ -371,7 +371,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=mem recorder=postgres autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=mem recorder=postgres autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "provider_postgres_with_storage_dir",
@@ -392,7 +392,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/var/lib/drakkar recorder=postgres autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/var/lib/drakkar recorder=postgres autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "recorder_off_with_provider_postgres",
@@ -404,7 +404,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "dlq_switched_off",
@@ -415,7 +415,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=off sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=off sinks=[none] log=INFO"
     },
     {
       "name": "autodiscover_consul",
@@ -432,7 +432,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=consul cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=consul cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "autodiscover_postgres",
@@ -451,7 +451,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=postgres cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=postgres cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "autodiscover_redis",
@@ -470,7 +470,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=redis cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=redis cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "autodiscover_filesystem",
@@ -485,7 +485,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar shared=/mnt/fleet recorder=sqlite autodiscover=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar shared=/mnt/fleet recorder=sqlite autodiscover=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "autodiscover_off_with_a_provider_named",
@@ -496,7 +496,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "api_port",
@@ -507,7 +507,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8123 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8123 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "api_and_ui_off",
@@ -521,7 +521,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=off ui=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=off ui=off agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "ui_off_keeps_the_registry",
@@ -539,7 +539,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=off storage=/tmp/drakkar shared=/mnt/fleet recorder=sqlite autodiscover=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=off agent=off storage=/tmp/drakkar shared=/mnt/fleet recorder=sqlite autodiscover=filesystem cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "cache_on_defaults",
@@ -550,7 +550,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=on:f=3s/s=30s/c=60s/max=10000 metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=on:f=3s/s=30s/c=60s/max=10000 metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "cache_unbounded_has_no_max_token",
@@ -562,7 +562,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=on:f=3s/s=30s/c=60s metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=on:f=3s/s=30s/c=60s metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "cache_durations_print_in_seconds",
@@ -579,7 +579,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=on:f=1.5s/s=60s/c=120s/max=500 metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=on:f=1.5s/s=60s/c=120s/max=500 metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "recorder_off",
@@ -590,7 +590,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=off autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "metrics_off",
@@ -601,7 +601,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=off dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=off dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "dlq_topic",
@@ -612,7 +612,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=failed-events sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=failed-events sinks=[none] log=INFO"
     },
     {
       "name": "dlq_switched_off_with_a_topic",
@@ -624,7 +624,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=off sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=off sinks=[none] log=INFO"
     },
     {
       "name": "http_only_dlq_unconfigured",
@@ -640,7 +640,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[http:8090] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=unconfigured sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[http:8090] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=unconfigured sinks=[none] log=INFO"
     },
     {
       "name": "http_only_dlq_switched_off",
@@ -659,7 +659,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[http:8090] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=off sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[http:8090] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=off sinks=[none] log=INFO"
     },
     {
       "name": "http_only_dlq_topic",
@@ -679,7 +679,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[http:9100] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=failed-requests sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[http:9100] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=failed-requests sinks=[none] log=INFO"
     },
     {
       "name": "both_sources",
@@ -692,7 +692,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll http:8090] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll http:8090] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "executor_task_timeout_prints_in_seconds",
@@ -706,7 +706,7 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=8w/50win retries=5/300s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=8w/50win retries=5/300s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     },
     {
       "name": "sinks_and_log_level",
@@ -734,7 +734,18 @@
       },
       "worker": "w-1",
       "cluster": "search",
-      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[kf:results pg:main_db] log=DEBUG"
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[kf:results pg:main_db] log=DEBUG"
+    },
+    {
+      "name": "agent_on",
+      "yaml": {
+        "agent": {
+          "enabled": true
+        }
+      },
+      "worker": "w-1",
+      "cluster": "search",
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] exec=4w/100win retries=3/120s api=8080 ui=on agent=on storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     }
   ],
   "validation": [
@@ -2516,6 +2527,58 @@
         "DRAKKAR_TEST_CLUSTER": "workers"
       },
       "message": "cluster.name: 'workers' gives the folder name 'workers', which is reserved (fleet, history, merged, tasks, workers); choose another cluster name"
+    },
+    {
+      "name": "agent_needs_api",
+      "yaml": {
+        "api": {
+          "enabled": false
+        },
+        "ui": {
+          "enabled": false
+        },
+        "agent": {
+          "enabled": true
+        }
+      },
+      "message": "agent.enabled needs api.enabled: the agent routes are served by the API server"
+    },
+    {
+      "name": "ui_and_agent_need_api_ui_first",
+      "yaml": {
+        "api": {
+          "enabled": false
+        },
+        "ui": {
+          "enabled": true
+        },
+        "agent": {
+          "enabled": true
+        }
+      },
+      "message": "ui.enabled needs api.enabled; set ui.enabled to false, or set api.enabled to true"
+    },
+    {
+      "name": "autodiscover_and_agent_need_api_autodiscover_first",
+      "yaml": {
+        "api": {
+          "enabled": false
+        },
+        "ui": {
+          "enabled": false
+        },
+        "storage": {
+          "shared_dir": "/tmp/shared"
+        },
+        "autodiscover": {
+          "enabled": true,
+          "provider": "filesystem"
+        },
+        "agent": {
+          "enabled": true
+        }
+      },
+      "message": "autodiscover.enabled needs api.enabled: peers reach a worker through its API"
     }
   ],
   "load_values": [
@@ -3906,6 +3969,33 @@
       },
       "path": "cluster.name",
       "value": "history-hot"
+    },
+    {
+      "name": "agent_enabled_default_false",
+      "yaml": {},
+      "path": "agent.enabled",
+      "value": false
+    },
+    {
+      "name": "agent_auth_token_default_empty",
+      "yaml": {},
+      "path": "agent.auth_token",
+      "value": ""
+    },
+    {
+      "name": "agent_include_payloads_default_false",
+      "yaml": {},
+      "path": "agent.include_payloads",
+      "value": false
+    },
+    {
+      "name": "agent_enabled_by_env",
+      "yaml": {},
+      "env": {
+        "DK_AGENT__ENABLED": "true"
+      },
+      "path": "agent.enabled",
+      "value": true
     }
   ],
   "sink_policies": [
