@@ -340,6 +340,10 @@ class DrakkarApp:
         # the lifecycle before the registry starts; None until then.
         self._periodic_roster: PeriodicRoster | None = None
         self._api_url: str | None = None
+        # The own folder, fixed by the lifecycle when it takes the owner lock,
+        # so a ``storage.dir`` changed in ``on_startup`` cannot move the files
+        # out of the locked folder.
+        self._own_storage_dir: str | None = None
 
         self._executor_pool: ExecutorPool | None = None
         # Pending tasks and bytes of every source; built with the pool.
@@ -536,7 +540,13 @@ class DrakkarApp:
 
     @property
     def own_storage_dir(self) -> str:
-        """The folder of this worker's own files, ``<storage.dir>/<sanitized cluster>/<worker>``; ``''`` without one."""
+        """The folder of this worker's own files, ``<storage.dir>/<sanitized cluster>/<worker>``; ``''`` without one.
+
+        Fixed once the lifecycle has prepared the storage (before ``on_startup``
+        runs): every own file then goes to the folder the owner lock holds.
+        """
+        if self._own_storage_dir is not None:
+            return self._own_storage_dir
         return own_storage_dir(self._config.storage.dir, self._cluster_name, self._worker_id)
 
     @property

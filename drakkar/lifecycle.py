@@ -457,6 +457,7 @@ class AppLifecycle:
         """
         app = self._app
         storage_dir = app._config.storage.dir
+        app._own_storage_dir = app.own_storage_dir
         if not storage_dir:
             return
         # File I/O — keep it off the loop.

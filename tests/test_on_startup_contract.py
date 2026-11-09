@@ -273,3 +273,35 @@ class TestSinkPoliciesAreResolvedAtConstruction:
         assert reasons_for_settings(['sinks.kafka.results.max_retries']) == [
             "sinks.kafka.results.max_retries — each sink's policy is resolved in DrakkarApp.__init__"
         ]
+
+
+class TestTheOwnFolderIsFixedBeforeTheHook:
+    """The owner lock is taken on the own folder before `on_startup` runs.
+
+    A `storage.dir` changed in the hook is reported as ignored, and every own
+    file still goes to the locked folder.
+    """
+
+    async def test_a_changed_storage_dir_does_not_move_the_own_folder(self, tmp_path):
+        class MovesTheStorage(NoopHandler):
+            async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
+                config.storage.dir = str(tmp_path / 'elsewhere')
+                return config
+
+        app = DrakkarApp(
+            handler=MovesTheStorage(),
+            config=make_config(storage={'dir': str(tmp_path / 'store')}),
+            worker_id='w-1',
+        )
+        await app._lifecycle._prepare_storage()
+        locked_folder = app.own_storage_dir
+        try:
+            with capture_logs() as cap:
+                await app._lifecycle._run_on_startup()
+
+            assert app.own_storage_dir == locked_folder
+            assert locked_folder.startswith(str(tmp_path / 'store'))
+            ignored = [entry for entry in cap if entry['event'] == 'on_startup_config_change_ignored']
+            assert ignored[0]['settings'] == ['storage.dir']
+        finally:
+            await app._lifecycle._release_owner_lock()
