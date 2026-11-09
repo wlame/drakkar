@@ -707,6 +707,22 @@ class RuntimeHealthMonitor:
             'recent_episodes': list(self._recent_episodes),
         }
 
+    def brief_view(self) -> dict[str, Any]:
+        """State, heartbeat age, current lag, the peak lag of the last 60 s and the open episode's verdict.
+
+        Read from monitor memory like :meth:`snapshot`, so it answers from any
+        thread while the loop is stalled, but without copying the lag window.
+        """
+        heartbeat_age = self._heartbeat_age()
+        episode = self._current_episode_view()
+        return {
+            'state': self._effective_state(heartbeat_age),
+            'heartbeat_age_ms': round(heartbeat_age * 1000, 3),
+            'current_lag_ms': round(self._current_lag * 1000, 3),
+            'window_peak_lag_ms': round(self._window.peak(time.time(), LAG_PEAK_WINDOW_SECONDS) * 1000, 3),
+            'open_episode': episode['verdict'] if episode is not None else None,
+        }
+
     def brief_state(self) -> tuple[HealthState, float]:
         """``(state, current_lag_ms)`` without copying the lag window.
 

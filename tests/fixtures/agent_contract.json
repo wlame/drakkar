@@ -1047,5 +1047,1263 @@
       "value": 4,
       "masked": 4
     }
-  ]
+  ],
+  "diagnose_cases": {
+    "_comment": "Diagnose rules. Each case runs its steps in order on one fresh set of baselines. now is the monotonic time of the call in seconds. input holds the state parts of /api/v1/agent/state, the metric values by exposed name, and the settings the rules read: warn_lag_ms (runtime_health.warn_lag in milliseconds) and agent_token_set (agent.auth_token is not empty). A part, a field or a metric that the input does not hold makes its rule find nothing; a missing metric reads as 0. findings are in answer order (severity critical, warning, info, then rule) and hold rule, severity and evidence; title, explain and suggestion come from rules.yaml. Every case checks every rule, in rules.yaml order.",
+    "cases": [
+      {
+        "name": "healthy worker",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "health": {
+                  "state": "healthy",
+                  "heartbeat_age_ms": 120.5,
+                  "current_lag_ms": 1.2,
+                  "window_peak_lag_ms": 40,
+                  "stalls_total": 0,
+                  "open_episode": null,
+                  "uptime_seconds": 3600
+                },
+                "budget": {
+                  "tasks": 10,
+                  "max_tasks": 2000,
+                  "bytes": 1024,
+                  "max_bytes": 1073741824,
+                  "waiting_loops": 0,
+                  "backpressure_active": false,
+                  "pool_active": 2,
+                  "pool_max": 4,
+                  "pool_waiting": 0
+                },
+                "partitions": [
+                  {
+                    "partition": 0,
+                    "queued": 3,
+                    "pending_offsets": 2,
+                    "committed": 100,
+                    "lag": 5,
+                    "paused": false,
+                    "paused_by": [],
+                    "dead": false
+                  },
+                  {
+                    "partition": 1,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": null,
+                    "lag": null,
+                    "paused": false,
+                    "paused_by": [],
+                    "dead": false
+                  }
+                ],
+                "sinks": [
+                  {
+                    "type": "kafka",
+                    "name": "results",
+                    "breaker_open": false,
+                    "delivered_total": 50,
+                    "failed_total": 0,
+                    "last_delivery_seconds": 1.5
+                  }
+                ],
+                "recorder": {
+                  "enabled": true,
+                  "provider": "sqlite",
+                  "memory": null,
+                  "sqlite": null,
+                  "postgres": null
+                },
+                "autodiscover": {
+                  "enabled": true,
+                  "provider": "redis",
+                  "peers_online": 2,
+                  "peers_offline": 0,
+                  "cluster_tasks_match": true
+                },
+                "recent_failures": {
+                  "failures": []
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          }
+        ]
+      },
+      {
+        "name": "empty input finds nothing",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {},
+              "metrics": {},
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          }
+        ]
+      },
+      {
+        "name": "worker stalled",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "health": {
+                  "state": "stalled",
+                  "heartbeat_age_ms": 2500,
+                  "current_lag_ms": 1.2,
+                  "window_peak_lag_ms": 2500,
+                  "stalls_total": 0,
+                  "open_episode": null,
+                  "uptime_seconds": 3600
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "worker-stalled",
+                "severity": "critical",
+                "evidence": {
+                  "state": "stalled",
+                  "heartbeat_age_ms": 2500
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "loop lag at the warn limit",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "health": {
+                  "state": "lagging",
+                  "heartbeat_age_ms": 120.5,
+                  "current_lag_ms": 1.2,
+                  "window_peak_lag_ms": 100,
+                  "stalls_total": 0,
+                  "open_episode": null,
+                  "uptime_seconds": 3600
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "loop-lag-high",
+                "severity": "warning",
+                "evidence": {
+                  "window_peak_lag_ms": 100,
+                  "warn_lag_ms": 100
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "loop lag below the warn limit",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "health": {
+                  "state": "healthy",
+                  "heartbeat_age_ms": 120.5,
+                  "current_lag_ms": 1.2,
+                  "window_peak_lag_ms": 99.9,
+                  "stalls_total": 0,
+                  "open_episode": null,
+                  "uptime_seconds": 3600
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          }
+        ]
+      },
+      {
+        "name": "runtime health off",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "health": {
+                  "state": "off",
+                  "heartbeat_age_ms": null,
+                  "current_lag_ms": null,
+                  "window_peak_lag_ms": null,
+                  "stalls_total": 0,
+                  "open_episode": null,
+                  "uptime_seconds": 10
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          }
+        ]
+      },
+      {
+        "name": "budget full by tasks and pool full",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "budget": {
+                  "tasks": 2000,
+                  "max_tasks": 2000,
+                  "bytes": 1024,
+                  "max_bytes": 1073741824,
+                  "waiting_loops": 2,
+                  "backpressure_active": false,
+                  "pool_active": 4,
+                  "pool_max": 4,
+                  "pool_waiting": 3
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "budget-saturated",
+                "severity": "warning",
+                "evidence": {
+                  "tasks": 2000,
+                  "max_tasks": 2000,
+                  "bytes": 1024,
+                  "max_bytes": 1073741824
+                }
+              },
+              {
+                "rule": "pool-saturated",
+                "severity": "info",
+                "evidence": {
+                  "pool_active": 4,
+                  "pool_max": 4,
+                  "pool_waiting": 3
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "budget full by bytes",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "budget": {
+                  "tasks": 10,
+                  "max_tasks": 2000,
+                  "bytes": 1073741824,
+                  "max_bytes": 1073741824,
+                  "waiting_loops": 0,
+                  "backpressure_active": false,
+                  "pool_active": 2,
+                  "pool_max": 4,
+                  "pool_waiting": 0
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "budget-saturated",
+                "severity": "warning",
+                "evidence": {
+                  "tasks": 10,
+                  "max_tasks": 2000,
+                  "bytes": 1073741824,
+                  "max_bytes": 1073741824
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "pool full with nothing waiting",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "budget": {
+                  "tasks": 10,
+                  "max_tasks": 2000,
+                  "bytes": 1024,
+                  "max_bytes": 1073741824,
+                  "waiting_loops": 0,
+                  "backpressure_active": false,
+                  "pool_active": 4,
+                  "pool_max": 4,
+                  "pool_waiting": 0
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          }
+        ]
+      },
+      {
+        "name": "dead partitions and an operator pause",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "partitions": [
+                  {
+                    "partition": 3,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": 0,
+                    "paused": true,
+                    "paused_by": [
+                      "death"
+                    ],
+                    "dead": true
+                  },
+                  {
+                    "partition": 0,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": 0,
+                    "paused": true,
+                    "paused_by": [
+                      "debug"
+                    ],
+                    "dead": false
+                  },
+                  {
+                    "partition": 1,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": 0,
+                    "paused": true,
+                    "paused_by": [
+                      "death",
+                      "debug"
+                    ],
+                    "dead": true
+                  }
+                ]
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "partition-dead",
+                "severity": "critical",
+                "evidence": {
+                  "partitions": [
+                    1,
+                    3
+                  ]
+                }
+              },
+              {
+                "rule": "partition-paused-by-debug",
+                "severity": "info",
+                "evidence": {
+                  "partitions": [
+                    0,
+                    1
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "open sink breakers",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "sinks": [
+                  {
+                    "type": "postgres",
+                    "name": "main-db",
+                    "breaker_open": true,
+                    "delivered_total": 0,
+                    "failed_total": 7,
+                    "last_delivery_seconds": null
+                  },
+                  {
+                    "type": "http",
+                    "name": "hook",
+                    "breaker_open": true,
+                    "delivered_total": 3,
+                    "failed_total": 5,
+                    "last_delivery_seconds": 300.25
+                  },
+                  {
+                    "type": "kafka",
+                    "name": "results",
+                    "breaker_open": false,
+                    "delivered_total": 50,
+                    "failed_total": 0,
+                    "last_delivery_seconds": 1.5
+                  }
+                ]
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "sink-breaker-open",
+                "severity": "critical",
+                "evidence": {
+                  "sinks": [
+                    "http/hook",
+                    "postgres/main-db"
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "offline peers and a cluster task mismatch",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "autodiscover": {
+                  "enabled": true,
+                  "provider": "redis",
+                  "peers_online": 2,
+                  "peers_offline": 1,
+                  "cluster_tasks_match": false
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "cluster-tasks-mismatch",
+                "severity": "warning",
+                "evidence": {
+                  "cluster_tasks_match": false
+                }
+              },
+              {
+                "rule": "peers-offline",
+                "severity": "warning",
+                "evidence": {
+                  "peers_offline": 1,
+                  "peers_online": 2
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "autodiscover off",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "autodiscover": {
+                  "enabled": false,
+                  "provider": null,
+                  "peers_online": null,
+                  "peers_offline": null,
+                  "cluster_tasks_match": null
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          }
+        ]
+      },
+      {
+        "name": "agent routes without a token",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {},
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": false
+              }
+            },
+            "findings": [
+              {
+                "rule": "agent-unauthenticated",
+                "severity": "info",
+                "evidence": {
+                  "auth_token_set": false
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "findings sorted by severity then rule",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "health": {
+                  "state": "stalled",
+                  "heartbeat_age_ms": 1500,
+                  "current_lag_ms": 1.2,
+                  "window_peak_lag_ms": 40,
+                  "stalls_total": 0,
+                  "open_episode": null,
+                  "uptime_seconds": 3600
+                },
+                "budget": {
+                  "tasks": 2000,
+                  "max_tasks": 2000,
+                  "bytes": 1024,
+                  "max_bytes": 1073741824,
+                  "waiting_loops": 0,
+                  "backpressure_active": false,
+                  "pool_active": 2,
+                  "pool_max": 4,
+                  "pool_waiting": 0
+                },
+                "partitions": [
+                  {
+                    "partition": 0,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": 0,
+                    "paused": false,
+                    "paused_by": [],
+                    "dead": true
+                  }
+                ]
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": false
+              }
+            },
+            "findings": [
+              {
+                "rule": "partition-dead",
+                "severity": "critical",
+                "evidence": {
+                  "partitions": [
+                    0
+                  ]
+                }
+              },
+              {
+                "rule": "worker-stalled",
+                "severity": "critical",
+                "evidence": {
+                  "state": "stalled",
+                  "heartbeat_age_ms": 1500
+                }
+              },
+              {
+                "rule": "budget-saturated",
+                "severity": "warning",
+                "evidence": {
+                  "tasks": 2000,
+                  "max_tasks": 2000,
+                  "bytes": 1024,
+                  "max_bytes": 1073741824
+                }
+              },
+              {
+                "rule": "agent-unauthenticated",
+                "severity": "info",
+                "evidence": {
+                  "auth_token_set": false
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "lag grows: the first call only sets the baseline, a call within 60 s keeps it",
+        "steps": [
+          {
+            "now": 1000,
+            "input": {
+              "state": {
+                "partitions": [
+                  {
+                    "partition": 0,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": 10,
+                    "paused": false,
+                    "paused_by": [],
+                    "dead": false
+                  },
+                  {
+                    "partition": 1,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": 5,
+                    "paused": false,
+                    "paused_by": [],
+                    "dead": false
+                  }
+                ]
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 1030,
+            "input": {
+              "state": {
+                "partitions": [
+                  {
+                    "partition": 0,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": 500,
+                    "paused": false,
+                    "paused_by": [],
+                    "dead": false
+                  },
+                  {
+                    "partition": 1,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": 5,
+                    "paused": false,
+                    "paused_by": [],
+                    "dead": false
+                  }
+                ]
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 1060,
+            "input": {
+              "state": {
+                "partitions": [
+                  {
+                    "partition": 0,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": 20,
+                    "paused": false,
+                    "paused_by": [],
+                    "dead": false
+                  },
+                  {
+                    "partition": 1,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": null,
+                    "paused": false,
+                    "paused_by": [],
+                    "dead": false
+                  }
+                ]
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "lag-growing",
+                "severity": "warning",
+                "evidence": {
+                  "lag": 20,
+                  "previous_lag": 15,
+                  "seconds_since_previous": 60
+                }
+              }
+            ]
+          },
+          {
+            "now": 1100,
+            "input": {
+              "state": {
+                "partitions": [
+                  {
+                    "partition": 0,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": 900,
+                    "paused": false,
+                    "paused_by": [],
+                    "dead": false
+                  }
+                ]
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 1120.5,
+            "input": {
+              "state": {
+                "partitions": [
+                  {
+                    "partition": 0,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": 21,
+                    "paused": false,
+                    "paused_by": [],
+                    "dead": false
+                  }
+                ]
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "lag-growing",
+                "severity": "warning",
+                "evidence": {
+                  "lag": 21,
+                  "previous_lag": 20,
+                  "seconds_since_previous": 60.5
+                }
+              }
+            ]
+          },
+          {
+            "now": 1200,
+            "input": {
+              "state": {
+                "partitions": [
+                  {
+                    "partition": 0,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": 21,
+                    "paused": false,
+                    "paused_by": [],
+                    "dead": false
+                  }
+                ]
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 1300,
+            "input": {
+              "state": {
+                "partitions": [
+                  {
+                    "partition": 0,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": 0,
+                    "paused": false,
+                    "paused_by": [],
+                    "dead": false
+                  }
+                ]
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 1400,
+            "input": {
+              "state": {
+                "partitions": [
+                  {
+                    "partition": 0,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": 0,
+                    "paused": false,
+                    "paused_by": [],
+                    "dead": false
+                  }
+                ]
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          }
+        ]
+      },
+      {
+        "name": "lag unknown leaves the baseline",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "partitions": [
+                  {
+                    "partition": 0,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": null,
+                    "paused": false,
+                    "paused_by": [],
+                    "dead": false
+                  }
+                ]
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 100,
+            "input": {
+              "state": {
+                "partitions": [
+                  {
+                    "partition": 0,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": 30,
+                    "paused": false,
+                    "paused_by": [],
+                    "dead": false
+                  }
+                ]
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 200,
+            "input": {
+              "state": {
+                "partitions": []
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 300,
+            "input": {
+              "state": {
+                "partitions": [
+                  {
+                    "partition": 0,
+                    "queued": 0,
+                    "pending_offsets": 0,
+                    "committed": 10,
+                    "lag": 40,
+                    "paused": false,
+                    "paused_by": [],
+                    "dead": false
+                  }
+                ]
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "lag-growing",
+                "severity": "warning",
+                "evidence": {
+                  "lag": 40,
+                  "previous_lag": 30,
+                  "seconds_since_previous": 200
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "recorder drops and DLQ records since the previous call",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {},
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 5,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 2
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 1,
+            "input": {
+              "state": {},
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 8,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 3
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "recorder-dropping",
+                "severity": "warning",
+                "evidence": {
+                  "dropped_events": 3,
+                  "dropped_postgres_rows": 0
+                }
+              },
+              {
+                "rule": "dlq-writing",
+                "severity": "info",
+                "evidence": {
+                  "dlq_records": 1
+                }
+              }
+            ]
+          },
+          {
+            "now": 2,
+            "input": {
+              "state": {},
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 8,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 3
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 3,
+            "input": {
+              "state": {},
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 8,
+                "drakkar_recorder_postgres_dropped_rows_total": 40,
+                "drakkar_sink_dlq_messages_total": 3
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "recorder-dropping",
+                "severity": "warning",
+                "evidence": {
+                  "dropped_events": 0,
+                  "dropped_postgres_rows": 40
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "a missing metric reads as zero",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {},
+              "metrics": {},
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 1,
+            "input": {
+              "state": {},
+              "metrics": {
+                "drakkar_sink_dlq_messages_total": 4
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "dlq-writing",
+                "severity": "info",
+                "evidence": {
+                  "dlq_records": 4
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
 }

@@ -35,6 +35,8 @@ AGENT_ROUTES = {
     ('GET', '/api/v1/agent/manual'),
     ('GET', '/api/v1/agent/config'),
     ('GET', '/api/v1/agent/metrics'),
+    ('GET', '/api/v1/agent/state'),
+    ('GET', '/api/v1/agent/diagnose'),
 }
 API_APP_ROUTES = {('GET', '/healthz'), ('GET', '/readyz'), ('GET', PEER_ROUTE), *AGENT_ROUTES}
 TOKEN = 'secret-token'

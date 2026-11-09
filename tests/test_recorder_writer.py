@@ -197,3 +197,12 @@ def _drain(sub) -> list[dict]:
     while not sub.empty():
         out.append(sub.get_nowait())
     return out
+
+
+@pytest.mark.parametrize('kind', ['nonzero_exit', 'timeout', 'launch_failure', 'internal'])
+def test_a_failed_task_row_stores_the_failure_kind(writer, kind):
+    task = make_task()
+
+    writer.record_task_failed(task, ExecutorError(task=task, kind=kind, exit_code=None), partition=0)
+
+    assert writer.last_metadata()['kind'] == kind

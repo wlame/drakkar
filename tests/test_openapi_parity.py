@@ -142,13 +142,9 @@ def _stub_app():
     return create_ui_app(UIConfig(), recorder, app)
 
 
-# Routes of the contract that this backend does not serve.
-_CONTRACT_ROUTES_NOT_SERVED = {('GET', '/api/v1/agent/state'), ('GET', '/api/v1/agent/diagnose')}
-
-
 def test_served_routes_equal_spec():
     served = _app_routes(_stub_app())
-    spec = _spec_routes() - _CONTRACT_ROUTES_NOT_SERVED
+    spec = _spec_routes()
     assert served == spec, (
         f'route/spec drift.\nserved-only: {sorted(served - spec)}\nspec-only: {sorted(spec - served)}'
     )

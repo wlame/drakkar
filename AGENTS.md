@@ -178,8 +178,10 @@ parametrize).
 - The API server (`drakkar/uiserver/`) runs on its own thread and event loop. It is
   one listener: `/healthz`, `/readyz`, the peer route and the agent routes
   (`routes_agent.py`, behind `agent.enabled` and their own token) need only
-  `api.enabled` (`create_api_app`; they read no recorder), and every other route
-  needs `ui.enabled` too (`create_ui_app` adds them to that app).
+  `api.enabled` (`create_api_app`), and every other route needs `ui.enabled`
+  too (`create_ui_app` adds them to that app). The agent state and diagnose
+  routes read the recorder memory store only when it exists
+  (`drakkar/agent/state.py`).
   Every read of live worker state goes through `dispatch_to_loop(...)` to the
   main loop, plus a dedicated SQLite reader connection. Follow that pattern
   for any new endpoint.
@@ -240,7 +242,8 @@ drakkar/
                            answers), streaming.py (download streams and the open-download bound),
                            files_in_use.py (merge results being sent or merged)
   webapp/                  synchronous HTTP ingress pipeline
-  agent/                   the agent routes' knowledge registry: load, check, render; route parameters
+  agent/                   the agent routes' knowledge registry: load, check, render; route parameters;
+                           the state snapshot (state.py) and the diagnose rules (rules.py)
   agentdocs/               the registry files (YAML entries and their JSON Schema); a contract, read as raw bytes
   uihost/                  drakkar-ui bundle fetch/cache/serve engine
   config/                  pydantic-settings config (YAML + DK_ env overrides),

@@ -7,11 +7,15 @@ import datetime
 import json
 import math
 import os
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 from pydantic import BaseModel, Field, SecretStr
@@ -49,9 +53,11 @@ from drakkar.agent.registry import (
     select_manual,
     selection_json,
 )
+from drakkar.agent.rules import DiagnoseResult, RuleInput, finding_of
 from drakkar.app import DrakkarApp
 from drakkar.config import DrakkarConfig
-from drakkar.uiserver.routes_agent import AgentSurface, token_matches
+from drakkar.schedule import cluster_tasks_hash
+from drakkar.uiserver.routes_agent import AgentSurface, create_agent_router, token_matches
 from drakkar.uiserver.server import create_api_app, create_ui_app
 from tests.conftest import kafka_connections
 from tests.test_sources_validation import In, KafkaOnlyHandler, Out
@@ -59,7 +65,14 @@ from tests.test_sources_validation import In, KafkaOnlyHandler, Out
 CONTRACT = json.loads((Path(__file__).parent / 'fixtures' / 'agent_contract.json').read_text(encoding='utf-8'))
 MESSAGES = CONTRACT['messages']
 TOKEN = 'agent-secret-token'
-AGENT_GET_PATHS = ['/api/v1/agent', '/api/v1/agent/manual', '/api/v1/agent/config', '/api/v1/agent/metrics']
+AGENT_GET_PATHS = [
+    '/api/v1/agent',
+    '/api/v1/agent/manual',
+    '/api/v1/agent/config',
+    '/api/v1/agent/metrics',
+    '/api/v1/agent/state',
+    '/api/v1/agent/diagnose',
+]
 
 
 def _config(**sections: Any) -> DrakkarConfig:
@@ -84,6 +97,18 @@ def _drakkar_app(config: DrakkarConfig) -> MagicMock:
     app._config_origins = None
     app._config_before_on_startup = None
     app.handler = KafkaOnlyHandler()
+    # The live state the state and diagnose routes read: a worker before its start.
+    app._start_time = time.monotonic()
+    app._runtime_health = None
+    app._pending_budget = None
+    app._executor_pool = None
+    app._paused = False
+    app.kafka_source = None
+    app.consume_pause = SimpleNamespace(active=False)
+    app.sink_manager = SimpleNamespace(sinks={}, get_all_stats=dict)
+    app.fleet = None
+    app.worker_identity = SimpleNamespace(cluster='cluster-a')
+    app.cluster_tasks_hash = cluster_tasks_hash(())
     return app
 
 
@@ -1098,3 +1123,198 @@ async def test_the_manual_sizes_follow_the_handler_entries():
 
     assert surface.manual_tokens['app'] > before
     assert surface.index()['app_notes'] is True
+
+
+# --- the state and diagnose routes ---
+
+
+def _surface_client(drakkar_app: Any, surface: AgentSurface) -> AsyncClient:
+    app = FastAPI()
+    app.include_router(create_agent_router(drakkar_app, surface))
+    return _client(app)
+
+
+def _failed_task_store(stderr: str, args: str) -> Any:
+    async def read(query: str, params: Any) -> tuple[list[str], list[tuple[Any, ...]]]:
+        columns = ['id', 'ts', 'partition', 'offset', 'task_id', 'exit_code', 'duration', 'error_kind']
+        row: tuple[Any, ...] = (1, 2.0, 0, None, 't-1', 1, 0.5, 'nonzero_exit')
+        if 'stderr' in query:
+            columns += ['stderr', 'args']
+            row += (stderr, args)
+        return columns, [row]
+
+    store = MagicMock()
+    store.is_open = True
+    store.read = read
+    return SimpleNamespace(memory_store=store, flush_memory=AsyncMock(), persistence='none')
+
+
+async def test_the_state_route_answers_the_asked_parts_in_the_contract_order():
+    response = await _get(_config(), '/api/v1/agent/state', params={'parts': 'partitions,budget', 'detail': 'full'})
+
+    assert response.status_code == 200
+    assert response.headers['cache-control'] == 'no-store'
+    assert list(response.json()) == ['budget', 'partitions']
+
+
+async def test_the_state_route_answers_every_part_by_default():
+    state = (await _get(_config(), '/api/v1/agent/state')).json()
+
+    assert list(state) == list(STATE_PARTS)
+    assert state['recent_failures'] == {'failures': [], 'note': MESSAGES['no_recorder_store']}
+
+
+@pytest.mark.parametrize(
+    ('params', 'message'),
+    [
+        ({'parts': 'health,nope', 'detail': 'x'}, "unknown part 'nope'; known: "),
+        ({'parts': '', 'detail': 'x'}, "unknown part ''; known: "),
+        ({'detail': 'x'}, MESSAGES['detail']),
+    ],
+)
+async def test_the_state_route_checks_parts_then_detail(params, message):
+    response = await _get(_config(), '/api/v1/agent/state', params=params)
+
+    assert response.status_code == 400
+    assert response.json()['error'].startswith(message)
+
+
+async def test_the_diagnose_route_checks_detail():
+    response = await _get(_config(), '/api/v1/agent/diagnose', params={'detail': 'x'})
+
+    assert (response.status_code, response.json()) == (400, {'error': MESSAGES['detail']})
+
+
+@pytest.mark.parametrize('include_payloads', [False, True])
+async def test_payload_text_is_only_in_recent_failures_and_only_when_switched_on(include_payloads):
+    stderr = 'PAYLOAD-STDERR'
+    config = _config(agent={'enabled': True, 'auth_token': TOKEN, 'include_payloads': include_payloads})
+    drakkar_app = _drakkar_app(config)
+    drakkar_app._recorder = _failed_task_store(stderr, '["PAYLOAD-ARG"]')
+    headers = {'Authorization': f'Bearer {TOKEN}'}
+
+    async with _client(create_api_app(drakkar_app)) as client:
+        state = (await client.get('/api/v1/agent/state', headers=headers)).json()
+        diagnose_text = (await client.get('/api/v1/agent/diagnose', headers=headers)).text
+        others = [(await client.get(path, headers=headers)).text for path in AGENT_GET_PATHS[:4]]
+
+    (failure,) = state['recent_failures']['failures']
+    assert ('stderr_tail' in failure, 'args' in failure) == (include_payloads, include_payloads)
+    if include_payloads:
+        assert (failure['stderr_tail'], failure['args']) == (stderr, ['PAYLOAD-ARG'])
+    outside = {part: value for part, value in state.items() if part != 'recent_failures'}
+    for text in [dumps(outside), diagnose_text, *others]:
+        assert 'PAYLOAD' not in text
+
+
+async def test_the_state_and_diagnose_sizes_reach_the_index():
+    async with _client(create_api_app(_drakkar_app(_config()))) as client:
+        budget_text = (await client.get('/api/v1/agent/state', params={'parts': 'budget'})).text
+        diagnose_text = (await client.get('/api/v1/agent/diagnose')).text
+        index = (await client.get('/api/v1/agent')).json()
+
+    state_sizes = index['routes'][3]['approx_tokens']
+    assert state_sizes['budget'] == approx_tokens(budget_text)
+    assert state_sizes['health'] == 0
+    assert index['routes'][4]['approx_tokens'] == {'all': approx_tokens(diagnose_text)}
+
+
+async def test_diagnose_runs_every_rule_and_finds_the_missing_token():
+    async with _client(create_api_app(_drakkar_app(_config()))) as client:
+        answer = (await client.get('/api/v1/agent/diagnose')).json()
+
+    rule_keys = [entry['key'] for entry in load_registry().parts['rules']]
+    assert list(answer) == ['findings', 'checked', 'failed']
+    assert answer['checked'] == rule_keys
+    assert answer['failed'] == []
+    assert [finding['rule'] for finding in answer['findings']] == ['agent-unauthenticated']
+
+
+async def test_diagnose_with_a_token_finds_nothing_on_a_quiet_worker():
+    config = _config(agent={'enabled': True, 'auth_token': TOKEN})
+
+    response = await _get(config, '/api/v1/agent/diagnose', headers={'Authorization': f'Bearer {TOKEN}'})
+
+    assert response.json()['findings'] == []
+
+
+async def test_diagnose_compares_with_the_previous_call_of_the_same_worker():
+    from drakkar.metrics import sink_dlq_messages
+
+    config = _config(agent={'enabled': True, 'auth_token': TOKEN})
+    headers = {'Authorization': f'Bearer {TOKEN}'}
+    async with _client(create_api_app(_drakkar_app(config))) as client:
+        first = (await client.get('/api/v1/agent/diagnose', headers=headers)).json()
+        sink_dlq_messages.inc(2)
+        second = (await client.get('/api/v1/agent/diagnose', headers=headers)).json()
+        third = (await client.get('/api/v1/agent/diagnose', headers=headers)).json()
+
+    assert first['findings'] == []
+    (finding,) = second['findings']
+    assert (finding['rule'], finding['evidence']) == ('dlq-writing', {'dlq_records': 2})
+    assert third['findings'] == []
+
+
+async def test_diagnose_settings_come_from_the_config():
+    config = _config(runtime_health={'enabled': False, 'warn_lag': '250ms'}, agent={'enabled': True, 'auth_token': 'x'})
+
+    settings = AgentSurface(_drakkar_app(config)).rule_settings()
+
+    assert (settings.warn_lag_ms, settings.agent_token_set) == (250, True)
+
+
+async def test_the_handler_rules_follow_the_framework_rules():
+    seen: list[RuleInput] = []
+
+    async def app_rules(rule_input: RuleInput) -> DiagnoseResult:
+        seen.append(rule_input)
+        return DiagnoseResult(
+            findings=[
+                {**finding_of(load_registry().parts['rules'][0], {'n': 1}), 'rule': 'app:hot', 'severity': 'critical'}
+            ],
+            checked=['app:hot', 'app:slow'],
+            failed=[{'rule': 'app:slow', 'error': MESSAGES['rule_timed_out']}],
+        )
+
+    drakkar_app = _drakkar_app(_config())
+    surface = AgentSurface(drakkar_app)
+    surface.app_rules = app_rules
+
+    async with _surface_client(drakkar_app, surface) as client:
+        answer = (await client.get('/api/v1/agent/diagnose')).json()
+
+    assert answer['checked'][-2:] == ['app:hot', 'app:slow']
+    assert answer['failed'] == [{'rule': 'app:slow', 'error': MESSAGES['rule_timed_out']}]
+    assert [finding['rule'] for finding in answer['findings']] == ['app:hot', 'agent-unauthenticated']
+    (rule_input,) = seen
+    assert list(rule_input.state) == list(STATE_PARTS)
+
+
+async def test_a_stalled_main_loop_does_not_hold_the_state_route(monkeypatch):
+    monkeypatch.setattr('drakkar.uiserver.server.MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS', 0.2)
+    stalled = asyncio.new_event_loop()
+    release = threading.Event()
+    thread = threading.Thread(target=stalled.run_forever, daemon=True)
+    thread.start()
+    stalled.call_soon_threadsafe(release.wait)
+    drakkar_app = _drakkar_app(_config())
+    drakkar_app.main_loop = stalled
+    try:
+        started = time.monotonic()
+        async with _client(create_api_app(drakkar_app)) as client:
+            state = (await client.get('/api/v1/agent/state')).json()
+            diagnose = (await client.get('/api/v1/agent/diagnose')).json()
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        # Let the loop finish the reads it was asked for before it stops.
+        asyncio.run_coroutine_threadsafe(asyncio.sleep(0.05), stalled).result(timeout=2)
+        stalled.call_soon_threadsafe(stalled.stop)
+        thread.join(timeout=2)
+        stalled.close()
+
+    assert elapsed < 2
+    assert state['budget'] == {}
+    assert state['partitions'] == []
+    assert state['health']['state'] == 'off'
+    assert diagnose['failed'] == []

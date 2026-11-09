@@ -261,6 +261,11 @@ class PendingBudget:
             self._waiters.append(waiter)
         return waiter
 
+    @property
+    def waiting_loops(self) -> int:
+        """How many loops wait for room now; read only, the FIFO list is left as it is."""
+        return sum(1 for waiter in self._waiters if not waiter.done())
+
     def has_waiters(self) -> bool:
         """Whether a loop still waits in the FIFO list."""
         while self._waiters and self._waiters[0].done():

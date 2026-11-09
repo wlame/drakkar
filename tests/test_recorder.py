@@ -486,7 +486,7 @@ async def test_record_task_failed_without_a_result_writes_no_run_timing(recorder
     await recorder.flush()
 
     (event,) = await recorder.get_events(event_type='task_failed')
-    assert set(json.loads(event['metadata'])) == {'exception'}
+    assert set(json.loads(event['metadata'])) == {'exception', 'kind'}
 
 
 async def test_record_task_started_includes_queue_wait(recorder):

@@ -7,16 +7,19 @@ bearer token (401), then its parameters (400). Every answer is compact UTF-8
 JSON written by :func:`drakkar.agent.registry.dumps` (the Markdown manual
 excepted) and carries ``Cache-Control: no-store``.
 
-None of these routes reads the pipeline's live state. The registry files and
-the config metadata are read on a worker thread at the first request, and so is
-the metric collection; the answers are built on the API server's own loop.
+The registry files and the config metadata are read on a worker thread at the
+first request, and so is the metric collection; the answers are built on the
+API server's own loop. The state and diagnose routes read the live state through
+:mod:`drakkar.agent.state`, which reads the main loop's parts through the bounded
+dispatch, so a stalled main loop never holds a request.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hmac
-from collections.abc import Callable, Mapping, Sequence
+import time
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Request
@@ -56,6 +59,15 @@ from drakkar.agent.registry import (
     selection_json,
     selection_markdown,
 )
+from drakkar.agent.rules import (
+    Baselines,
+    DiagnoseResult,
+    RuleInput,
+    RuleSettings,
+    diagnose_answer,
+    run_framework_rules,
+)
+from drakkar.agent.state import read_state, rule_metric_values
 from drakkar.app import SETTINGS_CONSUMED_BEFORE_ON_STARTUP
 from drakkar.config import _parse_env_overrides
 from drakkar.config.origins import leaf_paths
@@ -96,6 +108,12 @@ INDEX_ROUTES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (AGENT_STATE_PATH, STATE_PARTS),
     (AGENT_DIAGNOSE_PATH, ()),
 )
+
+MILLISECONDS_PER_SECOND = 1000
+
+# The handler's rules: they get the input of the framework rules and answer
+# their own result, which follows the framework's in the answer.
+AppRules = Callable[[RuleInput], Awaitable[DiagnoseResult]]
 
 
 def json_answer(value: Any, status_code: int = 200) -> Response:
@@ -163,6 +181,10 @@ class AgentSurface:
         self._config_leaves: tuple[ConfigLeaf, ...] | None = None
         self._manual_tokens: dict[str, int] | None = None
         self._load_lock: asyncio.Lock | None = None
+        # The baselines of the rules that compare with the previous diagnose call.
+        self.baselines = Baselines()
+        # Set when the handler declares rules; they run after the framework rules.
+        self.app_rules: AppRules | None = None
 
     @property
     def app_entries(self) -> tuple[dict[str, Any], ...]:
@@ -360,6 +382,41 @@ class AgentSurface:
             return frozenset()
         return frozenset(metric._name for metric in discover_handler_metrics(handler).values())
 
+    async def state(self, *, parts: Sequence[str]) -> dict[str, Any]:
+        """The state answer for ``parts``; payload text only with ``agent.include_payloads``."""
+        return await read_state(self._app, parts, include_payloads=self._app._config.agent.include_payloads)
+
+    def note_state_sizes(self, answer: Mapping[str, Any]) -> None:
+        """Keep the size estimate of each state part of ``answer`` for the index."""
+        sizes = self.live_tokens[AGENT_STATE_PATH]
+        for part, value in answer.items():
+            sizes[part] = approx_tokens(dumps({part: value}))
+
+    def rule_settings(self) -> RuleSettings:
+        """The settings the diagnose rules read."""
+        config = self._app._config
+        return RuleSettings(
+            warn_lag_ms=config.runtime_health.warn_lag * MILLISECONDS_PER_SECOND,
+            agent_token_set=bool(config.agent.auth_token),
+        )
+
+    async def diagnose(self) -> dict[str, Any]:
+        """Run the framework rules, then the handler's, on one snapshot of every state part."""
+        rule_input = RuleInput(
+            state=await self.state(parts=STATE_PARTS),
+            metrics=rule_metric_values(),
+            settings=self.rule_settings(),
+            now=time.monotonic(),
+        )
+        result = run_framework_rules(
+            rule_input,
+            rule_entries=self.registry.parts['rules'],
+            baselines=self.baselines,
+        )
+        if self.app_rules is not None:
+            result = result.merged(await self.app_rules(rule_input))
+        return diagnose_answer(result)
+
     async def metrics(self, *, query: MetricsQuery, full: bool) -> dict[str, Any]:
         """The metrics answer; the registry is collected on a worker thread."""
         from prometheus_client.registry import REGISTRY
@@ -446,8 +503,26 @@ def create_agent_router(drakkar_app: DrakkarApp, surface: AgentSurface | None = 
             surface.live_tokens[AGENT_METRICS_PATH] = {WHOLE_ANSWER_KEY: approx_tokens(text)}
         return Response(content=text.encode('utf-8'), media_type=JSON_MEDIA_TYPE, headers=NO_STORE_HEADERS)
 
+    async def state(request: Request) -> Response:
+        """One snapshot of the live worker state, by part."""
+        params = request.query_params
+        parts = parse_parts(params.get('parts'), STATE_PARTS)
+        parse_detail(params.get('detail'))
+        answer = await surface.state(parts=parts)
+        surface.note_state_sizes(answer)
+        return json_answer(answer)
+
+    async def diagnose(request: Request) -> Response:
+        """The findings of the diagnose rules on one snapshot of the state."""
+        parse_detail(request.query_params.get('detail'))
+        text = dumps(await surface.diagnose())
+        surface.live_tokens[AGENT_DIAGNOSE_PATH] = {WHOLE_ANSWER_KEY: approx_tokens(text)}
+        return Response(content=text.encode('utf-8'), media_type=JSON_MEDIA_TYPE, headers=NO_STORE_HEADERS)
+
     router.add_api_route(AGENT_INDEX_PATH, guarded(index), methods=['GET'])
     router.add_api_route(AGENT_MANUAL_PATH, guarded(manual), methods=['GET'])
     router.add_api_route(AGENT_CONFIG_PATH, guarded(config), methods=['GET'])
     router.add_api_route(AGENT_METRICS_PATH, guarded(metrics), methods=['GET'])
+    router.add_api_route(AGENT_STATE_PATH, guarded(state), methods=['GET'])
+    router.add_api_route(AGENT_DIAGNOSE_PATH, guarded(diagnose), methods=['GET'])
     return router

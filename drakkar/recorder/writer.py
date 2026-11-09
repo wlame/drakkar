@@ -93,13 +93,13 @@ def _run_timing_metadata(result: ExecutorResult | None, reported_run_seconds: fl
 
 
 def _failed_metadata(task: ExecutorTask, error: ExecutorError, stdin_max_bytes: int) -> dict:
-    """Metadata for a task_failed event: the exception, plus the task's stdin.
+    """Metadata for a task_failed event: the exception, the failure kind, plus the task's stdin.
 
     stdin is stored on EVERY failure (capped), independent of the opt-in
     ``store_stdin`` flag — a failure without its input is half a fingerprint,
     and failures are rare enough that the write cost does not matter.
     """
-    metadata: dict = {'exception': error.exception}
+    metadata: dict = {'exception': error.exception, 'kind': error.kind}
     if task.stdin:
         stored_stdin, truncated = _capped_stdin(task.stdin, stdin_max_bytes)
         metadata['stdin'] = stored_stdin
