@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A handler can add its own agent notes with `agent_notes()`: business concepts, recipes, notes for its metrics and `app` keys, and diagnose rules. A handler rule runs on its own thread with a limit of 1 second, so a slow rule never holds the API server or the loop.
 - The agent config route masks the same secret-like key words as the UI config reference (`passwd`, `auth`, `private`, `cert` and `salt` too). The error text of a failed diagnose rule is cut to 500 bytes, and diagnose and handler rules never read task output text.
 - The `drakkar-agent` command (also `python -m drakkar.agent`) prints the agent manual, the effective config of a file and the agent reference page with no running worker. The docs have a new page, Agent Surface, and the generated page Agent Reference.
+- The integration harness has a new scenario, `scenario-agent.sh`. worker-1 and `headless-recorder` turn the agent surface on with a token. The scenario checks the 404 and 401 answers, the index, a manual topic, the state, diagnose with every rule, and the masked config.
 - The `task_failed` event metadata has two new keys: `kind` (`nonzero_exit`, `timeout`, `launch_failure` or `internal`) and `source_offsets` (the Kafka offsets of the task; not for an HTTP task).
 
 ### Fixed

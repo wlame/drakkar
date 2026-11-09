@@ -309,6 +309,11 @@ services:
       # window eviction within a few minutes of the start.
       DK_RECORDER__ENABLED: "false"
       DK_RECORDER__MEMORY__WINDOW: "1m"
+      # The agent surface is on with a token on worker-1 only; worker-2
+      # and worker-3 keep the default (off). scenario-agent.sh reads the
+      # token from this file.
+      DK_AGENT__ENABLED: "true"
+      DK_AGENT__AUTH_TOKEN: "harness-agent-token-worker-1-7c41d9"
     ports:
       - "9090:9090"
       - "8081:8081"
@@ -586,6 +591,9 @@ services:
       DK_RECORDER__ENABLED: "true"
       DK_RECORDER__ARCHIVE__ENABLED: "false"
       DK_AUTODISCOVER__ENABLED: "false"
+      # The agent surface answers with the UI off (scenario-agent.sh).
+      DK_AGENT__ENABLED: "true"
+      DK_AGENT__AUTH_TOKEN: "harness-agent-token-headless-3e8a52"
     ports:
       - "9097:9097"
       - "8093:8093"
