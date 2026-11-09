@@ -904,13 +904,148 @@
       "advice"
     ],
     "secret_text": "***",
-    "app_secret_words": [
+    "secret_key_words": [
       "password",
       "secret",
       "token",
       "key",
-      "dsn"
+      "dsn",
+      "credential",
+      "oauthbearer.config"
     ],
     "max_samples": 100
-  }
+  },
+  "config_masking_cases": [
+    {
+      "value": {
+        "name": "a",
+        "password": "hunter2"
+      },
+      "masked": {
+        "name": "a",
+        "password": "***"
+      }
+    },
+    {
+      "value": [
+        {
+          "name": "a",
+          "password": "hunter3"
+        },
+        {
+          "name": "b"
+        }
+      ],
+      "masked": [
+        {
+          "name": "a",
+          "password": "***"
+        },
+        {
+          "name": "b"
+        }
+      ]
+    },
+    {
+      "value": {
+        "outer": {
+          "api_key": "hunter4",
+          "host": "db"
+        }
+      },
+      "masked": {
+        "outer": {
+          "api_key": "***",
+          "host": "db"
+        }
+      }
+    },
+    {
+      "value": {
+        "token": ""
+      },
+      "masked": {
+        "token": ""
+      }
+    },
+    {
+      "value": {
+        "secret_ids": [
+          1,
+          2
+        ],
+        "credentials": {}
+      },
+      "masked": {
+        "secret_ids": "***",
+        "credentials": ""
+      }
+    },
+    {
+      "value": {
+        "sasl.password": "p1",
+        "sasl.oauthbearer.config": "clientSecret=p2",
+        "bootstrap.servers": "kafka:9092"
+      },
+      "masked": {
+        "sasl.password": "***",
+        "sasl.oauthbearer.config": "***",
+        "bootstrap.servers": "kafka:9092"
+      }
+    },
+    {
+      "value": {
+        "DB_DSN": "x",
+        "My-Token": "y",
+        "Credential_File": "z",
+        "SSL.KEY.PEM": "w"
+      },
+      "masked": {
+        "DB_DSN": "***",
+        "My-Token": "***",
+        "Credential_File": "***",
+        "SSL.KEY.PEM": "***"
+      }
+    },
+    {
+      "value": {
+        "url": "postgresql://user:p3@db/app"
+      },
+      "masked": {
+        "url": "postgresql://***:***@db/app"
+      }
+    },
+    {
+      "value": "https://hooks.example/in?password=p4&x=1",
+      "masked": "https://hooks.example/in?password=***&x=1"
+    },
+    {
+      "value": [
+        "password",
+        "token"
+      ],
+      "masked": [
+        "password",
+        "token"
+      ]
+    },
+    {
+      "value": {
+        "retries": 3,
+        "enabled": true,
+        "ratio": 0.5,
+        "nothing": null
+      },
+      "masked": {
+        "retries": 3,
+        "enabled": true,
+        "ratio": 0.5,
+        "nothing": null
+      }
+    },
+    {
+      "value": 4,
+      "masked": 4
+    }
+  ]
 }

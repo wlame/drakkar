@@ -6,28 +6,28 @@ is, any other value as its compact JSON text (``4``, ``true``, ``null``, ``[]``)
 Values with a unit are already their canonical text in the JSON dump of the
 config.
 
-Nothing secret leaves here. A secret key is ``***`` when it is set and ``''``
-when it is empty. The secrets that live inside a value (an ``executor.env`` or
-``client_config`` map, the client tokens of the HTTP source) are masked inside
-it, and every other text loses the credentials of any URL in it. In the ``app``
-section a key whose name holds a secret-like word is masked too.
+Nothing secret leaves here. A secret key of the config metadata is ``***`` when
+it is set and ``''`` when it is empty. A key whose name holds a secret-like word
+is masked the same way: an ``app`` key, and a key at any depth inside a list or
+map value (``executor.env``, ``client_config``, the HTTP source clients, the
+open ``app`` values). Every other text loses the credentials of any URL in it.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from drakkar.agent.registry import Registry, dumps
 from drakkar.config.origins import ORIGIN_DEFAULT, ORIGIN_ON_STARTUP, ORIGIN_YAML, ConfigOrigins, leaf_paths
-from drakkar.recorder.helpers import sanitize_env_value
 from drakkar.utils import redact_url
 
 SECRET_TEXT = '***'
 APP_SECTION = 'app'
-# A key of the app section whose name holds one of these words, in any letter case, is masked.
-APP_SECRET_WORDS = ('password', 'secret', 'token', 'key', 'dsn')
+# A key whose name holds one of these texts, in any letter case, is masked: an
+# app key, and a key at any depth inside a list or map value.
+SECRET_KEY_WORDS = ('password', 'secret', 'token', 'key', 'dsn', 'credential', 'oauthbearer.config')
 
 
 @dataclass(frozen=True)
@@ -63,60 +63,39 @@ def value_text(value: Any) -> str:
     return value if isinstance(value, str) else dumps(value)
 
 
-def _redact_texts(value: Any) -> Any:
-    """Remove URL credentials from every text inside ``value``."""
+def is_secret_key_name(name: str) -> bool:
+    """True when a key name holds a secret-like word, in any letter case."""
+    lowered = name.lower()
+    return any(word in lowered for word in SECRET_KEY_WORDS)
+
+
+def mask_value(value: Any) -> Any:
+    """Mask the secrets inside a value, at any depth of its lists and maps.
+
+    The value of a map key whose name holds a secret-like word becomes ``***``
+    when it is set and ``''`` when it is empty; every text loses the credentials
+    of any URL in it. A YAML value of another type (a date in the open app
+    section) becomes its text.
+    """
     if isinstance(value, str):
         return redact_url(value)
     if isinstance(value, list):
-        return [_redact_texts(item) for item in value]
+        return [mask_value(item) for item in value]
     if isinstance(value, dict):
-        return {str(key): _redact_texts(item) for key, item in value.items()}
+        return {
+            str(key): (SECRET_TEXT if item else '') if is_secret_key_name(str(key)) else mask_value(item)
+            for key, item in value.items()
+        }
     if value is None or isinstance(value, (bool, int, float)):
         return value
-    # A YAML value of another type (a date in the open app section) is written as its text.
     return str(value)
 
 
-def _mask_named_values(values: Any) -> Any:
-    """Mask a ``{name: text}`` map by each name: a secret-like name hides its value, a URL loses its credentials."""
-    if not isinstance(values, dict):
-        return values
-    return {
-        name: sanitize_env_value(name, value) if isinstance(value, str) else value for name, value in values.items()
-    }
-
-
-def _mask_http_clients(clients: Any) -> Any:
-    """Mask the ``token`` of each client of the HTTP source."""
-    if not isinstance(clients, list):
-        return clients
-    masked = []
-    for client in clients:
-        if isinstance(client, dict) and 'token' in client:
-            client = {**client, 'token': SECRET_TEXT if client['token'] else ''}
-        masked.append(client)
-    return masked
-
-
-# Keys whose secret lives inside the value, so the metadata's secret flag
-# cannot describe it. Keyed by the metadata path, map names written ``*``.
-_INNER_MASKERS: dict[str, Callable[[Any], Any]] = {
-    'sources.http.clients': _mask_http_clients,
-    'executor.env': _mask_named_values,
-    'connections.kafka.*.client_config': _mask_named_values,
-    'dlq.client_config': _mask_named_values,
-    'sinks.kafka.*.client_config': _mask_named_values,
-}
-
-
-def masked_text(path: str, value: Any, *, secret: bool) -> str:
-    """The text an answer may carry for ``value`` at the metadata ``path``."""
+def masked_text(value: Any, *, secret: bool) -> str:
+    """The text an answer may carry for ``value``: ``***`` or ``''`` for a secret, else the masked value."""
     if secret:
         return SECRET_TEXT if value else ''
-    masker = _INNER_MASKERS.get(path)
-    if masker is not None:
-        value = masker(value)
-    return value_text(_redact_texts(value))
+    return value_text(mask_value(value))
 
 
 def expand_path(node: Any, segments: Sequence[str]) -> list[tuple[list[str], Any]]:
@@ -163,20 +142,36 @@ class ConfigSources:
     ``origins`` is ``None`` for a config built in code; then a value that differs
     from its default counts as given in the file. ``before_on_startup`` is the
     config dump taken before the handler's ``on_startup`` ran, ``None`` before.
+    ``consumed`` holds the dotted paths the worker read before the hook ran: a
+    key equal to one of them or under one keeps the value of ``before_on_startup``,
+    because a change the hook made to it changes nothing.
     """
 
     origins: ConfigOrigins | None
     before_on_startup: Mapping[str, Any] | None
+    consumed: frozenset[str] = frozenset()
+
+    def is_consumed(self, path: str) -> bool:
+        """True when the worker read ``path`` before ``on_startup`` ran."""
+        return any(path == prefix or path.startswith(prefix + '.') for prefix in self.consumed)
 
 
-def _framework_origin(segments: list[str], value: Any, default: Any, sources: ConfigSources) -> str:
-    if sources.before_on_startup is not None:
-        found, before = _lookup(sources.before_on_startup, segments)
-        if not found or before != value:
-            return ORIGIN_ON_STARTUP
+def _given_origin(segments: list[str], value: Any, default: Any, sources: ConfigSources) -> str:
     if sources.origins is not None:
         return sources.origins.origin_of(tuple(segments))
     return ORIGIN_DEFAULT if value == default else ORIGIN_YAML
+
+
+def _value_and_origin(segments: list[str], value: Any, default: Any, sources: ConfigSources) -> tuple[Any, str]:
+    """The value the worker uses at ``segments`` and where it came from."""
+    if sources.before_on_startup is None:
+        return value, _given_origin(segments, value, default, sources)
+    found, before = _lookup(sources.before_on_startup, segments)
+    if found and sources.is_consumed('.'.join(segments)):
+        return before, _given_origin(segments, before, default, sources)
+    if not found or before != value:
+        return value, ORIGIN_ON_STARTUP
+    return value, _given_origin(segments, value, default, sources)
 
 
 def _entry(
@@ -221,14 +216,15 @@ def framework_entries(
         if segments[0] not in parts:
             continue
         advice = advice_of(advice_table, leaf.path) if full else None
-        default = masked_text(leaf.path, leaf.default, secret=leaf.secret)
-        for concrete, value in expand_path(config_dump, segments):
+        default = masked_text(leaf.default, secret=leaf.secret)
+        for concrete, live in expand_path(config_dump, segments):
+            value, origin = _value_and_origin(concrete, live, leaf.default, sources)
             entries.append(
                 _entry(
                     path='.'.join(concrete),
-                    value=masked_text(leaf.path, value, secret=leaf.secret),
+                    value=masked_text(value, secret=leaf.secret),
                     default=default,
-                    origin=_framework_origin(concrete, value, leaf.default, sources),
+                    origin=origin,
                     leaf=leaf,
                     meaning=leaf.description,
                     advice=advice,
@@ -240,7 +236,7 @@ def framework_entries(
 
 def is_secret_app_path(segments: Sequence[str]) -> bool:
     """True when a key name of an app path holds a secret-like word, in any letter case."""
-    return any(word in segment.lower() for segment in segments for word in APP_SECRET_WORDS)
+    return any(is_secret_key_name(segment) for segment in segments)
 
 
 def _json_type(value: Any) -> str:
@@ -289,8 +285,8 @@ def app_entries(view: AppConfigView) -> list[dict[str, Any]]:
         entries.append(
             _entry(
                 path=path,
-                value=masked_text(leaf.path, value, secret=secret),
-                default=masked_text(leaf.path, leaf.default, secret=secret) if view.leaves else '',
+                value=masked_text(value, secret=secret),
+                default=masked_text(leaf.default, secret=secret) if view.leaves else '',
                 origin=_app_origin(tuple(concrete), view),
                 leaf=leaf,
                 meaning=view.meanings.get(path, ''),

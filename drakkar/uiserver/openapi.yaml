@@ -3808,9 +3808,9 @@ components:
         labels:
           type: object
           additionalProperties: {type: string}
-        value: {type: number}
-        count: {type: number}
-        sum: {type: number}
+        value: {type: [number, 'null'], description: 'null for a NaN or infinite value.'}
+        count: {type: [number, 'null']}
+        sum: {type: [number, 'null']}
         buckets:
           type: array
           items:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import math
@@ -17,7 +18,7 @@ from pydantic import BaseModel, Field, SecretStr
 
 import drakkar as dk
 from drakkar.agent.config_view import (
-    APP_SECRET_WORDS,
+    SECRET_KEY_WORDS,
     SECRET_TEXT,
     AppConfigView,
     ConfigLeaf,
@@ -27,6 +28,7 @@ from drakkar.agent.config_view import (
     expand_path,
     framework_entries,
     is_secret_app_path,
+    mask_value,
     masked_text,
     value_text,
 )
@@ -176,9 +178,17 @@ async def test_the_ui_token_and_the_query_token_do_not_open_the_agent_routes():
 
 @pytest.mark.parametrize(
     ('header', 'expected'),
-    [('Bearer abc', True), ('Bearer  abc ', True), ('bearer abc', False), ('Bearer abd', False), ('', False)],
+    [
+        ('Bearer abc', True),
+        ('Bearer  abc ', True),
+        ('bearer abc', True),
+        ('BEARER abc', True),
+        ('Basic abc', False),
+        ('Bearer abd', False),
+        ('', False),
+    ],
 )
-def test_token_matches_needs_the_bearer_form(header, expected):
+def test_token_matches_needs_the_bearer_scheme_in_any_letter_case(header, expected):
     assert token_matches(header, 'abc') is expected
 
 
@@ -274,7 +284,7 @@ def test_the_answer_constants_follow_the_contract_fixture():
 
     assert pinned['max_samples'] == MAX_SAMPLES
     assert pinned['secret_text'] == SECRET_TEXT
-    assert list(APP_SECRET_WORDS) == pinned['app_secret_words']
+    assert list(SECRET_KEY_WORDS) == pinned['secret_key_words']
 
 
 async def test_the_index_names_an_empty_cluster_null():
@@ -610,19 +620,25 @@ def test_value_text(value, text):
 
 
 @pytest.mark.parametrize(
-    ('path', 'value', 'secret', 'text'),
+    ('value', 'secret', 'text'),
     [
-        ('x.dsn', 'postgresql://u:p@h/db', True, '***'),
-        ('x.dsn', '', True, ''),
-        ('sinks.http.*.headers', {}, True, ''),
-        ('sinks.http.*.headers', {'a': 'b'}, True, '***'),
-        ('ui.prometheus.url', 'http://u:p@prom', False, 'http://***:***@prom'),
-        ('ui.prometheus.url', 'http://prom?token=abc', False, 'http://prom?token=***'),
-        ('app.when', datetime.date(2026, 1, 2), False, '2026-01-02'),
+        ('postgresql://u:p@h/db', True, '***'),
+        ('', True, ''),
+        ({}, True, ''),
+        ({'a': 'b'}, True, '***'),
+        ('http://u:p@prom', False, 'http://***:***@prom'),
+        ('http://prom?token=abc', False, 'http://prom?token=***'),
+        (datetime.date(2026, 1, 2), False, '2026-01-02'),
     ],
 )
-def test_masked_text(path, value, secret, text):
-    assert masked_text(path, value, secret=secret) == text
+def test_masked_text(value, secret, text):
+    assert masked_text(value, secret=secret) == text
+
+
+@pytest.mark.parametrize('case', CONTRACT['config_masking_cases'])
+def test_config_masking_cases(case):
+    assert mask_value(case['value']) == case['masked']
+    assert masked_text(case['value'], secret=False) == value_text(case['masked'])
 
 
 def test_expand_path_takes_every_map_name():
@@ -855,11 +871,6 @@ def test_app_entries_of_a_raw_section_name_the_json_type(value, kind):
     assert entry['type'] == kind
 
 
-@pytest.mark.parametrize(('path', 'value'), [('executor.env', 'not a map'), ('sources.http.clients', 'not a list')])
-def test_inner_maskers_leave_a_value_of_another_shape_as_text(path, value):
-    assert masked_text(path, value, secret=False) == value
-
-
 def test_a_key_that_on_startup_added_has_the_on_startup_origin():
     leaf = ConfigLeaf(path='sinks.kafka.*.topic', description='d', type='string', default='', secret=False)
 
@@ -873,3 +884,217 @@ def test_a_key_that_on_startup_added_has_the_on_startup_origin():
     )
 
     assert (entry['path'], entry['origin']) == ('sinks.kafka.added_out.topic', 'on_startup')
+
+
+# --- secrets: every secret leaf of the metadata, and secrets inside values ---
+
+
+def _set_path(tree: dict[str, Any], segments: list[str], value: Any) -> None:
+    for segment in segments[:-1]:
+        tree = tree.setdefault(segment, {})
+    tree[segments[-1]] = value
+
+
+def _secret_for(path: str, number: int) -> tuple[Any, str]:
+    """A value for a secret leaf and the secret text inside it."""
+    secret = f'leaf-secret-{number}'
+    if path.endswith('.dsn'):
+        return f'postgresql://user:{secret}@db:5432/app', secret
+    if path.startswith('connections.redis.'):
+        return f'redis://:{secret}@cache:6379/0', secret
+    if path.endswith('.uri'):
+        return f'mongodb://user:{secret}@mongo:27017/app', secret
+    if path.endswith('.headers'):
+        return {'X-Api': secret}, secret
+    return secret, secret
+
+
+def _every_secret_config() -> tuple[dict[str, Any], list[str]]:
+    from drakkar.agent.registry import read_config_metadata
+
+    values: dict[str, Any] = {
+        'connections': {'kafka': {'main': {}}},
+        'sources': {'kafka': {'enabled': True, 'startup_align': {'enabled': False}}},
+        'metrics': {'enabled': False},
+        'runtime_health': {'enabled': False},
+        'ui': {'enabled': True, 'release': {'enabled': False}},
+        'agent': {'enabled': True},
+        'sinks': {'http': {'hook-out': {'url': 'https://hooks.example/in'}}},
+    }
+    secrets: list[str] = []
+    for number, row in enumerate(row for row in read_config_metadata() if row['secret']):
+        value, secret = _secret_for(row['path'], number)
+        segments = [('main-one' if segment == '*' else segment) for segment in row['path'].split('.')]
+        if segments[:2] == ['sinks', 'http']:
+            segments[2] = 'hook-out'
+        _set_path(values, segments, value)
+        secrets.append(secret)
+    inner = {
+        'sasl.password': 'inner-secret-1',
+        'sasl.oauthbearer.config': 'clientSecret=inner-secret-2',
+        'ssl.key.pem': 'inner-secret-3',
+    }
+    values['connections']['kafka']['main']['client_config'] = dict(inner)
+    values['dlq'] = {'client_config': dict(inner)}
+    values['sinks']['kafka'] = {'results-out': {'topic': 'results', 'client_config': dict(inner)}}
+    values['executor'] = {'env': {'SERVICE_CREDENTIAL': 'inner-secret-4', 'URL': 'http://u:inner-secret-5@svc'}}
+    values['sources']['http'] = {'enabled': True, 'clients': [{'name': 'partner', 'token': 'inner-secret-6'}]}
+    values['app'] = {
+        'services': [{'name': 'a', 'password': 'inner-secret-7'}],
+        'extra': {'api_key': 'inner-secret-8'},
+        'billing_dsn': 'inner-secret-9',
+    }
+    secrets += [f'inner-secret-{number}' for number in range(1, 10)]
+    return values, secrets
+
+
+async def test_no_secret_leaf_of_the_metadata_and_no_inner_secret_leaves():
+    values, secrets = _every_secret_config()
+    config = DrakkarConfig(**values)
+    token = config.agent.auth_token
+
+    response = await _get(
+        config, '/api/v1/agent/config', params={'detail': 'full'}, headers={'Authorization': f'Bearer {token}'}
+    )
+
+    assert response.status_code == 200
+    assert len(secrets) >= 18
+    for secret in secrets:
+        assert secret not in response.text, secret
+    entries = {entry['path']: entry for entry in response.json()['entries']}
+    secret_paths = {path for path, entry in entries.items() if entry['secret']}
+    for kind in ('kafka', 'postgres', 'redis', 'mongo', 'consul'):
+        assert any(path.startswith(f'connections.{kind}.main-one.') for path in secret_paths), kind
+    assert json.loads(entries['app.services']['value']) == [{'name': 'a', 'password': '***'}]
+
+
+class _Service(BaseModel):
+    name: str
+    password: str
+
+
+class _NestedAppSettings(BaseModel):
+    services: list[_Service] = Field(default_factory=list)
+    extra: dict[str, str] = Field(default_factory=dict)
+
+
+class _NestedAppHandler(dk.BaseDrakkarHandler[In, Out]):
+    app_config_model: ClassVar[type[BaseModel] | None] = _NestedAppSettings
+    app_env_prefix: ClassVar[str] = 'AGENTNESTED_'
+
+    async def arrange(self, messages, pending):
+        return []
+
+
+async def test_secrets_inside_the_values_of_an_app_model_are_masked(tmp_path, monkeypatch):
+    for name in [name for name in os.environ if name.startswith(('DK_', 'AGENTNESTED_'))]:
+        monkeypatch.delenv(name)
+    path = tmp_path / 'drakkar.yaml'
+    path.write_text(
+        ORIGINS_YAML
+        + 'app:\n  services:\n    - name: a\n      password: hunter3\n  extra:\n    api_key: hunter4\n    region: eu\n'
+    )
+    app = DrakkarApp(handler=_NestedAppHandler(), config_path=path, worker_id='w-1')
+
+    async with _client(create_api_app(app)) as client:
+        response = await client.get('/api/v1/agent/config', params={'parts': 'app'})
+
+    assert 'hunter3' not in response.text
+    assert 'hunter4' not in response.text
+    entries = {entry['path']: entry for entry in response.json()['entries']}
+    assert json.loads(entries['app.extra']['value']) == {'api_key': '***', 'region': 'eu'}
+
+
+async def test_an_env_variable_reaches_a_hyphenated_map_name(tmp_path, monkeypatch):
+    for name in [name for name in os.environ if name.startswith('DK_')]:
+        monkeypatch.delenv(name)
+    path = tmp_path / 'drakkar.yaml'
+    path.write_text(ORIGINS_YAML + 'sinks:\n  kafka:\n    results-out:\n      topic: results\n')
+    monkeypatch.setenv('DK_SINKS__KAFKA__RESULTS_OUT__FLUSH_TIMEOUT', '10s')
+    app = DrakkarApp(handler=KafkaOnlyHandler(), config_path=path, worker_id='w-1')
+
+    async with _client(create_api_app(app)) as client:
+        entries = (await client.get('/api/v1/agent/config', params={'parts': 'sinks'})).json()['entries']
+
+    by_path = {entry['path']: entry for entry in entries}
+    assert (
+        by_path['sinks.kafka.results-out.flush_timeout']['origin'],
+        by_path['sinks.kafka.results-out.flush_timeout']['value'],
+    ) == ('env', '10s')
+    assert by_path['sinks.kafka.results-out.topic']['origin'] == 'yaml'
+
+
+class _IgnoredChangeHandler(KafkaOnlyHandler):
+    async def on_startup(self, config):
+        config.storage.dir = '/changed/by/hook'
+        config.sinks.kafka['results-out'].max_retries = 9
+        config.executor.max_retries = 7
+        return config
+
+
+async def test_a_setting_the_worker_ignores_after_on_startup_shows_the_value_it_uses(tmp_path, monkeypatch):
+    for name in [name for name in os.environ if name.startswith('DK_')]:
+        monkeypatch.delenv(name)
+    path = tmp_path / 'drakkar.yaml'
+    path.write_text(
+        ORIGINS_YAML + 'storage:\n  dir: /from/yaml\nsinks:\n  kafka:\n    results-out:\n      topic: results\n'
+    )
+    app = DrakkarApp(handler=_IgnoredChangeHandler(), config_path=path, worker_id='w-1')
+    await app._lifecycle._run_on_startup()
+
+    async with _client(create_api_app(app)) as client:
+        entries = (await client.get('/api/v1/agent/config')).json()['entries']
+
+    by_path = {entry['path']: (entry['value'], entry['origin']) for entry in entries}
+    assert by_path['storage.dir'] == ('/from/yaml', 'yaml')
+    assert by_path['sinks.kafka.results-out.max_retries'] == ('null', 'default')
+    assert by_path['executor.max_retries'] == ('7', 'on_startup')
+
+
+# --- loading off the API loop ---
+
+
+async def test_health_answers_while_the_first_agent_request_loads_the_registry(monkeypatch):
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def slow_load():
+        try:
+            asyncio.get_running_loop()
+            calls.append('on a loop')
+        except RuntimeError:
+            calls.append('on a worker thread')
+        started.set()
+        release.wait(timeout=5)
+        return load_registry()
+
+    monkeypatch.setattr('drakkar.uiserver.routes_agent.load_registry', slow_load)
+    drakkar_app = _drakkar_app(_config())
+    drakkar_app.is_ready = True
+
+    async with _client(create_api_app(drakkar_app)) as client:
+        first = asyncio.create_task(client.get('/api/v1/agent'))
+        second = asyncio.create_task(client.get('/api/v1/agent/manual'))
+        await asyncio.to_thread(started.wait, 5)
+        health = await asyncio.wait_for(client.get('/healthz'), timeout=2)
+        release.set()
+        answers = await asyncio.gather(first, second)
+
+    assert health.status_code == 200
+    assert [answer.status_code for answer in answers] == [200, 200]
+    assert calls == ['on a worker thread']
+
+
+async def test_the_manual_sizes_follow_the_handler_entries():
+    surface = AgentSurface(_drakkar_app(_config()))
+    await surface.ensure_loaded()
+    before = surface.manual_tokens['app']
+
+    surface.app_entries = [{'key': 'app:concept:billing', 'summary': 'How the billing works.'}]
+    await surface.ensure_loaded()
+
+    assert surface.manual_tokens['app'] > before
+    assert surface.index()['app_notes'] is True
