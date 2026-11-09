@@ -361,16 +361,19 @@ def _open_temp_target(folder: str, worker: str) -> _Target:
     """Create the private temp file in ``folder`` and connect to it. Raises :class:`OSError` when it cannot be created."""
     path = slice_temp_path(folder, worker)
     os.close(os.open(path, _TEMP_FLAGS, 0o600))
+    conn: sqlite3.Connection | None = None
     try:
         secure_db_file(path)
         conn = sqlite3.connect(path, check_same_thread=False)
+        # A crash leaves a temp file the start sweep removes; no journal is needed.
+        conn.execute('PRAGMA journal_mode=OFF')
+        conn.execute('PRAGMA synchronous=OFF')
     except BaseException:
+        if conn is not None:
+            conn.close()
         with contextlib.suppress(FileNotFoundError):
             os.unlink(path)
         raise
-    # A crash leaves a temp file the start sweep removes; no journal is needed.
-    conn.execute('PRAGMA journal_mode=OFF')
-    conn.execute('PRAGMA synchronous=OFF')
     return _Target(conn, path)
 
 
@@ -573,14 +576,15 @@ class _Build:
         *,
         dedupe: str | None = None,
         remember: bool = False,
-    ) -> int:
-        """Copy the rows ``fetch(after_id, limit)`` gives (``id`` and ``ts`` first) in keyset batches; the rows written.
+    ) -> None:
+        """Copy the rows ``fetch(after_id, limit)`` gives (``id`` and ``ts`` first) in keyset batches.
 
         ``fetch`` also says whether the byte bound ended its batch early.
         ``dedupe`` leaves out the rows the memory store gave; ``remember``
-        keeps the ``(id, ts)`` of each batch written (the memory read).
+        keeps the ``(id, ts)`` of each batch written (the memory read). The
+        rows written are counted on the budget, batch by batch, so a fetch
+        that raises in a later batch leaves the earlier batches counted.
         """
-        written = 0
         after = _NO_ID
         while not self.budget.stopped:
             if self.budget.out_of_time():
@@ -597,14 +601,12 @@ class _Build:
                 self.writer.insert_events([row[1:] for row in take], worker_id)
                 if remember:
                     self.writer.remember_memory_rows([(row[0], row[1]) for row in take])
-                written += len(take)
             if len(kept) > remaining:
                 self.budget.stop(TRUNCATED_ROWS)
                 break
             if len(rows) < limit and not cut_by_bytes:
                 break
             after = rows[-1][0]
-        return written
 
     def _event_fetcher(
         self, conn: sqlite3.Connection, max_id: int, arm: Callable[[], None] | None = None
@@ -668,10 +670,11 @@ class _Build:
                 if read:
                     self.writer.add_source(SOURCE_KIND_MEMORY, None, self.worker.worker, 0)
                 return
-            written = 0
+            # Counted from the budget, so a read stopped in a later batch still counts the rows it wrote.
+            rows_before = self.budget.rows
             try:
                 if read:
-                    written = self._copy_memory_rows(conn)
+                    self._copy_memory_rows(conn)
                 if not self.cluster_scope:
                     self._arm(conn)
                     config = _source_config(conn)
@@ -682,17 +685,18 @@ class _Build:
             except _SourceUnreadable:
                 self._note(NOTE_SOURCE_UNREADABLE)
             if read:
-                self.writer.add_source(SOURCE_KIND_MEMORY, None, self.worker.worker, written)
+                # The table read drops these rows by key, so its limit must count them.
+                self.memory_rows = self.budget.rows - rows_before
+                self.writer.add_source(SOURCE_KIND_MEMORY, None, self.worker.worker, self.memory_rows)
 
-    def _copy_memory_rows(self, conn: sqlite3.Connection) -> int:
+    def _copy_memory_rows(self, conn: sqlite3.Connection) -> None:
         self._arm(conn)
         max_id = _run_source(conn, 'SELECT MAX(id) FROM events')[0][0]
         self.memory_cut = max_id
         if max_id is None:
-            return 0
+            return
         fetch = self._event_fetcher(conn, max_id, arm=lambda: self._arm(conn))
-        self.memory_rows = self._copy_batches(fetch, None, remember=True)
-        return self.memory_rows
+        self._copy_batches(fetch, None, remember=True)
 
     # -- files --
 
@@ -733,7 +737,8 @@ class _Build:
             self._unreadable(source, name)
             return
         done.add(source.path)
-        written = 0
+        # Counted from the budget, so a read stopped in a later batch still counts the rows it wrote.
+        rows_before = self.budget.rows
         try:
             if _table_columns(conn, 'workers'):
                 raise _SourceUnreadable('a merge result, not a recorder file')
@@ -743,14 +748,14 @@ class _Build:
                 self.writer.set_worker_config(config)
             max_row = _run_source(conn, 'SELECT MAX(id) FROM events')
             max_id = max_row[0][0] if max_row and max_row[0][0] is not None else 0
-            written = self._copy_batches(self._event_fetcher(conn, max_id), worker_id, dedupe=source.dedupe)
+            self._copy_batches(self._event_fetcher(conn, max_id), worker_id, dedupe=source.dedupe)
             self._copy_states(conn, worker_id)
-            self.writer.add_source(source.kind, name, worker, written)
+            self.writer.add_source(source.kind, name, worker, self.budget.rows - rows_before)
         except _SourceTimedOut:
             self.budget.stop(TRUNCATED_TIME)
-            self.writer.add_source(source.kind, name, source.worker, written)
+            self.writer.add_source(source.kind, name, source.worker, self.budget.rows - rows_before)
         except _SourceUnreadable:
-            self._unreadable(source, name, written)
+            self._unreadable(source, name, self.budget.rows - rows_before)
         finally:
             conn.close()
 

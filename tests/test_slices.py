@@ -598,6 +598,62 @@ async def test_a_source_statement_stopped_by_the_deadline_marks_time(tmp_path, m
     assert built.rows == 0
 
 
+def _stop_after_the_first_batch(monkeypatch, *, how: str) -> None:
+    """Make the second batch of a source fail: stopped by the real progress handler, or unreadable."""
+    first_done = [False]
+    real_fetch = slice_build._fetch_chunk
+    monkeypatch.setattr(slice_build, 'PROGRESS_HANDLER_STEPS', 1)
+    monkeypatch.setattr(slice_build, '_deadline_handler', lambda _deadline, _clock: lambda: int(first_done[0]))
+
+    def fetch(conn, sql, params, max_bytes):
+        if first_done[0] and how == 'unreadable':
+            raise slice_build._SourceUnreadable('database disk image is malformed')
+        rows = real_fetch(conn, sql, params, max_bytes)
+        first_done[0] = True
+        return rows
+
+    monkeypatch.setattr(slice_build, '_fetch_chunk', fetch)
+
+
+@pytest.mark.parametrize(
+    ('how', 'truncated', 'notes'), [('stopped', 'time', []), ('unreadable', None, ['source_unreadable'])]
+)
+async def test_a_file_source_stopped_after_its_first_batch_lists_the_rows_it_wrote(
+    tmp_path, monkeypatch, how, truncated, notes
+):
+    monkeypatch.setattr(slice_build, 'SLICE_BATCH_ROWS', 2)
+    own, _history = _folders(tmp_path)
+    backlog = _own_file(own, '2025-11-01__12_10_00')
+    write_recorder_file(backlog, [event(i, T0 + i, offset=i) for i in range(1, 6)])
+    _stop_after_the_first_batch(monkeypatch, how=how)
+
+    built = await _build(_request({'sources': 'files'}), _worker(tmp_path))
+    path = _save(built, tmp_path)
+
+    assert _offsets(path) == [(1, 1), (2, 2)]
+    assert _sources(path) == [('backlog', os.path.basename(backlog), WORKER, 2)]
+    assert _slice_row(path)['rows'] == 2 and built.rows == 2
+    assert built.truncated == truncated
+    assert json.loads(_slice_row(path)['notes']) == notes
+
+
+async def test_a_memory_read_stopped_after_its_first_batch_lists_the_rows_it_wrote(tmp_path, monkeypatch):
+    monkeypatch.setattr(slice_build, 'SLICE_BATCH_ROWS', 2)
+    store = await _memory_store([event(i, T0 + i, offset=i) for i in range(1, 6)])
+    _stop_after_the_first_batch(monkeypatch, how='stopped')
+    try:
+        worker = _worker(tmp_path, provider='none', open_memory=store.open_by_name)
+        built = await _build(_request(sources=OFF_SOURCES), worker)
+    finally:
+        await store.close()
+    path = _save(built, tmp_path)
+
+    assert built.truncated == 'time'
+    assert _offsets(path) == [(1, 1), (2, 2)]
+    assert _sources(path) == [('memory', None, WORKER, 2)]
+    assert _slice_row(path)['rows'] == 2
+
+
 async def test_build_without_a_folder_runs_in_ram_and_logs_it(tmp_path):
     store = await _memory_store([event(1, T0 + 1, offset=1)], config=True)
     try:
@@ -659,6 +715,25 @@ async def test_build_names_its_temp_file_for_the_start_sweep(tmp_path, monkeypat
     (name,) = seen
     assert re.fullmatch(rf'\.{WORKER}-slice-[0-9a-f]{{16}}\.download', name)
     assert download_temp_pattern(WORKER).fullmatch(name)
+    assert temp_files(own) == []
+
+
+def test_temp_target_settings_that_fail_remove_the_temp_file(tmp_path, monkeypatch):
+    own, _history = _folders(tmp_path)
+    real_connect = sqlite3.connect
+
+    class RefusingSettings(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if sql.startswith('PRAGMA'):
+                raise sqlite3.OperationalError('disk I/O error')
+            return super().execute(sql, *args)
+
+    monkeypatch.setattr(
+        slice_build.sqlite3, 'connect', lambda *args, **kwargs: real_connect(*args, factory=RefusingSettings, **kwargs)
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        slice_build._open_temp_target(own, WORKER)
+
     assert temp_files(own) == []
 
 
@@ -860,6 +935,29 @@ async def test_postgres_and_memory_read_each_row_once(tmp_path):
     assert 1 <= int(executes[0][2][1]) <= 60000
     assert fake.calls[0] == ('connect', DSN)
     assert ('commit',) in fake.calls and ('close',) in fake.calls
+
+
+async def test_a_memory_read_unreadable_after_its_first_batch_still_leaves_room_in_the_table_limit(
+    tmp_path, monkeypatch
+):
+    # The store gives rows 1 and 2, then cannot be read; the table holds rows 1 to 4 of this process.
+    monkeypatch.setattr(slice_build, 'SLICE_BATCH_ROWS', 2)
+    fake = SliceFakePostgres([pg_row(i, T0 + i, offset=i, instance=INSTANCE) for i in range(1, 5)])
+    store = await _memory_store([event(i, T0 + i, offset=i) for i in range(1, 5)])
+    _stop_after_the_first_batch(monkeypatch, how='unreadable')
+    try:
+        worker = _pg_worker(tmp_path, open_memory=store.open_by_name)
+        built = await _build(_request({'max_rows': '3'}, POSTGRES_SOURCES), worker, connect=fake.connect)
+    finally:
+        await store.close()
+    path = _save(built, tmp_path)
+
+    # One row left in the budget, plus the two memory rows the table read drops by key, plus one.
+    assert fake.cursor_calls()[0][2][-1] == 4
+    assert [row[1] for row in _offsets(path)] == [1, 2, 3]
+    assert built.truncated == 'rows'
+    assert _sources(path) == [('memory', None, WORKER, 2), ('postgres', None, WORKER, 1)]
+    assert json.loads(_slice_row(path)['notes']) == ['source_unreadable']
 
 
 async def test_postgres_alone_leaves_out_nothing(tmp_path):
