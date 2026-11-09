@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import json
 import pkgutil
+import re
 from pathlib import Path
 
 import jsonschema
@@ -99,7 +100,7 @@ def _tiny_files() -> dict[str, bytes]:
 
 
 def _tiny_registry() -> reg.Registry:
-    return reg.build_registry(files=_tiny_files(), config_paths=CONTRACT['tiny_registry']['config_paths'])
+    return reg.build_registry(files=_tiny_files(), config_metadata=CONTRACT['tiny_registry']['config_metadata'])
 
 
 def _keys(part: str) -> list[str]:
@@ -109,7 +110,9 @@ def _keys(part: str) -> list[str]:
 def _framework_metric_names() -> set[str]:
     """Every metric family of the framework, under its exposed name (counters with ``_total``)."""
     for module in pkgutil.walk_packages(drakkar.__path__, 'drakkar.'):
-        importlib.import_module(module.name)
+        # A __main__ module is a command line entry; importing it would run it.
+        if not module.name.endswith('.__main__'):
+            importlib.import_module(module.name)
     exposed_suffix = {'counter': '_total', 'info': '_info'}
     return {
         family.name + exposed_suffix.get(family.type, '')
@@ -181,10 +184,30 @@ def test_shipped_text_is_within_the_size_limits():
             assert len(entry.get('body', '')) <= 2000, f'{part} {entry["key"]}'
 
 
-@pytest.mark.parametrize('word', ['golang', ' Go ', 'Go backend', 'Python', 'phase', 'backlog'])
-def test_registry_text_names_no_backend_and_no_process_word(word):
+_BANNED_WORDS = (
+    r'\bGo\b',
+    r'(?i)\bgolang\b',
+    r'(?i)\bpython\b',
+    r'(?i)\bplan(s|ned)?\b',
+    r'(?i)\bspecs?\b',
+    r'(?i)\bwaves?\b',
+    r'(?i)\breviews?\b',
+    r'(?i)\bphases?\b',
+    r'(?i)\bbacklogs?\b',
+)
+
+
+@pytest.mark.parametrize('pattern', _BANNED_WORDS)
+def test_registry_text_names_no_backend_and_no_process_word(pattern):
     for name, data in reg.read_registry_files().items():
-        assert word not in data.decode('utf-8'), f'{name} contains {word!r}'
+        match = re.search(pattern, data.decode('utf-8'))
+        assert match is None, f'{name} contains {match.group(0)!r}'
+
+
+def test_banned_word_patterns_find_go_as_a_word_only():
+    assert re.search(_BANNED_WORDS[0], 'Go. The worker')
+    assert re.search(_BANNED_WORDS[0], 'and Go, too')
+    assert not re.search(_BANNED_WORDS[0], 'Good things go on')
 
 
 # --- schema checker ---------------------------------------------------------
@@ -268,7 +291,7 @@ def _broken(file_name: str, text: str) -> reg.RegistryError:
     files = _tiny_files()
     files[file_name] = text.encode('utf-8')
     with pytest.raises(reg.RegistryError) as raised:
-        reg.build_registry(files=files, config_paths=CONTRACT['tiny_registry']['config_paths'])
+        reg.build_registry(files=files, config_metadata=CONTRACT['tiny_registry']['config_metadata'])
     return raised.value
 
 
@@ -299,6 +322,52 @@ def test_build_refuses_a_schema_problem_and_unreadable_yaml():
     assert _broken('routes.yaml', '- [').problems[0].startswith('routes.yaml: cannot be read:')
 
 
+def test_build_refuses_a_repeated_mapping_key():
+    text = '- key: GET /x\n  summary: s\n  use: u\n  cost: cheap\n  cost: heavy\n'
+    problems = _broken('routes.yaml', text).problems
+    assert problems[0].startswith('routes.yaml: cannot be read:')
+    assert "repeated key 'cost'" in problems[0]
+
+
+def test_build_refuses_a_field_name_that_is_not_text():
+    text = '- key: e\n  summary: s\n  when: w\n  fields:\n    1: one\n'
+    problems = _broken('events.yaml', text).problems
+    assert problems == ['$.events[0].fields: must be of type object']
+
+
+def test_dumps_writes_compact_utf8_without_html_escaping():
+    assert reg.dumps({'b': '≥ <a> & “q”', 'a': [1, None]}) == '{"b":"≥ <a> & “q”","a":[1,null]}'
+
+
+def test_canonical_bytes_count_bytes_not_characters():
+    example = CONTRACT['canonical_example']
+    text = example['files']['concepts.yaml']
+    assert len(text.encode('utf-8')) != len(text)
+    assert f'concepts.yaml\n{len(text.encode("utf-8"))}\n' in example['canonical_bytes']
+
+
+def test_topic_config_path_is_answered_from_the_metadata():
+    selection = reg.select_manual(_tiny_registry(), topic='config:executor.max_pending_tasks')
+    assert reg.selection_json(selection) == {
+        'parts': {
+            'config': [
+                {
+                    'key': 'executor.max_pending_tasks',
+                    'summary': 'New windows wait while this many tasks are created and not settled.',
+                    'type': 'integer',
+                    'default': 2000,
+                }
+            ]
+        }
+    }
+
+
+def test_shipped_registry_answers_a_topic_for_every_config_path():
+    registry = reg.load_registry()
+    for path in sorted(registry.config_paths):
+        assert reg.select_manual(registry, topic=f'config:{path}')
+
+
 def test_an_empty_file_is_an_empty_list():
     problems = _broken('routes.yaml', '').problems
     assert problems == ['$.routes: needs at least 1 items']
@@ -320,7 +389,7 @@ def test_an_empty_file_is_an_empty_list():
     ],
 )
 def test_config_key_matches_metadata_paths_with_star_rules(key, matches):
-    paths = set(CONTRACT['tiny_registry']['config_paths'])
+    paths = {row['path'] for row in CONTRACT['tiny_registry']['config_metadata']}
     assert reg.config_key_matches(key, paths) is matches
 
 
@@ -356,6 +425,7 @@ def test_manual_rendering_matches_the_fixture(case):
         app_entries=case['app_entries'],
     )
     assert reg.selection_json(selection, case['promql_filters']) == case['json']
+    assert reg.dumps(reg.selection_json(selection, case['promql_filters'])) == case['json_text']
     assert reg.selection_markdown(selection, case['promql_filters']) == case['markdown']
 
 

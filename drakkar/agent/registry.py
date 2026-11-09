@@ -24,6 +24,7 @@ from importlib import resources
 from typing import Any
 
 import yaml
+from yaml.constructor import ConstructorError
 
 from drakkar.agent.params import MANUAL_PARTS
 
@@ -58,6 +59,8 @@ APP_REFERENCE_PREFIX = 'app:'
 FIELD_STYLES: tuple[tuple[str, str, str], ...] = (
     ('body', '', 'body'),
     ('principles', 'Principles', 'lines'),
+    ('type', 'Type', 'text'),
+    ('default', 'Default', 'json'),
     ('advice', 'Advice', 'text'),
     ('meaning', 'Meaning', 'text'),
     ('healthy', 'Healthy', 'text'),
@@ -103,6 +106,7 @@ class Registry:
     config_paths: frozenset[str]
     version: str
     _index: dict[str, tuple[str, dict[str, Any]]] = field(repr=False, default_factory=dict)
+    _config_metadata: dict[str, dict[str, Any]] = field(repr=False, default_factory=dict)
 
     def find(self, ref: str) -> tuple[str, dict[str, Any]] | None:
         """Return the part and entry a reference names, or ``None``."""
@@ -114,6 +118,15 @@ class Registry:
         if kind == 'config':
             return config_key_matches(key, self.config_paths)
         return ref in self._index
+
+    def config_metadata_entry(self, path: str) -> dict[str, Any] | None:
+        """An entry built from the config metadata for an exact path, or ``None``.
+
+        It holds ``key`` (the path), ``summary`` (the metadata description),
+        ``type`` and ``default`` (the canonical value of the metadata). A topic
+        or a reference to a config path with no advice entry answers it.
+        """
+        return self._config_metadata.get(path)
 
 
 # --- canonical bytes ------------------------------------------------------
@@ -138,7 +151,7 @@ def registry_version(files: Mapping[str, bytes]) -> str:
 # Keywords that only annotate a schema; the checker reads none of them.
 _ANNOTATION_KEYWORDS = frozenset({'$schema', 'title', 'description', '$defs'})
 _JSON_TYPES: dict[str, Callable[[Any], bool]] = {
-    'object': lambda value: isinstance(value, dict),
+    'object': lambda value: isinstance(value, dict) and all(isinstance(name, str) for name in value),
     'array': lambda value: isinstance(value, list),
     'string': lambda value: isinstance(value, str),
     'integer': lambda value: isinstance(value, int) and not isinstance(value, bool),
@@ -151,7 +164,9 @@ def _compile_pattern(pattern: str) -> re.Pattern[str]:
     """Compile a schema pattern with ECMA semantics for ``$``: the end of the text only.
 
     Python's ``$`` also matches before a final line break, so a pattern that ends
-    in an unescaped ``$`` is compiled with ``\\Z`` in its place.
+    in an unescaped ``$`` is compiled with ``\\Z`` in its place. A pattern that
+    ends in an escaped backslash before ``$`` is not recognised; the registry
+    schema has none.
     """
     if pattern.endswith('$') and not pattern.endswith('\\$'):
         pattern = pattern[:-1] + '\\Z'
@@ -295,10 +310,28 @@ def reference_of(part: str, key: str) -> str:
 # --- loading --------------------------------------------------------------
 
 
+class _StrictLoader(yaml.SafeLoader):
+    """A safe YAML loader that refuses a mapping with the same key twice.
+
+    A plain safe load keeps the last value, while a strict reader refuses
+    the file; refusing here makes every reader fail the same way.
+    """
+
+    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Any, Any]:
+        """Build a mapping, raising on a repeated key."""
+        seen = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise ConstructorError(None, None, f'repeated key {key!r}', key_node.start_mark)
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
 def _parse_entries(name: str, data: bytes) -> Any:
     """Parse one YAML file; an empty file is an empty list."""
     try:
-        parsed = yaml.safe_load(data.decode('utf-8'))
+        parsed = yaml.load(data.decode('utf-8'), Loader=_StrictLoader)  # _StrictLoader derives from SafeLoader
     except (UnicodeDecodeError, yaml.YAMLError) as error:
         raise RegistryError([f'{name}: cannot be read: {error}']) from error
     return [] if parsed is None else parsed
@@ -311,8 +344,24 @@ def _normalize(entry: dict[str, Any]) -> dict[str, Any]:
     return entry
 
 
-def build_registry(files: Mapping[str, bytes], config_paths: Sequence[str] | frozenset[str]) -> Registry:
-    """Parse and check the registry files; raise ``RegistryError`` with every problem found."""
+def _metadata_entries(config_metadata: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        row['path']: {
+            'key': row['path'],
+            'summary': row['description'],
+            'type': row['type'],
+            'default': row['default'],
+        }
+        for row in config_metadata
+    }
+
+
+def build_registry(files: Mapping[str, bytes], config_metadata: Sequence[Mapping[str, Any]]) -> Registry:
+    """Parse and check the registry files; raise ``RegistryError`` with every problem found.
+
+    ``config_metadata`` is the list of leaf entries of the config metadata, each with
+    ``path`` (map names written ``*``), ``description``, ``type`` and ``default``.
+    """
     schema = json.loads(files[SCHEMA_FILE].decode('utf-8'))
     document = {part: _parse_entries(name, files[name]) for part, name in PART_FILES}
     problems = schema_problems(instance=document, schema=schema, root=schema)
@@ -330,9 +379,10 @@ def build_registry(files: Mapping[str, bytes], config_paths: Sequence[str] | fro
 
     registry = Registry(
         parts=parts,
-        config_paths=frozenset(config_paths),
+        config_paths=frozenset(row['path'] for row in config_metadata),
         version=registry_version(files),
         _index=index,
+        _config_metadata=_metadata_entries(config_metadata),
     )
     for entry in parts['config']:
         if not config_key_matches(entry['key'], registry.config_paths):
@@ -353,16 +403,16 @@ def read_registry_files() -> dict[str, bytes]:
     return {name: folder.joinpath(name).read_bytes() for name in CANONICAL_FILE_ORDER}
 
 
-def read_config_paths() -> list[str]:
-    """Every leaf path of the shipped config metadata, map names written ``*``."""
+def read_config_metadata() -> list[dict[str, Any]]:
+    """Every leaf entry of the shipped config metadata, map names written ``*``."""
     metadata = json.loads(resources.files('drakkar').joinpath(*CONFIG_METADATA_RESOURCE).read_text(encoding='utf-8'))
-    return [entry['path'] for group in metadata['groups'] for entry in group['entries']]
+    return [entry for group in metadata['groups'] for entry in group['entries']]
 
 
 @cache
 def load_registry() -> Registry:
     """The shipped registry, checked once per process."""
-    return build_registry(files=read_registry_files(), config_paths=read_config_paths())
+    return build_registry(files=read_registry_files(), config_metadata=read_config_metadata())
 
 
 # --- selection ------------------------------------------------------------
@@ -376,10 +426,19 @@ def _app_index(app_entries: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, 
 
 
 def _find_any(registry: Registry, ref: str, app: Mapping[str, dict[str, Any]]) -> tuple[str, dict[str, Any]] | None:
+    """The part and entry a reference names: a handler note, a registry entry, or a config metadata path."""
     if ref.startswith(APP_REFERENCE_PREFIX):
         entry = app.get(ref)
         return None if entry is None else ('app', entry)
-    return registry.find(ref)
+    found = registry.find(ref)
+    if found is not None:
+        return found
+    kind, _, key = ref.partition(':')
+    if kind == 'config':
+        entry = registry.config_metadata_entry(key)
+        if entry is not None:
+            return ('config', entry)
+    return None
 
 
 def select_manual(
@@ -393,10 +452,13 @@ def select_manual(
     """Choose the entries of a manual answer, per part, in manual order.
 
     Without ``topic``: every entry of each asked part, in file order, at ``detail``.
-    With ``topic`` (it overrides ``parts``): the topic entry with every field and the
-    entries it references, one level deep, with ``key`` and ``summary``; only parts
-    that hold one of them are listed. A reference with no entry (a config path with
-    no advice) is left out. Raises ``TopicNotFoundError`` when the topic names no entry.
+    With ``topic`` (it overrides ``parts`` and ``detail``): the topic entry with every
+    field and the entries it references, one level deep, with ``key`` and ``summary``;
+    only parts that hold one of them are listed. A config path that has no advice
+    entry is answered from the config metadata (``config_metadata_entry``); such
+    entries follow the file entries of the part, sorted by path. A reference that
+    names nothing (a ``.*`` block with no entry) is left out. Raises
+    ``TopicNotFoundError`` when the topic names nothing.
     """
     app = _app_index(app_entries)
     all_entries: dict[str, tuple[dict[str, Any], ...]] = {**registry.parts, 'app': tuple(app.values())}
@@ -407,15 +469,16 @@ def select_manual(
     found = _find_any(registry, topic, app)
     if found is None:
         raise TopicNotFoundError(topic)
-    topic_entry = found[1]
-    chosen: dict[int, bool] = {id(topic_entry): True}
-    for ref in entry_references(topic_entry):
-        referenced = _find_any(registry, ref, app)
-        if referenced is not None:
-            chosen.setdefault(id(referenced[1]), False)
+    chosen: dict[int, bool] = {id(found[1]): True}
+    extra: dict[str, dict[str, dict[str, Any]]] = {part: {} for part in MANUAL_PARTS}
+    for part, entry in [found] + [hit for ref in entry_references(found[1]) if (hit := _find_any(registry, ref, app))]:
+        chosen.setdefault(id(entry), False)
+        if not any(entry is listed for listed in all_entries[part]):
+            extra[part][entry['key']] = entry
     selection = []
     for part in MANUAL_PARTS:
         picked = [(entry, chosen[id(entry)]) for entry in all_entries[part] if id(entry) in chosen]
+        picked += [(extra[part][key], chosen[id(extra[part][key])]) for key in sorted(extra[part])]
         if picked:
             selection.append((part, picked))
     return selection
@@ -467,6 +530,8 @@ def _md_field(style: str, label: str, value: Any) -> str:
         return f'**{label}:** {value}'
     if style == 'code':
         return f'**{label}:** `{value}`'
+    if style == 'json':
+        return f'**{label}:** `{dumps(value)}`'
     if style == 'refs':
         return f'**{label}:** ' + ', '.join(f'`{ref}`' for ref in value)
     if style == 'lines':
@@ -511,6 +576,15 @@ def selection_markdown(
                 _md_field(style, label, rendered[name]) for name, label, style in FIELD_STYLES if name in rendered
             )
     return '\n\n'.join(blocks) + '\n'
+
+
+def dumps(value: Any) -> str:
+    """The JSON text of every agent answer: compact, UTF-8 characters as they are, no HTML escaping.
+
+    Keys keep the order of the value (the contract order, then the registry schema
+    order of entry fields). The text has no trailing line break.
+    """
+    return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
 
 
 def approx_tokens(text: str) -> int:

@@ -16,7 +16,7 @@
 
     The framework owns steps 1, 2, 4, 6 and 7. The handler owns steps 3 and 5. The work itself runs in the subprocess.
   principles:
-    - The handler code runs on the event loop of the worker. A blocking call in a hook stops every partition.
+    - A hook must not block; a blocking call delays its partition and can stop every partition of the worker.
     - The worker commits an offset only after the message is fully done.
     - Every limit of the pipeline is a config key; read the effective config before you change one.
   related:
@@ -52,7 +52,7 @@
 
     The time of the hook is in `drakkar_handler_duration_seconds{hook="arrange"}` and in the `arranged` event. A slow `arrange` slows the whole partition, and a blocking `arrange` stops the event loop.
   principles:
-    - The arrange hook must not block; do I/O with awaits, and move CPU work off the event loop.
+    - The arrange hook must not block; wait for I/O without blocking the worker, and move heavy CPU work into tasks or the offload pool.
     - Every task must name the source offsets it covers, or the offsets are committed before the work is done.
   related:
     - concept:window
@@ -162,7 +162,7 @@
     The defaults of every policy key are in `sinks.defaults`; an instance can set its own value.
   principles:
     - Delivery order equals payload order inside one sink.
-    - A failed batch is never sent again as a whole; only payloads that were not written are retried.
+    - A retry sends the whole group again; payloads that were already written are written again, so the target must accept repeated writes.
     - An open circuit means the downstream system is down; fix it there, not in the worker.
   related:
     - concept:dlq
@@ -201,7 +201,7 @@
 
     `storage.dir` must be a local filesystem. With `storage.dir` empty the worker keeps no files: no recorder file, no cache file, no watchdog.
 
-    A folder of another worker whose lock is free and whose name is not online in the registry is an orphan: the worker seals its files into the history folder.
+    A folder of another worker whose lock is free and whose name is not online in the registry is an orphan: the worker seals its files into the history folder. Without autodiscover the worker only logs an orphan folder.
   principles:
     - Never share one storage.dir folder between hosts over a network filesystem.
     - Two workers must never have the same name.
@@ -293,7 +293,7 @@
 
     With autodiscover and a shared folder the archive is a cluster task: one worker per slot archives the files of the whole cluster under a lease. Otherwise each worker archives only its own files.
   principles:
-    - Archives are the only recorder files nothing else removes; set a retention that fits the volume.
+    - Only recorder.archive.retention removes archives; set a retention that fits the volume.
     - A pass that loses its lease stops before it changes more files.
   related:
     - concept:sealed-history
@@ -328,7 +328,7 @@
 - key: cluster-tasks
   summary: A cluster task runs on one worker of the cluster per slot; the workers elect the runner through a lease of the autodiscover provider.
   body: |-
-    A periodic task with scope `cluster` has slots computed the same way on every worker: an interval aligned to the epoch, or a UTC cron expression. At each slot every worker tries to take the lease of `<cluster>/<task>` within 10 seconds of the slot. The winner runs the task and holds the lease for the run and at least 20 seconds.
+    A periodic task with scope `cluster` has slots computed the same way on every worker: an interval aligned to the epoch, or a UTC cron expression. At each slot every worker tries to take the lease of `<cluster>/<task>` within 10 seconds of the slot. The winner runs the task and holds the lease until the run ends and at least 20 seconds after the slot.
 
     Each worker publishes a hash of its cluster task definitions in its card. Peers with another hash are counted in `drakkar_periodic_cluster_mismatch_peers`; during a rolling change the count is not zero for a while.
   principles:

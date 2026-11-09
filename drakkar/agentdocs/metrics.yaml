@@ -376,7 +376,7 @@
 
 - key: drakkar_handler_hook_errors_total
   summary: Handler hooks that raised instead of returning, by hook.
-  meaning: The framework keeps the partition moving, so this counter is the only sign of a broken hook.
+  meaning: The framework keeps the partition moving, so this counter and the hook's error log line are the signs of a broken hook.
   healthy: 0; alert on any rate.
   related:
     - concept:pipeline
@@ -420,7 +420,7 @@
 
 - key: drakkar_sink_delivery_retries_total
   summary: Delivery retries per sink.
-  meaning: Retries spend the max_retries budget of the sink.
+  meaning: It counts the retries the handler asked for, which spend max_retries of the sink, and the quick in-call retries of an idempotent batch, which do not.
   healthy: Low.
   related:
     - concept:sinks-and-delivery

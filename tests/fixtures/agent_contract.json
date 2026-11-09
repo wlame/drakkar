@@ -1,5 +1,5 @@
 {
-  "_comment": "Agent routes: messages, part names, parameter rules, the canonical registry bytes and worked examples of the manual rendering on a tiny registry. The tiny registry is checked with the shipped schema.json.",
+  "_comment": "Agent routes: messages, part names, parameter rules, the canonical registry bytes and worked examples of the manual rendering on a tiny registry. The tiny registry is checked with the shipped schema.json. json_text is the exact answer text: compact UTF-8 JSON, no ASCII escaping, no HTML escaping, no trailing line break.",
   "messages": {
     "agent_off": "the agent surface is off; set agent.enabled to true",
     "token_required": "agent token required",
@@ -216,7 +216,7 @@
   "canonical_example": {
     "files": {
       "schema.json": "{}\n",
-      "concepts.yaml": "concepts.yaml content\n",
+      "concepts.yaml": "concepts.yaml contenu é ≥\n",
       "config.yaml": "config.yaml content\n",
       "metrics.yaml": "metrics.yaml content\n",
       "events.yaml": "events.yaml content\n",
@@ -224,24 +224,44 @@
       "routes.yaml": "routes.yaml content\n",
       "rules.yaml": "rules.yaml content\n"
     },
-    "canonical_bytes": "schema.json\n3\n{}\nconcepts.yaml\n22\nconcepts.yaml content\nconfig.yaml\n20\nconfig.yaml content\nmetrics.yaml\n21\nmetrics.yaml content\nevents.yaml\n20\nevents.yaml content\nrecipes.yaml\n21\nrecipes.yaml content\nroutes.yaml\n20\nroutes.yaml content\nrules.yaml\n19\nrules.yaml content\n",
-    "registry_version": "65e3e8f21cc3e184"
+    "canonical_bytes": "schema.json\n3\n{}\nconcepts.yaml\n29\nconcepts.yaml contenu é ≥\nconfig.yaml\n20\nconfig.yaml content\nmetrics.yaml\n21\nmetrics.yaml content\nevents.yaml\n20\nevents.yaml content\nrecipes.yaml\n21\nrecipes.yaml content\nroutes.yaml\n20\nroutes.yaml content\nrules.yaml\n19\nrules.yaml content\n",
+    "registry_version": "c74193425e6c34ac"
   },
   "tiny_registry": {
     "files": {
-      "concepts.yaml": "- key: pipeline\n  summary: Messages become tasks, tasks run as subprocesses, results go to sinks.\n  body: |-\n    A worker reads messages and runs tasks.\n\n    Results go to the sinks.\n  principles:\n    - Offsets are committed only after delivery.\n  related:\n    - concept:offsets\n    - config:executor.max_executors\n    - metric:drakkar_pending_tasks\n- key: offsets\n  summary: The committed offset of a partition is its watermark.\n  body: Every message below the watermark is done.\n",
-      "config.yaml": "- key: executor.max_executors\n  summary: The number of task subprocesses that run at one time.\n  advice: Raise it when tasks wait for a slot and the host has free CPU.\n  related:\n    - concept:pipeline\n",
+      "concepts.yaml": "- key: pipeline\n  summary: Messages become tasks, tasks run as subprocesses, results go to sinks.\n  body: |-\n    A worker reads messages and runs tasks.\n\n    Results go to the sinks.\n  principles:\n    - Offsets are committed only after delivery.\n  related:\n    - concept:offsets\n    - config:executor.max_executors\n    - metric:drakkar_pending_tasks\n- key: offsets\n  summary: The committed offset of a partition is its watermark.\n  body: Every message below the watermark is done; offsets ≥ the watermark & < the next one are “pending” <here>.\n",
+      "config.yaml": "- key: executor.max_executors\n  summary: The number of task subprocesses that run at one time.\n  advice: Raise it when tasks wait for a slot and the host has free CPU.\n  related:\n    - concept:pipeline\n- key: sinks.kafka.*\n  summary: The Kafka sink instances.\n  advice: Give each instance its own topic.\n",
       "metrics.yaml": "- key: drakkar_pending_tasks\n  summary: Tasks created and not yet settled.\n  meaning: A value near executor.max_pending_tasks means new windows wait.\n  healthy: Below executor.max_pending_tasks.\n  promql:\n    - title: Pending tasks of this worker\n      query: drakkar_pending_tasks{ {{worker}} }\n  related:\n    - config:executor.max_pending_tasks\n",
       "events.yaml": "- key: task_failed\n  summary: A task ended with an error.\n  when: The subprocess exited with a code other than 0, or it timed out.\n  fields:\n    exit_code: The exit code of the subprocess.\n    duration: The run time in seconds.\n  action: Read stderr and the exit code.\n  related:\n    - recipe:tasks-failing\n- key: log:agent_notes_failed\n  summary: The handler's agent_notes hook raised.\n  when: Once at startup.\n",
       "recipes.yaml": "- key: tasks-failing\n  summary: Find out why tasks fail.\n  question: Why do my tasks fail?\n  steps:\n    - do: Call /api/v1/agent/state?parts=recent_failures.\n      why: It lists the last failures with their exit codes.\n  causes:\n    - cause: The binary is missing.\n      check: The exit code is 127.\n      fix: Install the binary or set executor.binary_path.\n  related:\n    - event:task_failed\n",
       "routes.yaml": "- key: GET /healthz\n  summary: The liveness probe.\n  use: Check that the API server answers.\n  cost: cheap\n",
       "rules.yaml": "- key: budget-saturated\n  summary: The pending budget is full.\n  severity: warning\n  title: New windows wait for the pending budget\n  explain: concept:pipeline\n  suggestion: Raise executor.max_pending_tasks or make tasks faster.\n  inputs:\n    - budget.tasks\n    - budget.max_tasks\n"
     },
-    "config_paths": [
-      "executor.max_executors",
-      "executor.max_pending_tasks",
-      "executor.binary_path",
-      "sinks.kafka.*.topic"
+    "config_metadata": [
+      {
+        "path": "executor.max_executors",
+        "description": "Maximum concurrent subprocesses.",
+        "type": "integer",
+        "default": 4
+      },
+      {
+        "path": "executor.max_pending_tasks",
+        "description": "New windows wait while this many tasks are created and not settled.",
+        "type": "integer",
+        "default": 2000
+      },
+      {
+        "path": "executor.binary_path",
+        "description": "Default binary path for all tasks.",
+        "type": "string",
+        "default": null
+      },
+      {
+        "path": "sinks.kafka.*.topic",
+        "description": "Kafka topic of the sink.",
+        "type": "string",
+        "default": ""
+      }
     ]
   },
   "manual_cases": [
@@ -268,6 +288,10 @@
             {
               "key": "executor.max_executors",
               "summary": "The number of task subprocesses that run at one time."
+            },
+            {
+              "key": "sinks.kafka.*",
+              "summary": "The Kafka sink instances."
             }
           ],
           "metrics": [
@@ -307,7 +331,8 @@
           "app": []
         }
       },
-      "markdown": "# concepts\n\n## pipeline\n\nMessages become tasks, tasks run as subprocesses, results go to sinks.\n\n## offsets\n\nThe committed offset of a partition is its watermark.\n\n# config\n\n## executor.max_executors\n\nThe number of task subprocesses that run at one time.\n\n# metrics\n\n## drakkar_pending_tasks\n\nTasks created and not yet settled.\n\n# events\n\n## task_failed\n\nA task ended with an error.\n\n## log:agent_notes_failed\n\nThe handler's agent_notes hook raised.\n\n# recipes\n\n## tasks-failing\n\nFind out why tasks fail.\n\n# routes\n\n## GET /healthz\n\nThe liveness probe.\n\n# rules\n\n## budget-saturated\n\nThe pending budget is full.\n\n# app\n\nNo entries.\n"
+      "json_text": "{\"parts\":{\"concepts\":[{\"key\":\"pipeline\",\"summary\":\"Messages become tasks, tasks run as subprocesses, results go to sinks.\"},{\"key\":\"offsets\",\"summary\":\"The committed offset of a partition is its watermark.\"}],\"config\":[{\"key\":\"executor.max_executors\",\"summary\":\"The number of task subprocesses that run at one time.\"},{\"key\":\"sinks.kafka.*\",\"summary\":\"The Kafka sink instances.\"}],\"metrics\":[{\"key\":\"drakkar_pending_tasks\",\"summary\":\"Tasks created and not yet settled.\"}],\"events\":[{\"key\":\"task_failed\",\"summary\":\"A task ended with an error.\"},{\"key\":\"log:agent_notes_failed\",\"summary\":\"The handler's agent_notes hook raised.\"}],\"recipes\":[{\"key\":\"tasks-failing\",\"summary\":\"Find out why tasks fail.\"}],\"routes\":[{\"key\":\"GET /healthz\",\"summary\":\"The liveness probe.\"}],\"rules\":[{\"key\":\"budget-saturated\",\"summary\":\"The pending budget is full.\"}],\"app\":[]}}",
+      "markdown": "# concepts\n\n## pipeline\n\nMessages become tasks, tasks run as subprocesses, results go to sinks.\n\n## offsets\n\nThe committed offset of a partition is its watermark.\n\n# config\n\n## executor.max_executors\n\nThe number of task subprocesses that run at one time.\n\n## sinks.kafka.*\n\nThe Kafka sink instances.\n\n# metrics\n\n## drakkar_pending_tasks\n\nTasks created and not yet settled.\n\n# events\n\n## task_failed\n\nA task ended with an error.\n\n## log:agent_notes_failed\n\nThe handler's agent_notes hook raised.\n\n# recipes\n\n## tasks-failing\n\nFind out why tasks fail.\n\n# routes\n\n## GET /healthz\n\nThe liveness probe.\n\n# rules\n\n## budget-saturated\n\nThe pending budget is full.\n\n# app\n\nNo entries.\n"
     },
     {
       "name": "full_all_parts_with_filters_and_app_notes",
@@ -320,7 +345,26 @@
           "summary": "Each task bills one customer.",
           "body": "The customer id is the task label customer.",
           "related": [
-            "concept:pipeline"
+            "concept:pipeline",
+            "app:recipe:refund"
+          ]
+        },
+        {
+          "key": "app:recipe:refund",
+          "summary": "Find a refund that was not written.",
+          "question": "Where is my refund?",
+          "steps": [
+            {
+              "do": "Trace the message.",
+              "why": "It shows the sinks."
+            }
+          ],
+          "causes": [
+            {
+              "cause": "The sink failed.",
+              "check": "A sink_error event exists.",
+              "fix": "Replay the DLQ record."
+            }
           ]
         }
       ],
@@ -347,7 +391,7 @@
             {
               "key": "offsets",
               "summary": "The committed offset of a partition is its watermark.",
-              "body": "Every message below the watermark is done."
+              "body": "Every message below the watermark is done; offsets ≥ the watermark & < the next one are “pending” <here>."
             }
           ],
           "config": [
@@ -358,6 +402,11 @@
               "related": [
                 "concept:pipeline"
               ]
+            },
+            {
+              "key": "sinks.kafka.*",
+              "summary": "The Kafka sink instances.",
+              "advice": "Give each instance its own topic."
             }
           ],
           "metrics": [
@@ -448,13 +497,33 @@
               "summary": "Each task bills one customer.",
               "body": "The customer id is the task label customer.",
               "related": [
-                "concept:pipeline"
+                "concept:pipeline",
+                "app:recipe:refund"
+              ]
+            },
+            {
+              "key": "app:recipe:refund",
+              "summary": "Find a refund that was not written.",
+              "question": "Where is my refund?",
+              "steps": [
+                {
+                  "do": "Trace the message.",
+                  "why": "It shows the sinks."
+                }
+              ],
+              "causes": [
+                {
+                  "cause": "The sink failed.",
+                  "check": "A sink_error event exists.",
+                  "fix": "Replay the DLQ record."
+                }
               ]
             }
           ]
         }
       },
-      "markdown": "# concepts\n\n## pipeline\n\nMessages become tasks, tasks run as subprocesses, results go to sinks.\n\nA worker reads messages and runs tasks.\n\nResults go to the sinks.\n\n**Principles:**\n- Offsets are committed only after delivery.\n\n**Related:** `concept:offsets`, `config:executor.max_executors`, `metric:drakkar_pending_tasks`\n\n## offsets\n\nThe committed offset of a partition is its watermark.\n\nEvery message below the watermark is done.\n\n# config\n\n## executor.max_executors\n\nThe number of task subprocesses that run at one time.\n\n**Advice:** Raise it when tasks wait for a slot and the host has free CPU.\n\n**Related:** `concept:pipeline`\n\n# metrics\n\n## drakkar_pending_tasks\n\nTasks created and not yet settled.\n\n**Meaning:** A value near executor.max_pending_tasks means new windows wait.\n\n**Healthy:** Below executor.max_pending_tasks.\n\n**PromQL:**\n- Pending tasks of this worker: `drakkar_pending_tasks{ worker=\"w-1\" }`\n\n**Related:** `config:executor.max_pending_tasks`\n\n# events\n\n## task_failed\n\nA task ended with an error.\n\n**When:** The subprocess exited with a code other than 0, or it timed out.\n\n**Fields:**\n- `duration`: The run time in seconds.\n- `exit_code`: The exit code of the subprocess.\n\n**Action:** Read stderr and the exit code.\n\n**Related:** `recipe:tasks-failing`\n\n## log:agent_notes_failed\n\nThe handler's agent_notes hook raised.\n\n**When:** Once at startup.\n\n# recipes\n\n## tasks-failing\n\nFind out why tasks fail.\n\n**Question:** Why do my tasks fail?\n\n**Steps:**\n1. Call /api/v1/agent/state?parts=recent_failures. Why: It lists the last failures with their exit codes.\n\n**Causes:**\n- The binary is missing. Check: The exit code is 127. Fix: Install the binary or set executor.binary_path.\n\n**Related:** `event:task_failed`\n\n# routes\n\n## GET /healthz\n\nThe liveness probe.\n\n**Use:** Check that the API server answers.\n\n**Cost:** cheap\n\n# rules\n\n## budget-saturated\n\nThe pending budget is full.\n\n**Severity:** warning\n\n**Title:** New windows wait for the pending budget\n\n**Explain:** `concept:pipeline`\n\n**Suggestion:** Raise executor.max_pending_tasks or make tasks faster.\n\n**Inputs:**\n- `budget.tasks`\n- `budget.max_tasks`\n\n# app\n\n## app:concept:billing\n\nEach task bills one customer.\n\nThe customer id is the task label customer.\n\n**Related:** `concept:pipeline`\n"
+      "json_text": "{\"parts\":{\"concepts\":[{\"key\":\"pipeline\",\"summary\":\"Messages become tasks, tasks run as subprocesses, results go to sinks.\",\"body\":\"A worker reads messages and runs tasks.\\n\\nResults go to the sinks.\",\"principles\":[\"Offsets are committed only after delivery.\"],\"related\":[\"concept:offsets\",\"config:executor.max_executors\",\"metric:drakkar_pending_tasks\"]},{\"key\":\"offsets\",\"summary\":\"The committed offset of a partition is its watermark.\",\"body\":\"Every message below the watermark is done; offsets ≥ the watermark & < the next one are “pending” <here>.\"}],\"config\":[{\"key\":\"executor.max_executors\",\"summary\":\"The number of task subprocesses that run at one time.\",\"advice\":\"Raise it when tasks wait for a slot and the host has free CPU.\",\"related\":[\"concept:pipeline\"]},{\"key\":\"sinks.kafka.*\",\"summary\":\"The Kafka sink instances.\",\"advice\":\"Give each instance its own topic.\"}],\"metrics\":[{\"key\":\"drakkar_pending_tasks\",\"summary\":\"Tasks created and not yet settled.\",\"meaning\":\"A value near executor.max_pending_tasks means new windows wait.\",\"healthy\":\"Below executor.max_pending_tasks.\",\"promql\":[{\"title\":\"Pending tasks of this worker\",\"query\":\"drakkar_pending_tasks{ worker=\\\"w-1\\\" }\"}],\"related\":[\"config:executor.max_pending_tasks\"]}],\"events\":[{\"key\":\"task_failed\",\"summary\":\"A task ended with an error.\",\"when\":\"The subprocess exited with a code other than 0, or it timed out.\",\"fields\":{\"duration\":\"The run time in seconds.\",\"exit_code\":\"The exit code of the subprocess.\"},\"action\":\"Read stderr and the exit code.\",\"related\":[\"recipe:tasks-failing\"]},{\"key\":\"log:agent_notes_failed\",\"summary\":\"The handler's agent_notes hook raised.\",\"when\":\"Once at startup.\"}],\"recipes\":[{\"key\":\"tasks-failing\",\"summary\":\"Find out why tasks fail.\",\"question\":\"Why do my tasks fail?\",\"steps\":[{\"do\":\"Call /api/v1/agent/state?parts=recent_failures.\",\"why\":\"It lists the last failures with their exit codes.\"}],\"causes\":[{\"cause\":\"The binary is missing.\",\"check\":\"The exit code is 127.\",\"fix\":\"Install the binary or set executor.binary_path.\"}],\"related\":[\"event:task_failed\"]}],\"routes\":[{\"key\":\"GET /healthz\",\"summary\":\"The liveness probe.\",\"use\":\"Check that the API server answers.\",\"cost\":\"cheap\"}],\"rules\":[{\"key\":\"budget-saturated\",\"summary\":\"The pending budget is full.\",\"severity\":\"warning\",\"title\":\"New windows wait for the pending budget\",\"explain\":\"concept:pipeline\",\"suggestion\":\"Raise executor.max_pending_tasks or make tasks faster.\",\"inputs\":[\"budget.tasks\",\"budget.max_tasks\"]}],\"app\":[{\"key\":\"app:concept:billing\",\"summary\":\"Each task bills one customer.\",\"body\":\"The customer id is the task label customer.\",\"related\":[\"concept:pipeline\",\"app:recipe:refund\"]},{\"key\":\"app:recipe:refund\",\"summary\":\"Find a refund that was not written.\",\"question\":\"Where is my refund?\",\"steps\":[{\"do\":\"Trace the message.\",\"why\":\"It shows the sinks.\"}],\"causes\":[{\"cause\":\"The sink failed.\",\"check\":\"A sink_error event exists.\",\"fix\":\"Replay the DLQ record.\"}]}]}}",
+      "markdown": "# concepts\n\n## pipeline\n\nMessages become tasks, tasks run as subprocesses, results go to sinks.\n\nA worker reads messages and runs tasks.\n\nResults go to the sinks.\n\n**Principles:**\n- Offsets are committed only after delivery.\n\n**Related:** `concept:offsets`, `config:executor.max_executors`, `metric:drakkar_pending_tasks`\n\n## offsets\n\nThe committed offset of a partition is its watermark.\n\nEvery message below the watermark is done; offsets ≥ the watermark & < the next one are “pending” <here>.\n\n# config\n\n## executor.max_executors\n\nThe number of task subprocesses that run at one time.\n\n**Advice:** Raise it when tasks wait for a slot and the host has free CPU.\n\n**Related:** `concept:pipeline`\n\n## sinks.kafka.*\n\nThe Kafka sink instances.\n\n**Advice:** Give each instance its own topic.\n\n# metrics\n\n## drakkar_pending_tasks\n\nTasks created and not yet settled.\n\n**Meaning:** A value near executor.max_pending_tasks means new windows wait.\n\n**Healthy:** Below executor.max_pending_tasks.\n\n**PromQL:**\n- Pending tasks of this worker: `drakkar_pending_tasks{ worker=\"w-1\" }`\n\n**Related:** `config:executor.max_pending_tasks`\n\n# events\n\n## task_failed\n\nA task ended with an error.\n\n**When:** The subprocess exited with a code other than 0, or it timed out.\n\n**Fields:**\n- `duration`: The run time in seconds.\n- `exit_code`: The exit code of the subprocess.\n\n**Action:** Read stderr and the exit code.\n\n**Related:** `recipe:tasks-failing`\n\n## log:agent_notes_failed\n\nThe handler's agent_notes hook raised.\n\n**When:** Once at startup.\n\n# recipes\n\n## tasks-failing\n\nFind out why tasks fail.\n\n**Question:** Why do my tasks fail?\n\n**Steps:**\n1. Call /api/v1/agent/state?parts=recent_failures. Why: It lists the last failures with their exit codes.\n\n**Causes:**\n- The binary is missing. Check: The exit code is 127. Fix: Install the binary or set executor.binary_path.\n\n**Related:** `event:task_failed`\n\n# routes\n\n## GET /healthz\n\nThe liveness probe.\n\n**Use:** Check that the API server answers.\n\n**Cost:** cheap\n\n# rules\n\n## budget-saturated\n\nThe pending budget is full.\n\n**Severity:** warning\n\n**Title:** New windows wait for the pending budget\n\n**Explain:** `concept:pipeline`\n\n**Suggestion:** Raise executor.max_pending_tasks or make tasks faster.\n\n**Inputs:**\n- `budget.tasks`\n- `budget.max_tasks`\n\n# app\n\n## app:concept:billing\n\nEach task bills one customer.\n\nThe customer id is the task label customer.\n\n**Related:** `concept:pipeline`, `app:recipe:refund`\n\n## app:recipe:refund\n\nFind a refund that was not written.\n\n**Question:** Where is my refund?\n\n**Steps:**\n1. Trace the message. Why: It shows the sinks.\n\n**Causes:**\n- The sink failed. Check: A sink_error event exists. Fix: Replay the DLQ record.\n"
     },
     {
       "name": "full_some_parts_without_filters",
@@ -482,7 +551,7 @@
             {
               "key": "offsets",
               "summary": "The committed offset of a partition is its watermark.",
-              "body": "Every message below the watermark is done."
+              "body": "Every message below the watermark is done; offsets ≥ the watermark & < the next one are “pending” <here>."
             }
           ],
           "metrics": [
@@ -504,7 +573,8 @@
           ]
         }
       },
-      "markdown": "# concepts\n\n## pipeline\n\nMessages become tasks, tasks run as subprocesses, results go to sinks.\n\nA worker reads messages and runs tasks.\n\nResults go to the sinks.\n\n**Principles:**\n- Offsets are committed only after delivery.\n\n**Related:** `concept:offsets`, `config:executor.max_executors`, `metric:drakkar_pending_tasks`\n\n## offsets\n\nThe committed offset of a partition is its watermark.\n\nEvery message below the watermark is done.\n\n# metrics\n\n## drakkar_pending_tasks\n\nTasks created and not yet settled.\n\n**Meaning:** A value near executor.max_pending_tasks means new windows wait.\n\n**Healthy:** Below executor.max_pending_tasks.\n\n**PromQL:**\n- Pending tasks of this worker: `drakkar_pending_tasks{ {{worker}} }`\n\n**Related:** `config:executor.max_pending_tasks`\n"
+      "json_text": "{\"parts\":{\"concepts\":[{\"key\":\"pipeline\",\"summary\":\"Messages become tasks, tasks run as subprocesses, results go to sinks.\",\"body\":\"A worker reads messages and runs tasks.\\n\\nResults go to the sinks.\",\"principles\":[\"Offsets are committed only after delivery.\"],\"related\":[\"concept:offsets\",\"config:executor.max_executors\",\"metric:drakkar_pending_tasks\"]},{\"key\":\"offsets\",\"summary\":\"The committed offset of a partition is its watermark.\",\"body\":\"Every message below the watermark is done; offsets ≥ the watermark & < the next one are “pending” <here>.\"}],\"metrics\":[{\"key\":\"drakkar_pending_tasks\",\"summary\":\"Tasks created and not yet settled.\",\"meaning\":\"A value near executor.max_pending_tasks means new windows wait.\",\"healthy\":\"Below executor.max_pending_tasks.\",\"promql\":[{\"title\":\"Pending tasks of this worker\",\"query\":\"drakkar_pending_tasks{ {{worker}} }\"}],\"related\":[\"config:executor.max_pending_tasks\"]}]}}",
+      "markdown": "# concepts\n\n## pipeline\n\nMessages become tasks, tasks run as subprocesses, results go to sinks.\n\nA worker reads messages and runs tasks.\n\nResults go to the sinks.\n\n**Principles:**\n- Offsets are committed only after delivery.\n\n**Related:** `concept:offsets`, `config:executor.max_executors`, `metric:drakkar_pending_tasks`\n\n## offsets\n\nThe committed offset of a partition is its watermark.\n\nEvery message below the watermark is done; offsets ≥ the watermark & < the next one are “pending” <here>.\n\n# metrics\n\n## drakkar_pending_tasks\n\nTasks created and not yet settled.\n\n**Meaning:** A value near executor.max_pending_tasks means new windows wait.\n\n**Healthy:** Below executor.max_pending_tasks.\n\n**PromQL:**\n- Pending tasks of this worker: `drakkar_pending_tasks{ {{worker}} }`\n\n**Related:** `config:executor.max_pending_tasks`\n"
     },
     {
       "name": "topic_concept",
@@ -551,6 +621,7 @@
           ]
         }
       },
+      "json_text": "{\"parts\":{\"concepts\":[{\"key\":\"pipeline\",\"summary\":\"Messages become tasks, tasks run as subprocesses, results go to sinks.\",\"body\":\"A worker reads messages and runs tasks.\\n\\nResults go to the sinks.\",\"principles\":[\"Offsets are committed only after delivery.\"],\"related\":[\"concept:offsets\",\"config:executor.max_executors\",\"metric:drakkar_pending_tasks\"]},{\"key\":\"offsets\",\"summary\":\"The committed offset of a partition is its watermark.\"}],\"config\":[{\"key\":\"executor.max_executors\",\"summary\":\"The number of task subprocesses that run at one time.\"}],\"metrics\":[{\"key\":\"drakkar_pending_tasks\",\"summary\":\"Tasks created and not yet settled.\"}]}}",
       "markdown": "# concepts\n\n## pipeline\n\nMessages become tasks, tasks run as subprocesses, results go to sinks.\n\nA worker reads messages and runs tasks.\n\nResults go to the sinks.\n\n**Principles:**\n- Offsets are committed only after delivery.\n\n**Related:** `concept:offsets`, `config:executor.max_executors`, `metric:drakkar_pending_tasks`\n\n## offsets\n\nThe committed offset of a partition is its watermark.\n\n# config\n\n## executor.max_executors\n\nThe number of task subprocesses that run at one time.\n\n# metrics\n\n## drakkar_pending_tasks\n\nTasks created and not yet settled.\n"
     },
     {
@@ -584,6 +655,7 @@
           ]
         }
       },
+      "json_text": "{\"parts\":{\"concepts\":[{\"key\":\"pipeline\",\"summary\":\"Messages become tasks, tasks run as subprocesses, results go to sinks.\"}],\"rules\":[{\"key\":\"budget-saturated\",\"summary\":\"The pending budget is full.\",\"severity\":\"warning\",\"title\":\"New windows wait for the pending budget\",\"explain\":\"concept:pipeline\",\"suggestion\":\"Raise executor.max_pending_tasks or make tasks faster.\",\"inputs\":[\"budget.tasks\",\"budget.max_tasks\"]}]}}",
       "markdown": "# concepts\n\n## pipeline\n\nMessages become tasks, tasks run as subprocesses, results go to sinks.\n\n# rules\n\n## budget-saturated\n\nThe pending budget is full.\n\n**Severity:** warning\n\n**Title:** New windows wait for the pending budget\n\n**Explain:** `concept:pipeline`\n\n**Suggestion:** Raise executor.max_pending_tasks or make tasks faster.\n\n**Inputs:**\n- `budget.tasks`\n- `budget.max_tasks`\n"
     },
     {
@@ -604,6 +676,7 @@
           ]
         }
       },
+      "json_text": "{\"parts\":{\"events\":[{\"key\":\"log:agent_notes_failed\",\"summary\":\"The handler's agent_notes hook raised.\",\"when\":\"Once at startup.\"}]}}",
       "markdown": "# events\n\n## log:agent_notes_failed\n\nThe handler's agent_notes hook raised.\n\n**When:** Once at startup.\n"
     },
     {
@@ -617,7 +690,26 @@
           "summary": "Each task bills one customer.",
           "body": "The customer id is the task label customer.",
           "related": [
-            "concept:pipeline"
+            "concept:pipeline",
+            "app:recipe:refund"
+          ]
+        },
+        {
+          "key": "app:recipe:refund",
+          "summary": "Find a refund that was not written.",
+          "question": "Where is my refund?",
+          "steps": [
+            {
+              "do": "Trace the message.",
+              "why": "It shows the sinks."
+            }
+          ],
+          "causes": [
+            {
+              "cause": "The sink failed.",
+              "check": "A sink_error event exists.",
+              "fix": "Replay the DLQ record."
+            }
           ]
         }
       ],
@@ -636,13 +728,102 @@
               "summary": "Each task bills one customer.",
               "body": "The customer id is the task label customer.",
               "related": [
-                "concept:pipeline"
+                "concept:pipeline",
+                "app:recipe:refund"
+              ]
+            },
+            {
+              "key": "app:recipe:refund",
+              "summary": "Find a refund that was not written."
+            }
+          ]
+        }
+      },
+      "json_text": "{\"parts\":{\"concepts\":[{\"key\":\"pipeline\",\"summary\":\"Messages become tasks, tasks run as subprocesses, results go to sinks.\"}],\"app\":[{\"key\":\"app:concept:billing\",\"summary\":\"Each task bills one customer.\",\"body\":\"The customer id is the task label customer.\",\"related\":[\"concept:pipeline\",\"app:recipe:refund\"]},{\"key\":\"app:recipe:refund\",\"summary\":\"Find a refund that was not written.\"}]}}",
+      "markdown": "# concepts\n\n## pipeline\n\nMessages become tasks, tasks run as subprocesses, results go to sinks.\n\n# app\n\n## app:concept:billing\n\nEach task bills one customer.\n\nThe customer id is the task label customer.\n\n**Related:** `concept:pipeline`, `app:recipe:refund`\n\n## app:recipe:refund\n\nFind a refund that was not written.\n"
+    },
+    {
+      "name": "topic_metric_with_filters",
+      "parts": null,
+      "detail": "brief",
+      "topic": "metric:drakkar_pending_tasks",
+      "app_entries": [],
+      "promql_filters": {
+        "worker": "worker=\"w-1\"",
+        "cluster": "cluster=\"main\""
+      },
+      "json": {
+        "parts": {
+          "config": [
+            {
+              "key": "executor.max_pending_tasks",
+              "summary": "New windows wait while this many tasks are created and not settled."
+            }
+          ],
+          "metrics": [
+            {
+              "key": "drakkar_pending_tasks",
+              "summary": "Tasks created and not yet settled.",
+              "meaning": "A value near executor.max_pending_tasks means new windows wait.",
+              "healthy": "Below executor.max_pending_tasks.",
+              "promql": [
+                {
+                  "title": "Pending tasks of this worker",
+                  "query": "drakkar_pending_tasks{ worker=\"w-1\" }"
+                }
+              ],
+              "related": [
+                "config:executor.max_pending_tasks"
               ]
             }
           ]
         }
       },
-      "markdown": "# concepts\n\n## pipeline\n\nMessages become tasks, tasks run as subprocesses, results go to sinks.\n\n# app\n\n## app:concept:billing\n\nEach task bills one customer.\n\nThe customer id is the task label customer.\n\n**Related:** `concept:pipeline`\n"
+      "json_text": "{\"parts\":{\"config\":[{\"key\":\"executor.max_pending_tasks\",\"summary\":\"New windows wait while this many tasks are created and not settled.\"}],\"metrics\":[{\"key\":\"drakkar_pending_tasks\",\"summary\":\"Tasks created and not yet settled.\",\"meaning\":\"A value near executor.max_pending_tasks means new windows wait.\",\"healthy\":\"Below executor.max_pending_tasks.\",\"promql\":[{\"title\":\"Pending tasks of this worker\",\"query\":\"drakkar_pending_tasks{ worker=\\\"w-1\\\" }\"}],\"related\":[\"config:executor.max_pending_tasks\"]}]}}",
+      "markdown": "# config\n\n## executor.max_pending_tasks\n\nNew windows wait while this many tasks are created and not settled.\n\n# metrics\n\n## drakkar_pending_tasks\n\nTasks created and not yet settled.\n\n**Meaning:** A value near executor.max_pending_tasks means new windows wait.\n\n**Healthy:** Below executor.max_pending_tasks.\n\n**PromQL:**\n- Pending tasks of this worker: `drakkar_pending_tasks{ worker=\"w-1\" }`\n\n**Related:** `config:executor.max_pending_tasks`\n"
+    },
+    {
+      "name": "topic_config_path_without_advice",
+      "parts": null,
+      "detail": "brief",
+      "topic": "config:executor.binary_path",
+      "app_entries": [],
+      "promql_filters": null,
+      "json": {
+        "parts": {
+          "config": [
+            {
+              "key": "executor.binary_path",
+              "summary": "Default binary path for all tasks.",
+              "type": "string",
+              "default": null
+            }
+          ]
+        }
+      },
+      "json_text": "{\"parts\":{\"config\":[{\"key\":\"executor.binary_path\",\"summary\":\"Default binary path for all tasks.\",\"type\":\"string\",\"default\":null}]}}",
+      "markdown": "# config\n\n## executor.binary_path\n\nDefault binary path for all tasks.\n\n**Type:** string\n\n**Default:** `null`\n"
+    },
+    {
+      "name": "topic_config_block_entry",
+      "parts": null,
+      "detail": "brief",
+      "topic": "config:sinks.kafka.*",
+      "app_entries": [],
+      "promql_filters": null,
+      "json": {
+        "parts": {
+          "config": [
+            {
+              "key": "sinks.kafka.*",
+              "summary": "The Kafka sink instances.",
+              "advice": "Give each instance its own topic."
+            }
+          ]
+        }
+      },
+      "json_text": "{\"parts\":{\"config\":[{\"key\":\"sinks.kafka.*\",\"summary\":\"The Kafka sink instances.\",\"advice\":\"Give each instance its own topic.\"}]}}",
+      "markdown": "# config\n\n## sinks.kafka.*\n\nThe Kafka sink instances.\n\n**Advice:** Give each instance its own topic.\n"
     }
   ],
   "topic_not_found": [
@@ -650,7 +831,9 @@
     "concept",
     "concept:",
     "widget:pipeline",
-    "config:executor.max_pending_tasks",
+    "config:executor.nope",
+    "config:sinks.*",
+    "config:executor",
     "app:concept:nope",
     "Concept:pipeline",
     "pipeline"

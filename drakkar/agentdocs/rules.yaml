@@ -45,7 +45,7 @@
     - budget.pool_waiting
 
 - key: partition-dead
-  summary: A partition loop stopped after an unexpected error and was not restarted; the partition makes no progress.
+  summary: A partition loop stopped after an unexpected error and its one restart; the partition makes no progress.
   severity: critical
   title: A partition loop is dead
   explain: concept:offsets
