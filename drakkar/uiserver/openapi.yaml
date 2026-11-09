@@ -3857,7 +3857,9 @@ components:
       required: [metrics, unknown]
 
     AgentState:
-      description: Only the parts asked for (all when `parts` is absent).
+      description: >-
+        Only the parts asked for (all when `parts` is absent). budget, partitions,
+        sinks and recent_failures are null when the main loop did not answer in time.
       type: object
       properties:
         health:
@@ -3872,7 +3874,7 @@ components:
             uptime_seconds: {type: number}
           required: [state, stalls_total, uptime_seconds]
         budget:
-          type: object
+          type: [object, 'null']
           properties:
             tasks: {type: integer}
             max_tasks: {type: integer}
@@ -3884,7 +3886,7 @@ components:
             pool_max: {type: integer}
             pool_waiting: {type: integer}
         partitions:
-          type: array
+          type: [array, 'null']
           items:
             type: object
             properties:
@@ -3900,7 +3902,7 @@ components:
               dead: {type: boolean}
             required: [partition, queued, pending_offsets, committed, lag, paused, paused_by, dead]
         sinks:
-          type: array
+          type: [array, 'null']
           items:
             type: object
             properties:
@@ -3909,7 +3911,9 @@ components:
               breaker_open: {type: boolean}
               delivered_total: {type: integer}
               failed_total: {type: integer}
-              last_delivery_seconds: {type: [number, 'null']}
+              last_delivery_seconds:
+                type: [number, 'null']
+                description: Age in seconds of the last successful delivery; null before the first.
             required: [type, name, breaker_open, delivered_total, failed_total, last_delivery_seconds]
         recorder:
           type: object
@@ -3925,7 +3929,7 @@ components:
             cluster_tasks_match: {type: [boolean, 'null']}
           required: [enabled, provider, peers_online, peers_offline, cluster_tasks_match]
         recent_failures:
-          type: object
+          type: [object, 'null']
           properties:
             failures:
               type: array
@@ -3946,7 +3950,13 @@ components:
                   args:
                     type: array
                     items: {type: string}
-                    description: Only with agent.include_payloads.
+                    description: >-
+                      Only with agent.include_payloads. Kept while the compact JSON of
+                      the kept list stays within 2048 UTF-8 bytes; a non-string arg is
+                      written as its compact JSON text.
+                  args_truncated:
+                    type: boolean
+                    description: True when args left out an item; only with agent.include_payloads.
                 required: [task_id, ts, partition, offset, exit_code, duration, error_kind]
             note:
               type: string

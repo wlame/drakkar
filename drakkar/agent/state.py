@@ -3,7 +3,7 @@
 Nothing here measures anything new. The parts the main loop owns (the pending
 budget, the partition loops, the sink stats and the recorder memory store) are
 read in one coroutine on the main loop through the bounded dispatch of the API
-server; a main loop that does not answer in time gives those parts empty.
+server; a main loop that does not answer in time gives those parts ``null``.
 The other parts are read where the request runs, from values that are safe to
 read from any thread: the runtime health monitor (it answers during a stall),
 the recorder's status and the registry's last peer snapshot.
@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from drakkar.agent.metrics_view import json_number
 from drakkar.agent.params import NO_RECORDER_STORE_NOTE
+from drakkar.agent.registry import dumps
 from drakkar.agent.rules import DLQ_MESSAGES_METRIC, DROPPED_EVENTS_METRIC, DROPPED_POSTGRES_ROWS_METRIC
 from drakkar.cluster_tasks import card_cluster_hash
 from drakkar.config.recorder import PERSISTENCE_NONE
@@ -52,24 +53,23 @@ PAUSED_BY_DEBUG = 'debug'
 PAUSED_BY_DEATH = 'death'
 
 # The parts read on the main loop; the others are read where the request runs.
+# A loop part is ``None`` when the main loop did not answer in time.
 LOOP_PARTS = frozenset({'budget', 'partitions', 'sinks', 'recent_failures'})
-# What a loop part answers when the main loop does not answer in time.
-LOOP_PART_FALLBACK: dict[str, Any] = {
-    'budget': {},
-    'partitions': [],
-    'sinks': [],
-    'recent_failures': {'failures': []},
-}
 
-# The columns of a failed task, in the order of the answer; the payload
-# columns are read only with ``agent.include_payloads``. ``error_kind`` comes
-# out of the metadata in SQL, so the stored task input in the metadata is
-# never read.
+# The bound of the compact JSON text of the ``args`` of one failure.
+ARGS_JSON_BYTES = 2048
+
+# The columns of a failed task; the payload columns are read only with
+# ``agent.include_payloads``. ``error_kind`` and ``offset`` (the smallest
+# source offset) come out of the metadata in SQL, so the stored task input in
+# the metadata is never read. Only the last bytes of stderr are read.
 _FAILURE_COLUMNS = (
-    'id, ts, "partition", "offset", task_id, exit_code, duration, '
-    "CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.kind') END AS error_kind"
+    'id, ts, "partition", task_id, exit_code, duration, '
+    "CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.kind') END AS error_kind, "
+    'CASE WHEN json_valid(metadata) THEN '
+    '(SELECT MIN(value) FROM json_each(metadata, \'$.source_offsets\')) END AS "offset"'
 )
-_PAYLOAD_COLUMNS = ', stderr, args'
+_PAYLOAD_COLUMNS = f', substr(CAST(stderr AS BLOB), -{STDERR_TAIL_BYTES}) AS stderr, args'
 
 
 # --- health -------------------------------------------------------------
@@ -250,45 +250,63 @@ def recent_failures_query(*, include_payloads: bool) -> tuple[str, tuple[Any, ..
     return query, (TASK_FAILED_EVENT, MAX_RECENT_FAILURES)
 
 
-def stderr_tail(text: str) -> str:
-    """The last ``STDERR_TAIL_BYTES`` bytes of ``text``, cut at a UTF-8 character boundary."""
-    data = text.encode('utf-8')
-    if len(data) <= STDERR_TAIL_BYTES:
-        return text
+def stderr_tail(value: str | bytes | None) -> str:
+    """The last ``STDERR_TAIL_BYTES`` bytes of ``value``, cut at a UTF-8 character boundary.
+
+    ``value`` is the text, or the UTF-8 bytes the query read (already the last
+    bytes of the text); ``None`` is an empty text.
+    """
+    if value is None:
+        return ''
+    data = value.encode('utf-8') if isinstance(value, str) else bytes(value)
     tail = data[-STDERR_TAIL_BYTES:]
     # Drop the continuation bytes of a character whose first byte was cut off.
     start = 0
     while start < len(tail) and tail[start] & 0xC0 == 0x80:
         start += 1
-    return tail[start:].decode('utf-8')
+    return tail[start:].decode('utf-8', errors='replace')
 
 
-def _args_list(raw: Any) -> list[str]:
-    """The stored args (a JSON list) as texts; anything else is an empty list."""
+def bounded_args(raw: Any) -> tuple[list[str], bool]:
+    """The stored args (a JSON list) as texts, kept while their compact JSON stays within ``ARGS_JSON_BYTES``.
+
+    Returns the kept texts and whether items were left out. A text item stays as
+    it is; any other item is written as its compact JSON text. A value that is
+    not a JSON list gives no args.
+    """
     if not isinstance(raw, str):
-        return []
+        return [], False
     try:
         value = json.loads(raw)
     except ValueError:
-        return []
-    return [str(item) for item in value] if isinstance(value, list) else []
+        return [], False
+    if not isinstance(value, list):
+        return [], False
+    kept: list[str] = []
+    for item in value:
+        text = item if isinstance(item, str) else dumps(item)
+        if len(dumps([*kept, text]).encode('utf-8')) > ARGS_JSON_BYTES:
+            break
+        kept.append(text)
+    return kept, len(kept) < len(value)
 
 
 def failure_row(row: Mapping[str, Any], *, include_payloads: bool) -> dict[str, Any]:
     """One ``recent_failures`` entry from one row of :func:`recent_failures_query`."""
     kind = row['error_kind']
+    offset = row['offset']
     entry: dict[str, Any] = {
         'task_id': row['task_id'],
         'ts': row['ts'],
         'partition': row['partition'],
-        'offset': row['offset'],
+        'offset': offset if isinstance(offset, int) and not isinstance(offset, bool) else None,
         'exit_code': row['exit_code'],
         'duration': row['duration'],
         'error_kind': kind if isinstance(kind, str) else None,
     }
     if include_payloads:
-        entry['stderr_tail'] = stderr_tail(row['stderr'] or '')
-        entry['args'] = _args_list(row['args'])
+        entry['stderr_tail'] = stderr_tail(row['stderr'])
+        entry['args'], entry['args_truncated'] = bounded_args(row['args'])
     return entry
 
 
@@ -381,5 +399,5 @@ async def read_state(app: DrakkarApp, parts: Sequence[str], *, include_payloads:
                 own_hash=app.cluster_tasks_hash,
             )
         else:
-            answer[part] = loop_parts.get(part, LOOP_PART_FALLBACK[part])
+            answer[part] = loop_parts.get(part)
     return answer

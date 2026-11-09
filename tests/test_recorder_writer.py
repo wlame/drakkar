@@ -206,3 +206,20 @@ def test_a_failed_task_row_stores_the_failure_kind(writer, kind):
     writer.record_task_failed(task, ExecutorError(task=task, kind=kind, exit_code=None), partition=0)
 
     assert writer.last_metadata()['kind'] == kind
+
+
+def test_a_failed_task_row_stores_the_source_offsets(writer):
+    task = make_task(source_offsets=[12, 10, 11])
+
+    writer.record_task_failed(task, ExecutorError(task=task), partition=0)
+
+    assert writer.last_metadata()['source_offsets'] == [12, 10, 11]
+    assert 'offset' not in writer.last
+
+
+def test_a_failed_http_task_row_has_no_source_offsets(writer):
+    task = make_task(source_offsets=[0])
+
+    writer.record_task_failed(task, ExecutorError(task=task), partition=-1, origin='http')
+
+    assert 'source_offsets' not in writer.last_metadata()

@@ -40,6 +40,9 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+# The ``origin`` of a task that came from the HTTP source.
+HTTP_ORIGIN = 'http'
+
 
 def _line_count(text: str) -> int:
     """Logical lines in a stream capture: a trailing unterminated line counts."""
@@ -92,14 +95,20 @@ def _run_timing_metadata(result: ExecutorResult | None, reported_run_seconds: fl
     return metadata
 
 
-def _failed_metadata(task: ExecutorTask, error: ExecutorError, stdin_max_bytes: int) -> dict:
-    """Metadata for a task_failed event: the exception, the failure kind, plus the task's stdin.
+def _failed_metadata(task: ExecutorTask, error: ExecutorError, stdin_max_bytes: int, *, origin: str) -> dict:
+    """Metadata for a task_failed event: the exception, the failure kind, the source offsets, plus the task's stdin.
+
+    The source offsets are left out for a task of the HTTP source, which has no
+    Kafka offsets. They stay in the metadata, never in the row's ``offset``
+    column: trace queries read that column as one message's offset.
 
     stdin is stored on EVERY failure (capped), independent of the opt-in
     ``store_stdin`` flag — a failure without its input is half a fingerprint,
     and failures are rare enough that the write cost does not matter.
     """
     metadata: dict = {'exception': error.exception, 'kind': error.kind}
+    if origin != HTTP_ORIGIN:
+        metadata['source_offsets'] = list(task.source_offsets)
     if task.stdin:
         stored_stdin, truncated = _capped_stdin(task.stdin, stdin_max_bytes)
         metadata['stdin'] = stored_stdin
@@ -494,7 +503,7 @@ class EventWriter:
             'pool_active': pool_active,
             'pool_waiting': pool_waiting,
             'metadata': encode_json_str(
-                _failed_metadata(task, error, self._capture.max_stdin)
+                _failed_metadata(task, error, self._capture.max_stdin, origin=resolved_origin)
                 | _run_timing_metadata(result, reported_run_seconds)
             ),
             'labels': encode_json_str(task.labels) if task.labels else None,

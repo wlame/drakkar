@@ -111,7 +111,7 @@
     exit_code: The exit code of the subprocess, or null when it did not exit by itself.
     stderr: The standard error text when the recorder keeps output.
     duration: Seconds the subprocess ran.
-    metadata: The exception text of a timeout or launch failure, the task stdin (capped by recorder.capture.max_stdin) and the run timing.
+    metadata: The exception text of a timeout or launch failure, the failure kind (kind is nonzero_exit, timeout, launch_failure or internal), the source offsets of a Kafka task (source_offsets), the task stdin (capped by recorder.capture.max_stdin) and the run timing.
   action: Read the exit code, stderr and the exception text; follow the tasks-failing recipe.
   related:
     - recipe:tasks-failing

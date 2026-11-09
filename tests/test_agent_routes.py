@@ -884,6 +884,11 @@ async def test_a_worker_with_the_ui_off_serves_the_agent_routes(monkeypatch):
         assert (await client.get('/api/v1/identity')).status_code == 404
         for path in AGENT_GET_PATHS:
             assert (await client.get(path)).status_code == 200, path
+        state = (await client.get('/api/v1/agent/state', params={'parts': 'budget'})).json()
+
+    # Before the start there is no main loop yet: the parts are read inline.
+    assert app.main_loop is None
+    assert state['budget']['max_tasks'] == app._config.executor.max_pending_tasks
 
 
 @pytest.mark.parametrize(
@@ -1314,7 +1319,6 @@ async def test_a_stalled_main_loop_does_not_hold_the_state_route(monkeypatch):
         stalled.close()
 
     assert elapsed < 2
-    assert state['budget'] == {}
-    assert state['partitions'] == []
+    assert (state['budget'], state['partitions'], state['sinks'], state['recent_failures']) == (None, None, None, None)
     assert state['health']['state'] == 'off'
     assert diagnose['failed'] == []

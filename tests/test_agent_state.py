@@ -6,6 +6,7 @@ import json
 import sqlite3
 import time
 from contextlib import closing
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -16,9 +17,11 @@ from drakkar.agent.params import NO_RECORDER_STORE_NOTE, STATE_PARTS
 from drakkar.agent.registry import dumps
 from drakkar.agent.rules import RULE_METRICS
 from drakkar.agent.state import (
+    ARGS_JSON_BYTES,
     MAX_RECENT_FAILURES,
     STDERR_TAIL_BYTES,
     autodiscover_part,
+    bounded_args,
     budget_part,
     counter_total,
     failure_row,
@@ -39,7 +42,9 @@ from drakkar.schedule import cluster_tasks_hash
 from drakkar.sinks.manager import SinkStats
 from tests.conftest import kafka_connections
 
-PAYLOAD_KEYS = ('stderr_tail', 'args')
+PAYLOAD_KEYS = ('stderr_tail', 'args', 'args_truncated')
+CONTRACT = json.loads((Path(__file__).parent / 'fixtures' / 'agent_contract.json').read_text(encoding='utf-8'))
+RECENT_FAILURES_CASES = CONTRACT['recent_failures_cases']
 
 
 def _config(**sections: Any) -> DrakkarConfig:
@@ -395,15 +400,21 @@ def test_autodiscover_reports_a_mismatch_of_an_online_peer_of_the_same_cluster()
 # --- recent failures ---
 
 
-def test_stderr_tail_keeps_the_last_bytes_at_a_character_boundary():
-    assert stderr_tail('short') == 'short'
-    assert stderr_tail('') == ''
-    text = 'x' * 10 + 'é' * STDERR_TAIL_BYTES
-    tail = stderr_tail(text)
-    assert len(tail.encode('utf-8')) <= STDERR_TAIL_BYTES
-    assert tail == 'é' * (STDERR_TAIL_BYTES // 2)
-    odd = 'é' * STDERR_TAIL_BYTES + 'z'
-    assert stderr_tail(odd) == 'é' * (STDERR_TAIL_BYTES // 2 - 1) + 'z'
+def test_stderr_tail_cases():
+    for case in RECENT_FAILURES_CASES['stderr_cases']:
+        assert stderr_tail(case['stderr']) == case['tail']
+        if case['stderr'] is not None:
+            assert stderr_tail(case['stderr'].encode('utf-8')[-STDERR_TAIL_BYTES:]) == case['tail']
+
+
+@pytest.mark.parametrize('case', RECENT_FAILURES_CASES['args_cases'])
+def test_args_cases(case):
+    assert bounded_args(case['args']) == (case['kept'], case['truncated'])
+
+
+def test_the_payload_bounds_follow_the_contract_fixture():
+    assert RECENT_FAILURES_CASES['args_json_bytes'] == ARGS_JSON_BYTES
+    assert RECENT_FAILURES_CASES['stderr_tail_bytes'] == STDERR_TAIL_BYTES
 
 
 def _failure(**fields: Any) -> dict[str, Any]:
@@ -411,12 +422,12 @@ def _failure(**fields: Any) -> dict[str, Any]:
         'id': 7,
         'ts': 1700000000.5,
         'partition': 3,
-        'offset': None,
+        'offset': 41,
         'task_id': 't-1',
         'exit_code': 2,
         'duration': 1.25,
         'error_kind': 'nonzero_exit',
-        'stderr': 'boom',
+        'stderr': b'boom',
         'args': '["--flag", "value"]',
     }
     return {**row, **fields}
@@ -427,7 +438,7 @@ def test_a_failure_row_without_payloads():
         'task_id': 't-1',
         'ts': 1700000000.5,
         'partition': 3,
-        'offset': None,
+        'offset': 41,
         'exit_code': 2,
         'duration': 1.25,
         'error_kind': 'nonzero_exit',
@@ -439,26 +450,15 @@ def test_a_failure_row_with_payloads():
 
     assert row['stderr_tail'] == 'boom'
     assert row['args'] == ['--flag', 'value']
-    assert list(row)[-2:] == list(PAYLOAD_KEYS)
+    assert row['args_truncated'] is False
+    assert list(row)[-3:] == list(PAYLOAD_KEYS)
 
 
-@pytest.mark.parametrize(
-    ('stderr', 'args', 'tail', 'arg_list'),
-    [
-        (None, None, '', []),
-        ('', 'not json', '', []),
-        ('e', '{"a": 1}', 'e', []),
-        ('e', '[1, "x"]', 'e', ['1', 'x']),
-    ],
-)
-def test_a_failure_row_with_missing_or_odd_payload_columns(stderr, args, tail, arg_list):
-    row = failure_row(_failure(stderr=stderr, args=args), include_payloads=True)
+@pytest.mark.parametrize(('kind', 'offset'), [(5, 'x'), (None, True), (None, 1.5)])
+def test_an_error_kind_or_offset_of_another_type_is_null(kind, offset):
+    row = failure_row(_failure(error_kind=kind, offset=offset), include_payloads=False)
 
-    assert (row['stderr_tail'], row['args']) == (tail, arg_list)
-
-
-def test_an_error_kind_that_is_not_text_is_null():
-    assert failure_row(_failure(error_kind=5), include_payloads=False)['error_kind'] is None
+    assert (row['error_kind'], row['offset']) == (None, None)
 
 
 def _events_db(rows: list[dict[str, Any]]) -> sqlite3.Connection:
@@ -471,6 +471,14 @@ def _events_db(rows: list[dict[str, Any]]) -> sqlite3.Connection:
     return db
 
 
+def _read_failures(rows: list[dict[str, Any]], *, include_payloads: bool) -> tuple[list[str], list[dict[str, Any]]]:
+    query, params = recent_failures_query(include_payloads=include_payloads)
+    with closing(_events_db(rows)) as db:
+        cursor = db.execute(query, params)
+        columns = [description[0] for description in cursor.description]
+        return columns, [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+
+
 @pytest.mark.parametrize('include_payloads', [False, True])
 def test_the_failures_query_reads_the_newest_failed_tasks(include_payloads):
     rows = [
@@ -480,7 +488,10 @@ def test_the_failures_query_reads_the_newest_failed_tasks(include_payloads):
             'dt': 'x',
             'event': 'task_failed',
             'task_id': f't-{number}',
-            'metadata': json.dumps({'exception': None, 'kind': 'timeout', 'stdin': 'secret input'}),
+            'offset': 999,
+            'metadata': json.dumps(
+                {'exception': None, 'kind': 'timeout', 'source_offsets': [number + 2, number], 'stdin': 'secret input'}
+            ),
             'stderr': 'err',
             'args': '["a"]',
         }
@@ -488,29 +499,41 @@ def test_the_failures_query_reads_the_newest_failed_tasks(include_payloads):
     ]
     rows.append({'id': 40, 'ts': 999.0, 'dt': 'x', 'event': 'task_completed', 'task_id': 'done'})
     rows.append({'id': 41, 'ts': 1.0, 'dt': 'x', 'event': 'task_failed', 'task_id': 'odd', 'metadata': 'not json'})
-    query, params = recent_failures_query(include_payloads=include_payloads)
 
-    with closing(_events_db(rows)) as db:
-        cursor = db.execute(query, params)
-        columns = [description[0] for description in cursor.description]
-        found = [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+    columns, found = _read_failures(rows, include_payloads=include_payloads)
 
     assert len(found) == MAX_RECENT_FAILURES
     assert [row['task_id'] for row in found[:3]] == ['t-29', 't-28', 't-27']
-    assert found[0]['error_kind'] == 'timeout'
+    assert (found[0]['error_kind'], found[0]['offset']) == ('timeout', 29)
     assert ('stderr' in columns, 'args' in columns) == (include_payloads, include_payloads)
     assert 'metadata' not in columns
-    assert 'secret input' not in json.dumps(found)
+    assert 'secret input' not in repr(found)
 
 
-def test_the_failures_query_reads_no_kind_from_bad_metadata():
-    bad = {'id': 1, 'ts': 1.0, 'dt': 'x', 'event': 'task_failed', 'task_id': 'x', 'metadata': '{bad'}
-    query, params = recent_failures_query(include_payloads=False)
+def test_the_failures_query_reads_nothing_from_bad_or_short_metadata():
+    rows = [
+        {'id': 1, 'ts': 1.0, 'dt': 'x', 'event': 'task_failed', 'task_id': 'bad', 'metadata': '{bad'},
+        {'id': 2, 'ts': 2.0, 'dt': 'x', 'event': 'task_failed', 'task_id': 'http', 'metadata': '{"kind": "timeout"}'},
+        {'id': 3, 'ts': 3.0, 'dt': 'x', 'event': 'task_failed', 'task_id': 'none'},
+    ]
 
-    with closing(_events_db([bad])) as db:
-        (row,) = db.execute(query, params).fetchall()
+    _columns, found = _read_failures(rows, include_payloads=False)
 
-    assert row[-1] is None
+    assert [(row['task_id'], row['error_kind'], row['offset']) for row in found] == [
+        ('none', None, None),
+        ('http', 'timeout', None),
+        ('bad', None, None),
+    ]
+
+
+def test_the_failures_query_reads_only_the_last_bytes_of_stderr():
+    stderr = 'x' * 10 + 'é' * STDERR_TAIL_BYTES
+    rows = [{'id': 1, 'ts': 1.0, 'dt': 'x', 'event': 'task_failed', 'task_id': 't', 'stderr': stderr}]
+
+    _columns, (row,) = _read_failures(rows, include_payloads=True)
+
+    assert len(row['stderr']) == STDERR_TAIL_BYTES
+    assert failure_row(row, include_payloads=True)['stderr_tail'] == stderr_tail(stderr)
 
 
 def _store(columns: list[str], rows: list[tuple[Any, ...]]) -> Any:
@@ -629,7 +652,7 @@ async def test_read_state_answers_only_the_asked_parts_and_skips_the_loop_when_n
     dispatch.assert_not_awaited()
 
 
-async def test_a_main_loop_that_does_not_answer_gives_empty_loop_parts(monkeypatch):
+async def test_a_main_loop_that_does_not_answer_gives_null_loop_parts(monkeypatch):
     async def no_answer(coro: Any, main_loop: Any) -> None:
         coro.close()
 
@@ -637,10 +660,12 @@ async def test_a_main_loop_that_does_not_answer_gives_empty_loop_parts(monkeypat
 
     state = await read_state(_state_app(_config()), STATE_PARTS, include_payloads=False)
 
-    assert state['budget'] == {}
-    assert state['partitions'] == []
-    assert state['sinks'] == []
-    assert state['recent_failures'] == {'failures': []}
+    assert [part for part, value in state.items() if value is None] == [
+        'budget',
+        'partitions',
+        'sinks',
+        'recent_failures',
+    ]
     assert state['health']['state'] == 'off'
 
 

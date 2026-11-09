@@ -8,7 +8,8 @@ same key. ``tests/fixtures/agent_contract.json`` (``diagnose_cases``) pins the
 conditions and the evidence.
 
 A part, a field or a metric that the input does not hold makes its rule find
-nothing; a missing metric reads as 0. Evidence holds counts, names, partition
+nothing (a row without a field the rule reads is skipped); a missing metric
+reads as 0. A part that could not be read is ``None`` and finds nothing. Evidence holds counts, names, partition
 numbers and settings, never payload text.
 
 Three rules compare with the previous call and keep a baseline per worker
@@ -116,6 +117,10 @@ def _numbers(part: Mapping[str, Any], *names: str) -> list[float] | None:
     return numbers
 
 
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _metric(rule_input: RuleInput, name: str) -> float:
     value = rule_input.metrics.get(name, 0)
     return value if isinstance(value, int | float) else 0
@@ -171,7 +176,11 @@ def pool_saturated(rule_input: RuleInput, baselines: Baselines) -> dict[str, Any
 
 def partition_dead(rule_input: RuleInput, baselines: Baselines) -> dict[str, Any] | None:
     """A partition loop is dead."""
-    dead = sorted(row['partition'] for row in _rows(rule_input, 'partitions') if row.get('dead') is True)
+    dead = sorted(
+        row['partition']
+        for row in _rows(rule_input, 'partitions')
+        if row.get('dead') is True and _is_int(row.get('partition'))
+    )
     return {'partitions': dead} if dead else None
 
 
@@ -180,7 +189,7 @@ def partition_paused_by_debug(rule_input: RuleInput, baselines: Baselines) -> di
     paused = sorted(
         row['partition']
         for row in _rows(rule_input, 'partitions')
-        if isinstance(row.get('paused_by'), list) and DEBUG_PAUSE in row['paused_by']
+        if isinstance(row.get('paused_by'), list) and DEBUG_PAUSE in row['paused_by'] and _is_int(row.get('partition'))
     )
     return {'partitions': paused} if paused else None
 
@@ -188,18 +197,16 @@ def partition_paused_by_debug(rule_input: RuleInput, baselines: Baselines) -> di
 def sink_breaker_open(rule_input: RuleInput, baselines: Baselines) -> dict[str, Any] | None:
     """The circuit breaker of a sink is open."""
     sinks = sorted(
-        f'{row["type"]}/{row["name"]}' for row in _rows(rule_input, 'sinks') if row.get('breaker_open') is True
+        f'{row["type"]}/{row["name"]}'
+        for row in _rows(rule_input, 'sinks')
+        if row.get('breaker_open') is True and isinstance(row.get('type'), str) and isinstance(row.get('name'), str)
     )
     return {'sinks': sinks} if sinks else None
 
 
 def _lag_sum(rule_input: RuleInput) -> int | None:
     """The sum of the known partition lags; ``None`` when no partition has a known lag."""
-    lags = [
-        row['lag']
-        for row in _rows(rule_input, 'partitions')
-        if isinstance(row.get('lag'), int) and not isinstance(row.get('lag'), bool)
-    ]
+    lags = [row['lag'] for row in _rows(rule_input, 'partitions') if _is_int(row.get('lag'))]
     return sum(lags) if lags else None
 
 
