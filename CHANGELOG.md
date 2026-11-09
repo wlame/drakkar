@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The upgrading guide now names the new key `recorder.sqlite.max_queue` and says that task output counts toward `executor.max_pending_bytes` while its hooks and sink delivery run.
+
 ## [3.0.1] - 2026-11-09
 
 ### Security

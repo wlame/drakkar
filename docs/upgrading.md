@@ -38,7 +38,11 @@ changes these things:
 - Backpressure counts tasks and bytes: new windows wait for room under
   `executor.max_pending_tasks` and `executor.max_pending_bytes`, and the Kafka
   fetch pauses at `sources.kafka.max_queued_messages`. The two
-  `executor.backpressure_*_multiplier` keys are removed.
+  `executor.backpressure_*_multiplier` keys are removed. Task output counts in
+  the pending bytes while its hooks and delivery run, so large outputs slow
+  intake.
+- The queue of rows waiting for the recorder file has a byte bound,
+  `recorder.sqlite.max_queue`.
 - A task's `duration` ends at the process exit, read off the event loop, so
   it can be shorter on a busy worker (see [Task run time](#task-run-time)).
 
@@ -604,9 +608,10 @@ These keys have no old key. The defaults work for most deployments.
 | `autodiscover.enabled` | `false` | Turns on the registry and the election. |
 | `api.enabled` | `true` | Runs the HTTP server. |
 | `executor.max_pending_tasks` | `2000` | New windows wait while this many tasks are created and not settled. At least `executor.max_executors`. |
-| `executor.max_pending_bytes` | `1GiB` | New windows wait while task stdin plus kept task output reach this size. At least `16MiB`. |
+| `executor.max_pending_bytes` | `1GiB` | New windows wait while the pending bytes reach this size: task stdin, the output of tasks whose `on_task_complete` or sink delivery still runs, and output kept for `on_message_complete` and `on_window_complete`. At least `16MiB`. |
 | `sources.kafka.max_queued_messages` | `1000` | The Kafka fetch pauses at this many queued messages and resumes at half. At least `sources.kafka.max_poll_records`. |
 | `ui.delete_enabled` | `false` | Serves the delete of one merge result from the Databases view. Off: `403`. |
+| `recorder.sqlite.max_queue` | `128MiB` | The most text (stdout, stderr, metadata and args) in the queue of rows waiting for the recorder file, `16MiB` to `1GiB`. Past it the oldest rows are dropped from the file only; the memory store keeps them, and `drakkar_recorder_dropped_events_total` counts them. Read only with `recorder.provider: sqlite`. |
 
 ### 5. What changes in behaviour {#behaviour}
 
@@ -1047,14 +1052,19 @@ Now there are two stages (see [Backpressure](performance.md#backpressure)):
 
 1. **Window admission.** A partition loop takes a new `arrange()` window only
    while the pending tasks are below `executor.max_pending_tasks` (default
-   `2000`) and the pending bytes — task stdin plus the stdout and stderr kept
-   for `on_message_complete` and `on_window_complete` — are below
-   `executor.max_pending_bytes` (default `1GiB`). The window size adapts to the
+   `2000`) and the pending bytes are below `executor.max_pending_bytes`
+   (default `1GiB`). The pending bytes are the task stdin, the stdout and
+   stderr of each task from its end until its `on_task_complete` (or
+   `on_error`) and its sink delivery end, and the output kept for
+   `on_message_complete` and `on_window_complete`. The window size adapts to the
    free room after a warm-up of one-message windows (the first 3 windows of
    each partition). The limits are soft: a window reserves its estimate when it is
-   taken, so with a steady message shape they are passed by about one message;
-   after the warm-up a sudden jump in tasks per message can pass them by that
-   jump.
+   taken, so with a steady message shape the task limit is passed by about one
+   message; after the warm-up a sudden jump in tasks per message can pass it by
+   that jump. The byte limit can also be passed by the output of the pending
+   tasks, because a window reserves stdin only and output exists only when a
+   task ends. `executor.max_stdout` and `executor.max_stderr` bound each output
+   (see [Backpressure](performance.md#backpressure)).
 2. **Kafka fetch.** The fetch pauses when the queues of the live partitions
    hold `sources.kafka.max_queued_messages` messages (default `1000`) and
    resumes at half of it.
