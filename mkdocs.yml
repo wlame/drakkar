@@ -76,6 +76,8 @@ nav:
   - Executor: executor.md
   - Observability: observability.md
   - Operator UI Reference (every value on every page): ui-reference.md
+  - Agent Surface (explain a worker to an AI agent): agent.md
+  - Agent Reference (every registry entry): agent-reference.md
   - Kafka Read API (inspect topics from the UI server): kafka-read.md
   - Consume Pause (timed debug pause from the Live page): consume-pause.md
   - Debugging Bottlenecks: debugging-bottlenecks.md

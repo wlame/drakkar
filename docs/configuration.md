@@ -12,7 +12,7 @@ Drakkar configuration is built on [pydantic-settings](https://docs.pydantic-dev.
 One set of rules covers the whole YAML tree. Learn them once and every section reads the same way.
 
 1. **Unknown keys fail the load.** A key the config does not declare is an error, in the YAML file and in a `DK_` variable. See [Unknown keys](#unknown-keys).
-2. **The top level answers operator questions**, in this order: `worker`, `cluster`, `connections`, `sources`, `executor`, `threads`, `sinks`, `dlq`, `storage`, `recorder`, `cache`, `autodiscover`, `metrics`, `logging`, `runtime_health`, `api`, `ui`, `app`.
+2. **The top level answers operator questions**, in this order: `worker`, `cluster`, `connections`, `sources`, `executor`, `threads`, `sinks`, `dlq`, `storage`, `recorder`, `cache`, `autodiscover`, `metrics`, `logging`, `runtime_health`, `api`, `ui`, `agent`, `app`.
 3. **A service is declared once.** `connections.<kind>.<name>` holds how to reach a service and how to log in to it. A consumer (a source, a sink, the DLQ, the recorder, autodiscover) says `connection: <name>`; the default name is `main`. The entry must be declared, or the load fails with `<path>.connection '<name>' is not defined under connections.<kind>`. What the consumer does with the service (a topic, a table prefix, a statement) stays in the consumer. A different login to the same server is a different connection. Each sink owns its client or pool, so several sinks can share one connection and keep their own topic or statements. A connection that no consumer uses is not checked for use.
 4. **Choice plus block.** A key that selects an implementation (`provider`) sits next to one block per implementation that has settings of its own: `recorder.sqlite` and `recorder.postgres`. A provider with no settings has no block. The block of the provider that is not selected loads and does nothing.
 5. **Switches.** A feature with settings is a block with `enabled`. A switch with no other setting is a flat `<feature>_enabled` (`ui.merge_enabled`). A boolean that reads as a question keeps its name (`manage_schema`).
@@ -29,6 +29,7 @@ A worker can run its main loop only: no API, no UI, no recorder, no autodiscover
 |---|---|---|
 | API server (`/healthz`, `/readyz`, peer routes) | `api.enabled` | nothing |
 | Operator UI and its data routes | `ui.enabled` | `api.enabled` |
+| Agent routes (`/api/v1/agent`) | `agent.enabled` | `api.enabled` |
 | Kafka source | `sources.kafka.enabled` | `connections.kafka.<sources.kafka.connection>` |
 | HTTP source | `sources.http.enabled` | nothing (at least one source must be on) |
 | Kafka, Postgres, Mongo, Redis sinks | `sinks.<type>.<name>` | `connections.<type>.<connection>` |
@@ -1333,21 +1334,25 @@ The HTTP server of the worker: one listener, one port. It is a feature of its ow
 | Route | Needs |
 |---|---|
 | `/healthz`, `/readyz`, `/api/v1/peer/cache/changes` | `api.enabled` |
-| everything else (`/ws`, `/api/v1/*`, `/api-docs`, `/docs`, the pages) | `api.enabled` and `ui.enabled` |
+| `/api/v1/agent` and the routes below it | `api.enabled` and `agent.enabled` |
+| everything else (`/ws`, the other `/api/v1/*` routes, `/api-docs`, `/docs`, the pages) | `api.enabled` and `ui.enabled` |
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
-| `enabled` | `bool` | `true` | | Run the HTTP server: `/healthz`, `/readyz` and the peer route. Off means no listener, so nothing answers the Kubernetes probes (the worker logs a warning about missing probes), and `ui.enabled` and `autodiscover.enabled` must both be false. |
+| `enabled` | `bool` | `true` | | Run the HTTP server: `/healthz`, `/readyz` and the peer route. Off means no listener, so nothing answers the Kubernetes probes (the worker logs a warning about missing probes), and `ui.enabled`, `autodiscover.enabled` and `agent.enabled` must all be false. |
 | `host` | `str` | `'127.0.0.1'` | | Bind address. Default `127.0.0.1` (localhost only). Use `0.0.0.0` to expose on all interfaces. Auth is opt-in regardless of host: when binding to a non-loopback address inside anything other than a fully trusted private network, set `ui.auth_token`. |
 | `port` | `int` | `8080` | 1--65535 | Port for the HTTP server (FastAPI). |
 | `public_url` | `str` | `''` | | External URL for this worker's HTTP server. Peers and browsers reach the worker through it, and the registry card carries it. Empty derives `http://<outbound ip>:<port>/`. Useful behind load balancers or Kubernetes ingresses. |
 
-The load fails in this order, after the source check, with:
+The load checks these rules right after the source check, in this order, and fails at the first one that is broken:
 
 ```
 ui.enabled needs api.enabled; set ui.enabled to false, or set api.enabled to true
 autodiscover.enabled needs api.enabled: peers reach a worker through its API
+agent.enabled needs api.enabled: the agent routes are served by the API server
 ```
+
+The same three checks run again after `on_startup`.
 
 A worker with `ui.enabled: false` and `api.enabled: true` still opens the API port for health and peers. To open no port at all, set `api.enabled: false` too.
 
@@ -1513,6 +1518,26 @@ ui:
     repo: wlame/drakkar-ui
     pinned_version: ""
     check_update: true
+```
+
+---
+
+## Agent (`agent:`) {#agent-agent}
+
+The agent routes under `/api/v1/agent`: a read-only surface that explains the worker to an AI agent (the framework knowledge, the effective config, the metrics, the live state and rule-based findings). The API server serves them, so they work with `ui.enabled: false`. The full guide is [Agent Surface](agent.md).
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `enabled` | `bool` | `false` | needs `api.enabled` | Serve the agent routes. Off, every agent route answers 404 `{"error": "the agent surface is off; set agent.enabled to true"}`. |
+| `auth_token` | `str` | `''` | secret | When set, every agent route needs `Authorization: Bearer <token>` (the scheme in any letter case); a missing or wrong token answers 401 `{"error": "agent token required"}`. The comparison takes constant time. `ui.auth_token` and the `?token=` parameter do not apply to these routes. Empty: no token is needed, and with `enabled: true` the worker logs `agent_surface_unauthenticated` (warning, category `agent`) at start. |
+| `include_payloads` | `bool` | `false` | | Let `GET /api/v1/agent/state` add `stderr_tail` (the last 2048 bytes of stderr) and `args` to each entry of `recent_failures`. Off, no agent answer carries task output. |
+
+With `enabled: true` and `api.enabled: false` the load fails with `agent.enabled needs api.enabled: the agent routes are served by the API server`. The check runs after the `ui` and `autodiscover` checks of the [API server](#api-server-api), and again after `on_startup`. The config summary line shows `agent=on` or `agent=off`.
+
+```yaml
+agent:
+  enabled: true
+  # auth_token comes from DK_AGENT__AUTH_TOKEN, so the token stays out of the file
 ```
 
 ---

@@ -51,6 +51,7 @@ network access.
 | **WebSocket handshake auth** | With a token set, `/ws` authenticates inside the handshake and validates `Origin` against `ui.allowed_origins` (or the `Host` header), rejecting every other cross-origin handshake. |
 | **Cross-origin read rule** | Only three read paths answer cross-origin browser requests: `/api/v1/debug/trace`, `/api/v1/debug/trace-by-label` and `/api/v1/debug/databases`, which the UI reads from other workers of the cluster when you open a cluster view or pick them. They use the same origin rule as `/ws`. The preflight needs no token; the read itself still needs one when a token is set. No other path sends CORS headers. See [below](#cross-origin-reads). |
 | **Startup warning** | A worker running the UI without a token logs `ui_unauthenticated` at startup, naming the bind and both opt-in paths. |
+| **Agent token** | The [agent routes](agent.md) are off by default and read-only. `agent.auth_token` gates them on its own (`Authorization: Bearer` only, compared in constant time); `ui.auth_token` does not open them. With the routes on and no token the worker logs `agent_surface_unauthenticated`. See [below](#the-agent-routes). |
 | **Independent kill switches** | `ui.probe.enabled` and `ui.merge_enabled` close the two non-read-only endpoints that are on by default, whether or not a token is set. `ui.delete_enabled` (off by default) opens the third: `DELETE /api/v1/debug/files/{path}`, which deletes one merge result (`merged/<name>.db`) and nothing else. A sealed file, an archive or any other path answers `404`; a merge result this worker is sending or merging from answers `409`. |
 | **Webapp auth + rate limits** | Per-client bearer tokens and a per-client rpm sliding window on the HTTP ingress, with `max_concurrent` shedding over-capacity requests. |
 | **Path containment** | Database download and merge take paths relative to `storage.shared_dir` and serve only three shapes: `history/<cluster>/<name>.db`, `history/<cluster>/<archive>.db.gz` and `merged/<name>.db` (merge takes only the `.db` ones). The download answers `404` for any other path, an unsafe segment, a symlink, a path that resolves outside `storage.shared_dir`, or a missing file; the merge answers `400` for a path of another shape. A worker's own files in `storage.dir` are never served by path. The one exception takes no path: `GET /api/v1/debug/download-live` serves a snapshot of the worker's own live recorder file (`source=file`), of its recorder memory store (`source=memory`) or of its cache file (`source=cache`, every cache value the worker holds), behind the token. The memory snapshot holds the same data as the file: event rows with their task env redacted as in the file, outputs when `recorder.capture.output` is on, and the redacted `worker_config` row. Its temporary file in `storage.dir` is owner-only (`0600`, created exclusively) and removed before the answer starts; without `storage.dir` the copy stays in RAM. `GET /api/v1/debug/slice` takes no path either: it sends the recorder events of a time range (`args`, `stdout`, `stderr` and labels included unless `output=0`) from the worker's own sources or from the sealed history or Postgres rows of its cluster, behind the token, with the same owner-only temp file removed before the first byte. |
@@ -203,6 +204,22 @@ topic. `dk-error` has URL credentials removed (`user:pass@` becomes
 reaches the header as it is, so a sink or a handler must not put one in an
 exception message. The same applies to the
 [Kafka read API](kafka-read.md), which reads the DLQ topic behind the UI token.
+
+### The agent routes
+
+The [agent routes](agent.md) under `/api/v1/agent` are on the API port, so
+they are served with the UI off too. They change nothing, but they show the
+effective config (with every secret masked: secret keys, URL passwords, and
+map values whose key name looks like a secret), the worker state, and the
+names and numbers of failed tasks. Task output text (`stderr_tail` and `args`)
+is in the state answer only with `agent.include_payloads: true`, and only in
+`recent_failures`; stderr and arguments can hold customer data.
+
+Set `agent.auth_token` before you turn the routes on, and give it only to the
+agents that need it. The token is separate from `ui.auth_token`, so an agent
+gets no access to the UI routes with it, and a UI token does not open the
+agent routes. The `?token=` query parameter is not accepted, so the token
+does not end up in access logs or browser history.
 
 ### Provider credentials
 

@@ -2958,5 +2958,264 @@
         "rules": []
       }
     ]
+  },
+  "cli_cases": {
+    "_comment": "The offline command: argv after the program name, the exit code and the exact stdout. Every case runs on tiny_registry. '{config}' in argv is the path of a file that holds config_yaml. env holds the only DK_ variables of the case. A JSON output is the answer text plus one LF; an error writes 'drakkar-agent: <reason>' to stderr and nothing to stdout.",
+    "program": "drakkar-agent",
+    "usage_exit_code": 2,
+    "cases": [
+      {
+        "name": "manual_brief_json",
+        "argv": [
+          "manual"
+        ],
+        "exit_code": 0,
+        "stdout": "{\"parts\":{\"concepts\":[{\"key\":\"pipeline\",\"summary\":\"Messages become tasks, tasks run as subprocesses, results go to sinks.\"},{\"key\":\"offsets\",\"summary\":\"The committed offset of a partition is its watermark.\"}],\"config\":[{\"key\":\"executor.max_executors\",\"summary\":\"The number of task subprocesses that run at one time.\"},{\"key\":\"sinks.kafka.*\",\"summary\":\"The Kafka sink instances.\"}],\"metrics\":[{\"key\":\"drakkar_pending_tasks\",\"summary\":\"Tasks created and not yet settled.\"}],\"events\":[{\"key\":\"task_failed\",\"summary\":\"A task ended with an error.\"},{\"key\":\"log:agent_notes_failed\",\"summary\":\"The handler's agent_notes hook raised.\"}],\"recipes\":[{\"key\":\"tasks-failing\",\"summary\":\"Find out why tasks fail.\"}],\"routes\":[{\"key\":\"GET /healthz\",\"summary\":\"The liveness probe.\"}],\"rules\":[{\"key\":\"budget-saturated\",\"summary\":\"The pending budget is full.\"}]}}\n"
+      },
+      {
+        "name": "manual_full_markdown",
+        "argv": [
+          "manual",
+          "--detail=full",
+          "--format=markdown"
+        ],
+        "exit_code": 0,
+        "stdout": "# concepts\n\n## pipeline\n\nMessages become tasks, tasks run as subprocesses, results go to sinks.\n\nA worker reads messages and runs tasks.\n\nResults go to the sinks.\n\n**Principles:**\n- Offsets are committed only after delivery.\n\n**Related:** `concept:offsets`, `config:executor.max_executors`, `metric:drakkar_pending_tasks`\n\n## offsets\n\nThe committed offset of a partition is its watermark.\n\nEvery message below the watermark is done; offsets ≥ the watermark & < the next one are “pending” <here>.\n\n# config\n\n## executor.max_executors\n\nThe number of task subprocesses that run at one time.\n\n**Advice:** Raise it when tasks wait for a slot and the host has free CPU.\n\n**Related:** `concept:pipeline`\n\n## sinks.kafka.*\n\nThe Kafka sink instances.\n\n**Advice:** Give each instance its own topic.\n\n# metrics\n\n## drakkar_pending_tasks\n\nTasks created and not yet settled.\n\n**Meaning:** A value near executor.max_pending_tasks means new windows wait.\n\n**Healthy:** Below executor.max_pending_tasks.\n\n**PromQL:**\n- Pending tasks of this worker: `drakkar_pending_tasks{ {{worker}} }`\n\n**Related:** `config:executor.max_pending_tasks`\n\n# events\n\n## task_failed\n\nA task ended with an error.\n\n**When:** The subprocess exited with a code other than 0, or it timed out.\n\n**Fields:**\n- `duration`: The run time in seconds.\n- `exit_code`: The exit code of the subprocess.\n\n**Action:** Read stderr and the exit code.\n\n**Related:** `recipe:tasks-failing`\n\n## log:agent_notes_failed\n\nThe handler's agent_notes hook raised.\n\n**When:** Once at startup.\n\n# recipes\n\n## tasks-failing\n\nFind out why tasks fail.\n\n**Question:** Why do my tasks fail?\n\n**Steps:**\n1. Call /api/v1/agent/state?parts=recent_failures. Why: It lists the last failures with their exit codes.\n\n**Causes:**\n- The binary is missing. Check: The exit code is 127. Fix: Install the binary or set executor.binary_path.\n\n**Related:** `event:task_failed`\n\n# routes\n\n## GET /healthz\n\nThe liveness probe.\n\n**Use:** Check that the API server answers.\n\n**Cost:** cheap\n\n# rules\n\n## budget-saturated\n\nThe pending budget is full.\n\n**Severity:** warning\n\n**Title:** New windows wait for the pending budget\n\n**Explain:** `concept:pipeline`\n\n**Suggestion:** Raise executor.max_pending_tasks or make tasks faster.\n\n**Inputs:**\n- `budget.tasks`\n- `budget.max_tasks`\n"
+      },
+      {
+        "name": "manual_some_parts_full",
+        "argv": [
+          "manual",
+          "--parts=metrics,concepts",
+          "--detail=full"
+        ],
+        "exit_code": 0,
+        "stdout": "{\"parts\":{\"concepts\":[{\"key\":\"pipeline\",\"summary\":\"Messages become tasks, tasks run as subprocesses, results go to sinks.\",\"body\":\"A worker reads messages and runs tasks.\\n\\nResults go to the sinks.\",\"principles\":[\"Offsets are committed only after delivery.\"],\"related\":[\"concept:offsets\",\"config:executor.max_executors\",\"metric:drakkar_pending_tasks\"]},{\"key\":\"offsets\",\"summary\":\"The committed offset of a partition is its watermark.\",\"body\":\"Every message below the watermark is done; offsets ≥ the watermark & < the next one are “pending” <here>.\"}],\"metrics\":[{\"key\":\"drakkar_pending_tasks\",\"summary\":\"Tasks created and not yet settled.\",\"meaning\":\"A value near executor.max_pending_tasks means new windows wait.\",\"healthy\":\"Below executor.max_pending_tasks.\",\"promql\":[{\"title\":\"Pending tasks of this worker\",\"query\":\"drakkar_pending_tasks{ {{worker}} }\"}],\"related\":[\"config:executor.max_pending_tasks\"]}]}}\n"
+      },
+      {
+        "name": "manual_topic",
+        "argv": [
+          "manual",
+          "--topic=concept:offsets"
+        ],
+        "exit_code": 0,
+        "stdout": "{\"parts\":{\"concepts\":[{\"key\":\"offsets\",\"summary\":\"The committed offset of a partition is its watermark.\",\"body\":\"Every message below the watermark is done; offsets ≥ the watermark & < the next one are “pending” <here>.\"}]}}\n"
+      },
+      {
+        "name": "manual_topic_config_path_markdown",
+        "argv": [
+          "manual",
+          "--topic=config:executor.max_pending_tasks",
+          "--format=markdown"
+        ],
+        "exit_code": 0,
+        "stdout": "# config\n\n## executor.max_pending_tasks\n\nNew windows wait while this many tasks are created and not settled.\n\n**Type:** integer\n\n**Default:** `2000`\n"
+      },
+      {
+        "name": "reference",
+        "argv": [
+          "reference"
+        ],
+        "exit_code": 0,
+        "stdout": "# Agent Reference\n\nThis page is generated from the agent knowledge registry by `drakkar-agent reference`. Do not edit it by hand: run `just agent-reference`.\n\nA worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agent/manual`. See [Agent Surface](agent.md) for the routes, the config keys and the handler notes.\n\nPromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.\n\nRegistry version: `70dea96196fa447f`.\n\n## Concepts\n\n### `concept:pipeline`\n\nMessages become tasks, tasks run as subprocesses, results go to sinks.\n\nA worker reads messages and runs tasks.\n\nResults go to the sinks.\n\n**Principles:**\n- Offsets are committed only after delivery.\n\n**Related:** `concept:offsets`, `config:executor.max_executors`, `metric:drakkar_pending_tasks`\n\n### `concept:offsets`\n\nThe committed offset of a partition is its watermark.\n\nEvery message below the watermark is done; offsets ≥ the watermark &amp; &lt; the next one are “pending” &lt;here&gt;.\n\n## Config advice\n\n### `config:executor.max_executors`\n\nThe number of task subprocesses that run at one time.\n\n**Advice:** Raise it when tasks wait for a slot and the host has free CPU.\n\n**Related:** `concept:pipeline`\n\n### `config:sinks.kafka.*`\n\nThe Kafka sink instances.\n\n**Advice:** Give each instance its own topic.\n\n## Metrics\n\n### `metric:drakkar_pending_tasks`\n\nTasks created and not yet settled.\n\n**Meaning:** A value near executor.max_pending_tasks means new windows wait.\n\n**Healthy:** Below executor.max_pending_tasks.\n\n**PromQL:**\n- Pending tasks of this worker: `drakkar_pending_tasks{ {{worker}} }`\n\n**Related:** `config:executor.max_pending_tasks`\n\n## Events\n\n### `event:task_failed`\n\nA task ended with an error.\n\n**When:** The subprocess exited with a code other than 0, or it timed out.\n\n**Fields:**\n- `duration`: The run time in seconds.\n- `exit_code`: The exit code of the subprocess.\n\n**Action:** Read stderr and the exit code.\n\n**Related:** `recipe:tasks-failing`\n\n### `event:log:agent_notes_failed`\n\nThe handler's agent_notes hook raised.\n\n**When:** Once at startup.\n\n## Recipes\n\n### `recipe:tasks-failing`\n\nFind out why tasks fail.\n\n**Question:** Why do my tasks fail?\n\n**Steps:**\n1. Call /api/v1/agent/state?parts=recent_failures. Why: It lists the last failures with their exit codes.\n\n**Causes:**\n- The binary is missing. Check: The exit code is 127. Fix: Install the binary or set executor.binary_path.\n\n**Related:** `event:task_failed`\n\n## Routes\n\n### `route:GET /healthz`\n\nThe liveness probe.\n\n**Use:** Check that the API server answers.\n\n**Cost:** cheap\n\n## Rules\n\n### `rule:budget-saturated`\n\nThe pending budget is full.\n\n**Severity:** warning\n\n**Title:** New windows wait for the pending budget\n\n**Explain:** `concept:pipeline`\n\n**Suggestion:** Raise executor.max_pending_tasks or make tasks faster.\n\n**Inputs:**\n- `budget.tasks`\n- `budget.max_tasks`\n"
+      },
+      {
+        "name": "config_agent_and_app",
+        "argv": [
+          "config",
+          "--config={config}",
+          "--parts=app,agent"
+        ],
+        "config_yaml": "sources:\n  http:\n    enabled: true\nagent:\n  enabled: true\n  auth_token: agent-token-value\napp:\n  ledger:\n    url: https://user:pass@ledger.example/api\n    api_key: k-123\n  batch: 50\n",
+        "env": {
+          "DK_AGENT__INCLUDE_PAYLOADS": "true"
+        },
+        "exit_code": 0,
+        "stdout": "{\"entries\":[{\"path\":\"agent.auth_token\",\"value\":\"***\",\"default\":\"\",\"origin\":\"yaml\",\"type\":\"string\",\"secret\":true,\"meaning\":\"Bearer token for the agent routes.\"},{\"path\":\"agent.enabled\",\"value\":\"true\",\"default\":\"false\",\"origin\":\"yaml\",\"type\":\"boolean\",\"secret\":false,\"meaning\":\"Serve the agent routes.\"},{\"path\":\"agent.include_payloads\",\"value\":\"true\",\"default\":\"false\",\"origin\":\"env\",\"type\":\"boolean\",\"secret\":false,\"meaning\":\"Let the state answer include task output text in its recent failures.\"},{\"path\":\"app.batch\",\"value\":\"50\",\"default\":\"\",\"origin\":\"yaml\",\"type\":\"integer\",\"secret\":false,\"meaning\":\"\"},{\"path\":\"app.ledger.api_key\",\"value\":\"***\",\"default\":\"\",\"origin\":\"yaml\",\"type\":\"string\",\"secret\":true,\"meaning\":\"\"},{\"path\":\"app.ledger.url\",\"value\":\"https://***:***@ledger.example/api\",\"default\":\"\",\"origin\":\"yaml\",\"type\":\"string\",\"secret\":false,\"meaning\":\"\"}]}\n"
+      },
+      {
+        "name": "config_executor_full",
+        "argv": [
+          "config",
+          "--config={config}",
+          "--parts=executor",
+          "--detail=full"
+        ],
+        "config_yaml": "sources:\n  http:\n    enabled: true\nexecutor:\n  max_executors: 8\n",
+        "exit_code": 0,
+        "stdout": "{\"entries\":[{\"path\":\"executor.binary_path\",\"value\":\"null\",\"default\":\"null\",\"origin\":\"default\",\"type\":\"string\",\"secret\":false,\"meaning\":\"Default binary path for all tasks.\"},{\"path\":\"executor.drain_timeout\",\"value\":\"30s\",\"default\":\"30s\",\"origin\":\"default\",\"type\":\"duration\",\"secret\":false,\"meaning\":\"Longest wait for in-flight executor tasks to finish during graceful shutdown or partition revocation, a whole number of seconds.\"},{\"path\":\"executor.env\",\"value\":\"{}\",\"default\":\"{}\",\"origin\":\"default\",\"type\":\"object\",\"secret\":false,\"meaning\":\"Environment variables passed to all executor subprocesses.\"},{\"path\":\"executor.env_inherit_deny\",\"value\":\"[\\\"DK_*\\\",\\\"*PASSWORD*\\\",\\\"*PASSWD*\\\",\\\"*SECRET*\\\",\\\"*TOKEN*\\\",\\\"*_KEY\\\",\\\"*_DSN\\\",\\\"*CREDENTIAL*\\\",\\\"*SALT*\\\"]\",\"default\":\"[\\\"DK_*\\\",\\\"*PASSWORD*\\\",\\\"*PASSWD*\\\",\\\"*SECRET*\\\",\\\"*TOKEN*\\\",\\\"*_KEY\\\",\\\"*_DSN\\\",\\\"*CREDENTIAL*\\\",\\\"*SALT*\\\"]\",\"origin\":\"default\",\"type\":\"array\",\"secret\":false,\"meaning\":\"Case-insensitive fnmatch patterns against parent env var names.\"},{\"path\":\"executor.env_inherit_parent\",\"value\":\"true\",\"default\":\"true\",\"origin\":\"default\",\"type\":\"boolean\",\"secret\":false,\"meaning\":\"When True, the parent process env is passed to subprocesses (with deny patterns applied — see env_inherit_deny).\"},{\"path\":\"executor.max_executors\",\"value\":\"8\",\"default\":\"4\",\"origin\":\"yaml\",\"type\":\"integer\",\"secret\":false,\"meaning\":\"Maximum concurrent subprocesses.\",\"advice\":\"Raise it when tasks wait for a slot and the host has free CPU.\"},{\"path\":\"executor.max_pending_bytes\",\"value\":\"1GiB\",\"default\":\"1GiB\",\"origin\":\"default\",\"type\":\"size\",\"secret\":false,\"meaning\":\"New windows wait while task stdin plus kept task output reach this size, at least 16MiB.\"},{\"path\":\"executor.max_pending_tasks\",\"value\":\"2000\",\"default\":\"2000\",\"origin\":\"default\",\"type\":\"integer\",\"secret\":false,\"meaning\":\"New windows wait while this many tasks are created and not settled (waiting for an executor slot, running, or in on_task_complete and its delivery).\"},{\"path\":\"executor.max_retries\",\"value\":\"3\",\"default\":\"3\",\"origin\":\"default\",\"type\":\"integer\",\"secret\":false,\"meaning\":\"Maximum retry attempts per failed task (0 = no retries).\"},{\"path\":\"executor.max_stderr\",\"value\":\"0\",\"default\":\"0\",\"origin\":\"default\",\"type\":\"size\",\"secret\":false,\"meaning\":\"Most stderr kept per task.\"},{\"path\":\"executor.max_stdout\",\"value\":\"0\",\"default\":\"0\",\"origin\":\"default\",\"type\":\"size\",\"secret\":false,\"meaning\":\"Most stdout kept per task.\"},{\"path\":\"executor.on_failure\",\"value\":\"skip\",\"default\":\"skip\",\"origin\":\"default\",\"type\":\"string\",\"secret\":false,\"meaning\":\"What the default on_error returns when a task fails for good: 'skip' drops the task; 'dlq' writes its source message to the DLQ and ends the message.\"},{\"path\":\"executor.task_timeout\",\"value\":\"2m\",\"default\":\"2m\",\"origin\":\"default\",\"type\":\"duration\",\"secret\":false,\"meaning\":\"Wall-clock time limit per subprocess, a whole number of seconds.\"},{\"path\":\"executor.window_size\",\"value\":\"100\",\"default\":\"100\",\"origin\":\"default\",\"type\":\"integer\",\"secret\":false,\"meaning\":\"Maximum messages collected per arrange() window.\"}]}\n"
+      },
+      {
+        "name": "help",
+        "argv": [
+          "--help"
+        ],
+        "exit_code": 0,
+        "stdout": "drakkar-agent — print the agent manual, the effective config or the agent reference page.\n\nUsage:\n  drakkar-agent manual [--parts=<p,...>] [--detail=brief|full] [--format=json|markdown] [--topic=<kind>:<key>]\n      the framework manual, as GET /api/v1/agent/manual answers it, without the handler notes\n  drakkar-agent config --config=<path> [--parts=<p,...>] [--detail=brief|full]\n      the effective config of that file and the DK_ variables, as GET /api/v1/agent/config answers it\n  drakkar-agent reference\n      the Markdown page of every registry entry\n\nEvery flag is written --name=value. PromQL queries keep their {{worker}} and {{cluster}} placeholders.\n\nExit codes:\n  0  the output was printed\n  2  usage error, unknown topic or a config that does not load; the reason goes to stderr, nothing goes to stdout\n"
+      },
+      {
+        "name": "usage_no_command",
+        "argv": [],
+        "exit_code": 2,
+        "stdout": ""
+      },
+      {
+        "name": "usage_unknown_command",
+        "argv": [
+          "status"
+        ],
+        "exit_code": 2,
+        "stdout": ""
+      },
+      {
+        "name": "usage_flag_without_value",
+        "argv": [
+          "manual",
+          "--detail"
+        ],
+        "exit_code": 2,
+        "stdout": ""
+      },
+      {
+        "name": "usage_space_form",
+        "argv": [
+          "manual",
+          "--detail",
+          "full"
+        ],
+        "exit_code": 2,
+        "stdout": ""
+      },
+      {
+        "name": "usage_single_dash",
+        "argv": [
+          "manual",
+          "-detail=full"
+        ],
+        "exit_code": 2,
+        "stdout": ""
+      },
+      {
+        "name": "usage_flag_of_another_command",
+        "argv": [
+          "manual",
+          "--config=drakkar.yaml"
+        ],
+        "exit_code": 2,
+        "stdout": ""
+      },
+      {
+        "name": "usage_reference_takes_no_flag",
+        "argv": [
+          "reference",
+          "--format=markdown"
+        ],
+        "exit_code": 2,
+        "stdout": ""
+      },
+      {
+        "name": "usage_repeated_flag",
+        "argv": [
+          "manual",
+          "--detail=full",
+          "--detail=brief"
+        ],
+        "exit_code": 2,
+        "stdout": ""
+      },
+      {
+        "name": "usage_positional_argument",
+        "argv": [
+          "manual",
+          "concepts"
+        ],
+        "exit_code": 2,
+        "stdout": ""
+      },
+      {
+        "name": "usage_config_without_path",
+        "argv": [
+          "config"
+        ],
+        "exit_code": 2,
+        "stdout": ""
+      },
+      {
+        "name": "error_unknown_part",
+        "argv": [
+          "manual",
+          "--parts=concepts,app"
+        ],
+        "exit_code": 2,
+        "stdout": ""
+      },
+      {
+        "name": "error_empty_part",
+        "argv": [
+          "manual",
+          "--parts="
+        ],
+        "exit_code": 2,
+        "stdout": ""
+      },
+      {
+        "name": "error_detail",
+        "argv": [
+          "manual",
+          "--detail=long"
+        ],
+        "exit_code": 2,
+        "stdout": ""
+      },
+      {
+        "name": "error_format",
+        "argv": [
+          "manual",
+          "--format=yaml"
+        ],
+        "exit_code": 2,
+        "stdout": ""
+      },
+      {
+        "name": "error_unknown_topic",
+        "argv": [
+          "manual",
+          "--topic=concept:nope"
+        ],
+        "exit_code": 2,
+        "stdout": ""
+      },
+      {
+        "name": "error_config_unknown_part",
+        "argv": [
+          "config",
+          "--config={config}",
+          "--parts=agent,nope"
+        ],
+        "config_yaml": "sources:\n  http:\n    enabled: true\n",
+        "exit_code": 2,
+        "stdout": ""
+      },
+      {
+        "name": "error_config_does_not_load",
+        "argv": [
+          "config",
+          "--config={config}"
+        ],
+        "config_yaml": "sources:\n  http:\n    enabled: true\nagent:\n  enabled: maybe\n",
+        "exit_code": 2,
+        "stdout": ""
+      },
+      {
+        "name": "error_config_unknown_key",
+        "argv": [
+          "config",
+          "--config={config}"
+        ],
+        "config_yaml": "sources:\n  http:\n    enabled: true\nagnet:\n  enabled: true\n",
+        "exit_code": 2,
+        "stdout": ""
+      }
+    ]
   }
 }

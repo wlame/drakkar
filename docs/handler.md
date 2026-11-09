@@ -1124,8 +1124,9 @@ queries.
 
 When `agent.enabled` is true, the worker serves the agent routes under
 `/api/v1/agent`: a read-only surface that explains the worker to an AI
-agent. The framework knows its own concepts, metrics and rules. Your handler
-can add the business knowledge with `agent_notes()`:
+agent (see [Agent Surface](agent.md)). The framework knows its own concepts,
+metrics and rules. Your handler can add the business knowledge with
+`agent_notes()`:
 
 ```python
 import drakkar as dk

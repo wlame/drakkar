@@ -42,6 +42,8 @@ dependencies = [
 drakkar-ui = "drakkar.uihost.cli:main"
 # Prints the DDL of the tables the postgres providers keep, for a schema the worker may not create.
 drakkar-schema = "drakkar.schema:main"
+# Prints the agent manual, the effective config of a file and the generated agent reference page.
+drakkar-agent = "drakkar.agent.cli:run"
 
 # `perf` is the only published extra: an extra is something a CONSUMER of the
 # library can opt into, and orjson is exactly that (a faster JSON encoder for

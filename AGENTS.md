@@ -85,6 +85,7 @@ just check              # ci + the dependency CVE scan
 just integration-up     # docker harness (Kafka, all sinks, workers + load gen)
 just integration-matrix # the harness for every provider, with a summary table
 just drakkar-ui where   # UI-bundle cache CLI
+just agent-reference    # regenerate docs/agent-reference.md from the agent registry
 ```
 
 Tooling: `uv` only (never pip), `ruff` format + lint (single quotes in code,
@@ -172,6 +173,15 @@ parametrize).
     exit status). A timeout kills the group of the child pid with `killpg`,
     never looks a group up with `getpgid`, and never signals the worker's
     own group.
+11. The agent surface (`/api/v1/agent`, `drakkar/agent/`) is read-only and
+    off by default (`agent.enabled: false`). No route changes worker state,
+    and no answer carries a secret or, without `agent.include_payloads`, task
+    output. Nothing of it blocks the loop: live state is read through
+    `dispatch_bounded` with a time limit, the registry loads on a worker
+    thread, and handler rules run on threads of their own with a 1 s limit.
+    The registry files and `tests/fixtures/agent_contract.json` are a
+    contract: `docs/agent-reference.md` is generated from them
+    (`just agent-reference`) and a test fails when it differs.
 
 ## API server footguns
 
@@ -244,7 +254,9 @@ drakkar/
   webapp/                  synchronous HTTP ingress pipeline
   agent/                   the agent routes' knowledge registry: load, check, render; route parameters;
                            the state snapshot (state.py), the diagnose rules (rules.py) and the handler's
-                           agent notes and rules (notes.py; handler rules run on threads of their own)
+                           agent notes and rules (notes.py; handler rules run on threads of their own);
+                           the offline command drakkar-agent (cli.py) and the generated reference page
+                           (reference.py, written to docs/agent-reference.md by `just agent-reference`)
   agentdocs/               the registry files (YAML entries and their JSON Schema); a contract, read as raw bytes
   uihost/                  drakkar-ui bundle fetch/cache/serve engine
   config/                  pydantic-settings config (YAML + DK_ env overrides),

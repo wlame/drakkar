@@ -150,6 +150,11 @@ test-harness:
 gen-event-vocabulary:
     uv run python scripts/gen_event_vocabulary.py
 
+# Regenerate docs/agent-reference.md from the agent knowledge registry
+# (test_agent_cli.py fails when the committed page differs)
+agent-reference:
+    uv run python -m drakkar.agent reference > docs/agent-reference.md
+
 # ---------------------------------------------------------------------------
 # CI / pre-push
 # ---------------------------------------------------------------------------

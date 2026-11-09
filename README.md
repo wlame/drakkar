@@ -48,6 +48,7 @@ flowchart LR
 - **Webapp** (optional) — the same handler pipeline exposed as a synchronous HTTP endpoint with auth and rate limits
 - **Observability** — Prometheus metrics, ECS-compatible structured logging, flight recorder (SQLite event log) and runtime-health and host-pressure monitors
 - **Kubernetes-ready** — `/healthz` and `/readyz` probes, reference manifests, crash/OOM detection on restart
+- **Agent surface** (optional, off by default) — read-only `/api/v1/agent` routes and the `drakkar-agent` command explain the worker to an AI agent: the framework knowledge, the effective config with secrets masked, the metrics, the live state and rule-based findings; the handler can add its own notes and rules
 
 The operator UI is [drakkar-ui](https://github.com/wlame/drakkar-ui), a versioned SPA the worker fetches at startup and caches on disk — so co-located workers share one download, and the UI ships on its own release cadence.
 

@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The API server answers `GET /api/v1/agent` (the index), `/api/v1/agent/manual`, `/api/v1/agent/config` and `/api/v1/agent/metrics` when `agent.enabled` is true, also with the UI off. The config route shows each value with its origin (`default`, `yaml`, `env` or `on_startup`) and masks every secret.
 - The API server answers `GET /api/v1/agent/state` (health, budget, partitions, sinks, recorder, autodiscover and the last 20 failed tasks) and `GET /api/v1/agent/diagnose` (13 rules that find a stalled loop, a full budget, a dead partition, an open sink breaker, a growing lag and more). Task output text is in the state answer only with `agent.include_payloads: true`.
 - A handler can add its own agent notes with `agent_notes()`: business concepts, recipes, notes for its metrics and `app` keys, and diagnose rules. A handler rule runs on its own thread with a limit of 1 second, so a slow rule never holds the API server or the loop.
+- The `drakkar-agent` command (also `python -m drakkar.agent`) prints the agent manual, the effective config of a file and the agent reference page with no running worker. The docs have a new page, Agent Surface, and the generated page Agent Reference.
 - The `task_failed` event metadata has two new keys: `kind` (`nonzero_exit`, `timeout`, `launch_failure` or `internal`) and `source_offsets` (the Kafka offsets of the task; not for an HTTP task).
 
 ### Fixed

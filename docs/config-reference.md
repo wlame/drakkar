@@ -430,10 +430,11 @@ api:
                                    # '' = http://<outbound ip>:<port>/. env: DK_API__PUBLIC_URL
 ```
 
-Two load errors follow from it:
+Three load errors follow from it, checked in this order:
 
 - `ui.enabled needs api.enabled; set ui.enabled to false, or set api.enabled to true`
 - `autodiscover.enabled needs api.enabled: peers reach a worker through its API`
+- `agent.enabled needs api.enabled: the agent routes are served by the API server`
 
 ## UI (`ui:`)
 
@@ -551,6 +552,8 @@ ui:
 
 ## Agent (`agent:`)
 
+📚 [Deep details](configuration.md#agent-agent) · [Agent Surface](agent.md) · [Agent Reference](agent-reference.md)
+
 The agent routes: a read-only surface that explains the worker to an AI agent. They are served by the API server of the [`api` section](#api-api), whatever `ui.enabled` says.
 
 ```yaml
@@ -562,7 +565,7 @@ agent:
                                    # env: DK_AGENT__INCLUDE_PAYLOADS
 ```
 
-One load error follows from it, checked right after the `api` rules and again after `on_startup`:
+One load error follows from it, checked after the `ui` and `autodiscover` rules that need the API, and again after `on_startup`:
 
 - `agent.enabled needs api.enabled: the agent routes are served by the API server`
 
