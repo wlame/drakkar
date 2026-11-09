@@ -24,7 +24,7 @@ from typing import Any
 import aiosqlite
 
 from drakkar.timefmt import format_rfc3339_micro
-from drakkar.utils import redact_url
+from drakkar.utils import SECRET_NAME_WORDS, redact_url
 
 # Fast JSON encoder for the recorder hot path. orjson is an optional
 # dependency (``pip install drakkar[perf]``) — when available, SQLite
@@ -165,18 +165,9 @@ def encode_ws_event(event: dict) -> str:
 # ``*KEY*`` therefore also matches innocent names like MONKEY_PATCH_ENABLED —
 # accepted by design.
 _SECRET_ENV_PATTERNS = (
-    '*PASSWORD*',
-    '*PASSWD*',
-    '*SECRET*',
-    '*TOKEN*',
-    '*KEY*',
+    *(f'*{word.upper()}*' for word in SECRET_NAME_WORDS),
     '*API_KEY*',
-    '*CREDENTIAL*',
     '*_DSN',
-    '*AUTH*',
-    '*PRIVATE*',
-    '*CERT*',
-    '*SALT*',
 )
 
 

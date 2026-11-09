@@ -72,9 +72,11 @@ for the parts it can afford.
 
 Secrets never leave the worker. A secret config key shows `***` when it is
 set and `''` when it is empty. Inside any list or map value, and in the `app`
-section, a value whose key name holds `password`, `secret`, `token`, `key`,
-`dsn`, `credential` or `oauthbearer.config` (in any letter case) is masked
-the same way, and a URL loses its user name and password.
+section, a value whose key name holds `password`, `passwd`, `secret`,
+`token`, `key`, `dsn`, `credential`, `auth`, `private`, `cert`, `salt` or
+`oauthbearer.config` (in any letter case) is masked the same way, and a URL
+loses its user name and password. These are the words that the UI config
+reference masks, so no value is shown here that the UI hides.
 
 The full shapes are in the API contract of the UI
 (`docs/api-contract-v1.md`, section "v1.31 changes") and in the OpenAPI
@@ -84,7 +86,8 @@ document the worker serves at `/api-docs` when the UI is on.
 
 `/api/v1/agent/diagnose` runs every rule on one state snapshot and the
 metric values. A rule that fails is listed in `failed` and does not stop the
-others.
+others; its error text is cut to 500 bytes. Diagnose never reads task output
+text, also with `agent.include_payloads: true`.
 
 | Rule | Severity | Finds |
 |---|---|---|

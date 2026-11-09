@@ -25,6 +25,13 @@ _SENSITIVE_QUERY_PARAM = re.compile(
 )
 
 
+# The words of a name that holds a secret, in lower case. The recorder and the
+# UI config reference mask an env var or map key whose name holds one of them
+# (``*WORD*``, any letter case); the agent config route masks the same words and
+# two more. One list, so the two masks cannot drift apart.
+SECRET_NAME_WORDS = ('password', 'passwd', 'secret', 'token', 'key', 'credential', 'auth', 'private', 'cert', 'salt')
+
+
 def redact_url(url: str) -> str:
     """Redact credentials from URIs.
 

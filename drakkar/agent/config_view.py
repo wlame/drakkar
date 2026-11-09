@@ -21,13 +21,15 @@ from typing import Any
 
 from drakkar.agent.registry import Registry, dumps
 from drakkar.config.origins import ORIGIN_DEFAULT, ORIGIN_ON_STARTUP, ORIGIN_YAML, ConfigOrigins, leaf_paths
-from drakkar.utils import redact_url
+from drakkar.utils import SECRET_NAME_WORDS, redact_url
 
 SECRET_TEXT = '***'
 APP_SECTION = 'app'
 # A key whose name holds one of these texts, in any letter case, is masked: an
-# app key, and a key at any depth inside a list or map value.
-SECRET_KEY_WORDS = ('password', 'secret', 'token', 'key', 'dsn', 'credential', 'oauthbearer.config')
+# app key, and a key at any depth inside a list or map value. The words of the
+# UI config reference (``SECRET_NAME_WORDS``), plus ``dsn`` anywhere in a name
+# and the librdkafka key ``sasl.oauthbearer.config``.
+SECRET_KEY_WORDS = (*SECRET_NAME_WORDS, 'dsn', 'oauthbearer.config')
 
 
 @dataclass(frozen=True)

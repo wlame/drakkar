@@ -246,7 +246,12 @@ def autodiscover_part(config: DrakkarConfig, fleet: Any, *, own_cluster: str, ow
 def recent_failures_query(*, include_payloads: bool) -> tuple[str, tuple[Any, ...]]:
     """The SELECT of the newest failed tasks (``ts`` descending, then id) and its parameters."""
     columns = _FAILURE_COLUMNS + (_PAYLOAD_COLUMNS if include_payloads else '')
-    query = f'SELECT {columns} FROM events WHERE event = ? ORDER BY ts DESC, id DESC LIMIT ?'
+    # The ids first, so the metadata and payload columns are read for the kept rows only.
+    query = (
+        f'SELECT {columns} FROM events WHERE id IN '
+        '(SELECT id FROM events WHERE event = ? ORDER BY ts DESC, id DESC LIMIT ?) '
+        'ORDER BY ts DESC, id DESC'
+    )
     return query, (TASK_FAILED_EVENT, MAX_RECENT_FAILURES)
 
 

@@ -9,7 +9,9 @@ import threading
 import time
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from prometheus_client import Counter, Gauge
@@ -17,6 +19,7 @@ from pydantic import ValidationError
 from structlog.testing import capture_logs
 
 import drakkar as dk
+from drakkar.agent.config_view import SECRET_KEY_WORDS
 from drakkar.agent.metrics_view import MetricNotes
 from drakkar.agent.notes import (
     AGENT_NOTES_ASYNC_MESSAGE,
@@ -33,10 +36,21 @@ from drakkar.agent.notes import (
 )
 from drakkar.agent.params import RULE_TIMED_OUT_MESSAGE, STATE_PARTS
 from drakkar.agent.registry import approx_tokens, dumps, load_registry, select_manual, selection_json
-from drakkar.agent.rules import RuleInput, RuleSettings
+from drakkar.agent.rules import (
+    ERROR_TEXT_MAX_BYTES,
+    FRAMEWORK_RULES,
+    Baselines,
+    RuleInput,
+    RuleSettings,
+    cut_error_text,
+    error_text,
+    run_framework_rules,
+)
 from drakkar.app import DrakkarApp
+from drakkar.recorder.helpers import _SECRET_ENV_PATTERNS, sanitize_env_value
 from drakkar.uiserver.routes_agent import AgentSurface
 from drakkar.uiserver.server import create_api_app
+from drakkar.utils import SECRET_NAME_WORDS
 from tests.test_agent_registry import _tiny_registry
 from tests.test_agent_routes import _client, _config, _drakkar_app, _surface_client
 from tests.test_sources_validation import KafkaOnlyHandler
@@ -888,3 +902,150 @@ async def test_handler_rules_through_a_given_surface():
 
     assert 'app:one' in answer['checked']
     assert dumps(answer).count('app:one') == 2
+
+
+# --- bounds and payloads -------------------------------------------------------
+
+
+@pytest.mark.parametrize('case', CONTRACT['rule_error_cases']['cases'], ids=lambda case: case['name'])
+def test_rule_error_cases(case):
+    assert CONTRACT['rule_error_cases']['max_bytes'] == ERROR_TEXT_MAX_BYTES
+    assert cut_error_text(case['text']) == case['cut']
+    assert error_text(RuntimeError(case['text'])) == case['cut']
+
+
+def test_an_error_text_with_a_lone_surrogate_is_cut_without_raising():
+    assert cut_error_text('\ud800' + 'x' * 600) == '?' + 'x' * 499
+
+
+async def test_a_long_handler_rule_error_is_cut():
+    def raises(snapshot: dk.AgentSnapshot) -> None:
+        raise ValueError('é' * 400)
+
+    result = await HandlerRules([_rule('long', raises)])(_rule_input())
+
+    (row,) = result.failed
+    assert row['error'] == 'é' * 250
+    assert len(row['error'].encode('utf-8')) <= ERROR_TEXT_MAX_BYTES
+
+
+def test_a_long_framework_rule_error_is_cut(monkeypatch):
+    def raises(rule_input: RuleInput, baselines: Baselines) -> None:
+        raise ValueError('z' * 900)
+
+    monkeypatch.setitem(FRAMEWORK_RULES, 'agent-unauthenticated', raises)
+    entries = [entry for entry in REGISTRY.parts['rules'] if entry['key'] == 'agent-unauthenticated']
+
+    result = run_framework_rules(_rule_input(), rule_entries=entries, baselines=Baselines())
+
+    assert result.failed == [{'rule': 'agent-unauthenticated', 'error': 'z' * 500}]
+
+
+async def test_a_handler_rule_snapshot_holds_no_payload_field():
+    seen: list[Any] = []
+
+    def reads(snapshot: dk.AgentSnapshot) -> None:
+        seen.append(snapshot.part('recent_failures'))
+
+    failure = {'task_id': 't-1', 'exit_code': 1, 'stderr_tail': 'SECRET', 'args': ['x'], 'args_truncated': False}
+    state = {**dict.fromkeys(STATE_PARTS), 'recent_failures': {'failures': [failure, 'odd row']}}
+
+    await HandlerRules([_rule('reads', reads)])(_rule_input(state))
+
+    assert seen == [{'failures': ({'task_id': 't-1', 'exit_code': 1}, 'odd row')}]
+    assert failure['stderr_tail'] == 'SECRET'
+
+
+@pytest.mark.parametrize('failures', [None, {'failures': None}, {'note': 'x'}])
+async def test_a_snapshot_keeps_a_recent_failures_part_without_rows(failures):
+    seen: list[Any] = []
+    state = {**dict.fromkeys(STATE_PARTS), 'recent_failures': failures}
+
+    await HandlerRules([_rule('reads', lambda snapshot: seen.append(snapshot.part('recent_failures')))])(
+        _rule_input(state)
+    )
+
+    assert seen == [freeze(failures)]
+
+
+async def test_diagnose_reads_no_payload_column_even_with_payloads_on():
+    queries: list[str] = []
+
+    async def read(query: str, params: Any) -> tuple[list[str], list[tuple[Any, ...]]]:
+        queries.append(query)
+        return ['id', 'ts', 'partition', 'task_id', 'exit_code', 'duration', 'error_kind', 'offset'], []
+
+    store = MagicMock()
+    store.is_open = True
+    store.read = read
+    seen: list[Any] = []
+    notes = dk.AgentNotes(rules=[_rule('reads', lambda snapshot: seen.append(snapshot.part('recent_failures')))])
+    drakkar_app = _app_with_notes(notes, agent={'enabled': True, 'include_payloads': True})
+    drakkar_app._recorder = SimpleNamespace(memory_store=store, flush_memory=AsyncMock(), persistence='none')
+
+    async with _client(create_api_app(drakkar_app)) as client:
+        await client.get('/api/v1/agent/diagnose')
+        await client.get('/api/v1/agent/state', params={'parts': 'recent_failures'})
+
+    diagnose_query, state_query = queries
+    assert 'stderr' not in diagnose_query and 'args' not in diagnose_query
+    assert 'stderr' in state_query
+    assert seen == [{'failures': ()}]
+
+
+async def test_app_notes_is_true_with_config_meanings_only():
+    drakkar_app = _app_with_notes(dk.AgentNotes(app_config={'ledger.url': 'The ledger address.'}))
+
+    async with _client(create_api_app(drakkar_app)) as client:
+        index = (await client.get('/api/v1/agent')).json()
+
+    assert index['app_notes'] is True
+
+
+def test_the_agent_words_hold_every_word_of_the_ui_config_reference():
+    assert set(SECRET_NAME_WORDS) <= set(SECRET_KEY_WORDS)
+    assert set(SECRET_KEY_WORDS) - set(SECRET_NAME_WORDS) == {'dsn', 'oauthbearer.config'}
+    # The UI config reference keeps its patterns: one glob per word, plus two of its own.
+    assert set(_SECRET_ENV_PATTERNS) == {
+        '*PASSWORD*',
+        '*PASSWD*',
+        '*SECRET*',
+        '*TOKEN*',
+        '*KEY*',
+        '*API_KEY*',
+        '*CREDENTIAL*',
+        '*_DSN',
+        '*AUTH*',
+        '*PRIVATE*',
+        '*CERT*',
+        '*SALT*',
+    }
+
+
+@pytest.mark.parametrize('name', ['DB_PASSWD', 'GITHUB_AUTH', 'SSH_PRIVATE', 'TLS_CERT', 'APP_SALT'])
+async def test_the_config_route_masks_what_the_ui_config_reference_masks(name):
+    drakkar_app = _drakkar_app(_config(executor={'env': {name: 'hunter2'}}))
+
+    async with _client(create_api_app(drakkar_app)) as client:
+        answer = await client.get('/api/v1/agent/config', params={'parts': 'executor'})
+
+    assert sanitize_env_value(name, 'hunter2') == '***'
+    assert 'hunter2' not in answer.text
+
+
+@pytest.mark.parametrize('include_payloads', [False, True])
+def test_the_failures_query_reads_the_metadata_of_the_kept_rows_only(include_payloads):
+    import sqlite3
+
+    from drakkar.agent.state import recent_failures_query
+    from drakkar.recorder.schema import SCHEMA_EVENTS
+
+    query, params = recent_failures_query(include_payloads=include_payloads)
+    db = sqlite3.connect(':memory:')
+    db.executescript(SCHEMA_EVENTS)
+    plan = ' '.join(row[-1] for row in db.execute(f'EXPLAIN QUERY PLAN {query}', params))
+
+    assert 'WHERE id IN (SELECT id FROM events WHERE event = ? ORDER BY ts DESC, id DESC LIMIT ?)' in query
+    assert query.endswith('ORDER BY ts DESC, id DESC')
+    # The outer rows are found by their ids, not by a scan of every failed task.
+    assert plan.startswith('SEARCH events USING INTEGER PRIMARY KEY')

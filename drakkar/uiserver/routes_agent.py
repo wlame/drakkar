@@ -313,7 +313,7 @@ class AgentSurface:
             },
             'capabilities': capabilities_of(config, app._recorder),
             'include_payloads': config.agent.include_payloads,
-            'app_notes': bool(self.app_entries),
+            'app_notes': bool(self.app_entries or self.app_config_meanings),
             'routes': [
                 {
                     'path': path,
@@ -417,8 +417,9 @@ class AgentSurface:
 
     async def diagnose(self) -> dict[str, Any]:
         """Run the framework rules, then the handler's, on one snapshot of every state part."""
+        # No payload text: no rule reads it, so the payload columns are never read here.
         rule_input = RuleInput(
-            state=await self.state(parts=STATE_PARTS),
+            state=await read_state(self._app, STATE_PARTS, include_payloads=False),
             metrics=rule_metric_values(),
             settings=self.rule_settings(),
             now=time.monotonic(),

@@ -1222,7 +1222,9 @@ where one line is expected. The worker calls `agent_notes()` once after
 | A key used twice in one kind, a metric the handler does not declare, a reference that names nothing (also a note that names a dropped note) | That note is dropped; one `agent_notes_invalid` warning (category `agent`) lists every reason; the other notes stay. |
 
 **Rules.** A rule gets an `AgentSnapshot`: `state` holds every part of
-`/api/v1/agent/state` (a part that could not be read is `None`), and
+`/api/v1/agent/state` (a part that could not be read is `None`; the rows of
+`recent_failures` never hold `stderr_tail`, `args` or `args_truncated`, also
+with `agent.include_payloads: true`), and
 `metrics` holds three framework counters by exposed name:
 `drakkar_recorder_dropped_events_total`,
 `drakkar_recorder_postgres_dropped_rows_total` and
@@ -1238,7 +1240,7 @@ of 1 second. The rules of one call run at the same time.
 |---|---|
 | Returns `None` | Listed in `checked`, no finding. |
 | Returns an `AgentFinding` | A finding with the rule's severity, title, suggestion and explain. |
-| Raises, returns another type, or gives evidence that is not plain JSON with finite numbers | Listed in `failed` with the error text; the other rules still run. |
+| Raises, returns another type, or gives evidence that is not plain JSON with finite numbers | Listed in `failed` with the error text, cut to 500 bytes; the other rules still run. |
 | Gives evidence larger than 4096 bytes of compact JSON | Listed in `failed` with `the evidence is larger than 4096 bytes`. |
 | Runs longer than 1 second | Listed in `failed` with `timed out after 1 s`; the worker logs `agent_rule_abandoned` (warning, category `agent`, `rule`) once and does not wait for it. Python cannot stop a running thread, so the rule goes on; until it returns, later calls list it as failed at once and do not start it a second time. |
 

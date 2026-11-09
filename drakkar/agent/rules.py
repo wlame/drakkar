@@ -33,6 +33,8 @@ from drakkar.agent.metrics_view import json_number
 SEVERITY_ORDER = ('critical', 'warning', 'info')
 LAG_BASELINE_MIN_SECONDS = 60.0
 NO_IMPLEMENTATION_ERROR = 'the rule has no implementation'
+# The most UTF-8 bytes of the error text of a failed rule.
+ERROR_TEXT_MAX_BYTES = 500
 
 DROPPED_EVENTS_METRIC = 'drakkar_recorder_dropped_events_total'
 DROPPED_POSTGRES_ROWS_METRIC = 'drakkar_recorder_postgres_dropped_rows_total'
@@ -323,9 +325,18 @@ def finding_of(entry: Mapping[str, Any], evidence: dict[str, Any], *, rule: str 
     }
 
 
+def cut_error_text(text: str) -> str:
+    """``text`` cut to at most :data:`ERROR_TEXT_MAX_BYTES` UTF-8 bytes, at a character boundary."""
+    # A lone surrogate cannot be encoded as it is; it becomes '?'.
+    data = text.encode('utf-8', errors='replace')
+    if len(data) <= ERROR_TEXT_MAX_BYTES:
+        return text
+    return data[:ERROR_TEXT_MAX_BYTES].decode('utf-8', errors='ignore')
+
+
 def error_text(exc: BaseException) -> str:
-    """The text of a failed rule: the exception message, or its type name when the message is empty."""
-    return str(exc) or type(exc).__name__
+    """The text of a failed rule: the exception message, or its type name when the message is empty, cut to 500 bytes."""
+    return cut_error_text(str(exc) or type(exc).__name__)
 
 
 def run_framework_rules(

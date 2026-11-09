@@ -396,9 +396,28 @@ def freeze(value: Any) -> Any:
     return value
 
 
+# The payload fields of a failure row; a handler rule never sees them.
+PAYLOAD_FIELDS = frozenset({'stderr_tail', 'args', 'args_truncated'})
+
+
+def _without_payloads(state: Mapping[str, Any]) -> dict[str, Any]:
+    """The state with no payload field in the rows of ``recent_failures``."""
+    failures = state.get('recent_failures')
+    if not isinstance(failures, Mapping) or not isinstance(failures.get('failures'), list):
+        return dict(state)
+    rows = [
+        {name: value for name, value in row.items() if name not in PAYLOAD_FIELDS} if isinstance(row, Mapping) else row
+        for row in failures['failures']
+    ]
+    return {**state, 'recent_failures': {**failures, 'failures': rows}}
+
+
 def snapshot_of(rule_input: RuleInput) -> AgentSnapshot:
-    """The frozen snapshot a handler rule reads, from the input of the framework rules."""
-    return AgentSnapshot(state=freeze(rule_input.state), metrics=MappingProxyType(dict(rule_input.metrics)))
+    """The frozen snapshot a handler rule reads, from the input of the framework rules, with no payload text."""
+    return AgentSnapshot(
+        state=freeze(_without_payloads(rule_input.state)),
+        metrics=MappingProxyType(dict(rule_input.metrics)),
+    )
 
 
 def _finite_json(value: Any) -> bool:
