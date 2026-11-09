@@ -664,6 +664,16 @@ def test_masked_text(value, secret, text):
 def test_config_masking_cases(case):
     assert mask_value(case['value']) == case['masked']
     assert masked_text(case['value'], secret=False) == value_text(case['masked'])
+    assert dumps(mask_value(case['value'])) == dumps(case['masked'])
+
+
+async def test_config_values_write_empty_lists_empty_maps_and_unset_nulls():
+    response = await _get(_config(), '/api/v1/agent/config', params={'parts': 'executor,recorder'})
+
+    by_path = {entry['path']: entry for entry in response.json()['entries']}
+    assert (by_path['executor.env']['value'], by_path['executor.env']['default']) == ('{}', '{}')
+    assert by_path['recorder.capture.env_vars']['value'] == '[]'
+    assert (by_path['executor.binary_path']['value'], by_path['executor.binary_path']['default']) == ('null', 'null')
 
 
 def test_expand_path_takes_every_map_name():

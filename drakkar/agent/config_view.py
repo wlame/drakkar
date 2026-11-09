@@ -69,22 +69,27 @@ def is_secret_key_name(name: str) -> bool:
     return any(word in lowered for word in SECRET_KEY_WORDS)
 
 
+def _utf8_key(pair: tuple[str, Any]) -> bytes:
+    return pair[0].encode('utf-8')
+
+
 def mask_value(value: Any) -> Any:
     """Mask the secrets inside a value, at any depth of its lists and maps.
 
     The value of a map key whose name holds a secret-like word becomes ``***``
     when it is set and ``''`` when it is empty; every text loses the credentials
-    of any URL in it. A YAML value of another type (a date in the open app
-    section) becomes its text.
+    of any URL in it. The keys of every map are sorted in byte order. A YAML
+    value of another type (a date in the open app section) becomes its text.
     """
     if isinstance(value, str):
         return redact_url(value)
     if isinstance(value, list):
         return [mask_value(item) for item in value]
     if isinstance(value, dict):
+        # Keys in byte order, so every implementation writes the same text.
         return {
-            str(key): (SECRET_TEXT if item else '') if is_secret_key_name(str(key)) else mask_value(item)
-            for key, item in value.items()
+            key: (SECRET_TEXT if item else '') if is_secret_key_name(key) else mask_value(item)
+            for key, item in sorted(((str(key), item) for key, item in value.items()), key=_utf8_key)
         }
     if value is None or isinstance(value, (bool, int, float)):
         return value
