@@ -24,6 +24,8 @@ from pydantic import BaseModel
 from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar import __version__
+from drakkar.agent.notes import PreparedNotes
+from drakkar.agent.registry import Registry
 from drakkar.appconfig import load_app_config
 from drakkar.budget import PendingBudget
 from drakkar.cache import CacheEngine
@@ -216,6 +218,10 @@ class DrakkarApp:
         # The config as it was before ``on_startup`` ran, dumped by YAML key;
         # ``None`` until the hook has run.
         self._config_before_on_startup: dict[str, Any] | None = None
+        # The handler's checked agent notes and the registry they were checked
+        # against; set after ``on_startup`` when the agent surface is on.
+        self._agent_notes: PreparedNotes | None = None
+        self._agent_registry: Registry | None = None
         if config is not None:
             self._config = config
         else:

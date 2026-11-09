@@ -243,7 +243,8 @@ drakkar/
                            files_in_use.py (merge results being sent or merged)
   webapp/                  synchronous HTTP ingress pipeline
   agent/                   the agent routes' knowledge registry: load, check, render; route parameters;
-                           the state snapshot (state.py) and the diagnose rules (rules.py)
+                           the state snapshot (state.py), the diagnose rules (rules.py) and the handler's
+                           agent notes and rules (notes.py; handler rules run on threads of their own)
   agentdocs/               the registry files (YAML entries and their JSON Schema); a contract, read as raw bytes
   uihost/                  drakkar-ui bundle fetch/cache/serve engine
   config/                  pydantic-settings config (YAML + DK_ env overrides),

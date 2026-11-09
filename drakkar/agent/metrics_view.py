@@ -51,10 +51,11 @@ class MetricsQuery:
 
 @dataclass(frozen=True)
 class MetricNotes:
-    """The meaning of the handler's own metrics, by exposed name."""
+    """The meaning of the handler's own metrics, by exposed name; ``promql`` is sent only in ``full`` detail."""
 
     meaning: Mapping[str, str] = field(default_factory=dict)
     healthy: Mapping[str, str] = field(default_factory=dict)
+    promql: Mapping[str, Sequence[Mapping[str, str]]] = field(default_factory=dict)
 
 
 def exposed_name(family_name: str, family_type: str) -> str:
@@ -167,6 +168,11 @@ def metrics_answer(
                 ]
             if 'related' in entry:
                 row['related'] = list(entry['related'])
+        elif full and name in notes.promql:
+            row['promql'] = [
+                {'title': recipe['title'], 'query': fill_promql(recipe['query'], promql_filters)}
+                for recipe in notes.promql[name]
+            ]
         samples = family_samples(family)
         row['samples'] = samples[:MAX_SAMPLES]
         row['samples_total'] = len(samples)

@@ -28,6 +28,7 @@ from drakkar.timeline_events import NoOpTimelineEventEmitter, TimelineEventEmitt
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from drakkar.agent.notes import AgentNotes
     from drakkar.config import DrakkarConfig
     from drakkar.uipages import Page
 
@@ -583,6 +584,22 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     async def on_revoke(self, partitions: list[int]) -> None:
         """Called when partitions are revoked from this worker."""
         pass
+
+    def agent_notes(self) -> AgentNotes | None:
+        """Return the business knowledge the agent routes add to the framework's, or None.
+
+        Optional. Called once after ``on_startup``, on the event loop, when
+        ``agent.enabled`` is true. The notes add concepts and recipes to the
+        manual part ``app``, meanings to the handler's metrics and to the keys
+        of the ``app`` config section, and rules that ``/api/v1/agent/diagnose``
+        runs after the framework rules. See ``docs/handler.md``.
+
+        A raise logs ``agent_notes_failed`` and the worker runs without notes.
+        A note whose key is used twice, whose metric the handler does not
+        declare, or whose reference names nothing is dropped and logged in
+        ``agent_notes_invalid``; the other notes stay.
+        """
+        return None
 
     def annotate(
         self,

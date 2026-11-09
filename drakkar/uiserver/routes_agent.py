@@ -35,6 +35,7 @@ from drakkar.agent.config_view import (
     entries_by_part,
 )
 from drakkar.agent.metrics_view import MetricNotes, MetricsQuery, metrics_answer
+from drakkar.agent.notes import HandlerRules, PreparedNotes
 from drakkar.agent.params import (
     AGENT_OFF_MESSAGE,
     CONFIG_PARTS,
@@ -159,8 +160,10 @@ def consumed_paths(before_on_startup: Mapping[str, Any] | None) -> frozenset[str
 class AgentSurface:
     """What the agent routes of one API app share: the registry and the size estimates.
 
-    The registry, the config metadata and the manual sizes are loaded on a worker
-    thread at the first request (:meth:`ensure_loaded`), so a worker with the
+    The handler's checked notes (:class:`PreparedNotes`, set on the app after
+    ``on_startup``) fill ``app_entries``, ``app_config_meanings``,
+    ``metric_notes`` and ``app_rules``. The registry, the config metadata and
+    the manual sizes are loaded on a worker thread at the first request (:meth:`ensure_loaded`), so a worker with the
     surface off never reads them and the API server's loop never waits on the
     files. ``live_tokens`` holds the latest size estimate of each live part, by
     route path. The manual sizes are computed again after the handler's manual
@@ -185,6 +188,16 @@ class AgentSurface:
         self.baselines = Baselines()
         # Set when the handler declares rules; they run after the framework rules.
         self.app_rules: AppRules | None = None
+        notes = getattr(drakkar_app, '_agent_notes', None)
+        if isinstance(notes, PreparedNotes):
+            self.apply_notes(notes)
+
+    def apply_notes(self, notes: PreparedNotes) -> None:
+        """Serve the handler's checked notes: the manual part ``app``, the ``app`` key meanings, the metric notes, the rules."""
+        self.app_entries = notes.entries
+        self.app_config_meanings = dict(notes.config_meanings)
+        self.metric_notes = notes.metric_notes
+        self.app_rules = HandlerRules(notes.rules) if notes.rules else None
 
     @property
     def app_entries(self) -> tuple[dict[str, Any], ...]:
@@ -204,7 +217,9 @@ class AgentSurface:
     def load(self) -> None:
         """Read the registry and the config metadata and compute the manual sizes; blocking, for a worker thread."""
         if self._registry is None:
-            self._registry = load_registry()
+            # The registry the handler notes were checked against, when the worker read it at startup.
+            known = getattr(self._app, '_agent_registry', None)
+            self._registry = known if isinstance(known, Registry) else load_registry()
         if self._config_leaves is None:
             self._config_leaves = tuple(
                 ConfigLeaf(

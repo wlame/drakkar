@@ -44,6 +44,8 @@ import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar import __version__
+from drakkar.agent.notes import AgentNotes, handler_metrics_of, prepare_notes
+from drakkar.agent.registry import load_registry
 from drakkar.annotations import Annotator
 from drakkar.app import (
     changed_consumed_settings,
@@ -341,6 +343,7 @@ class AppLifecycle:
             await self._start_observability()
             self._create_connections()
             self._build_periodic_roster()
+            await self._collect_agent_notes()
             await self._start_recorder_and_api()
             await self._start_fleet()
             self._start_runtime_health()
@@ -626,6 +629,44 @@ class AppLifecycle:
                 category='lifecycle',
                 metrics=[f'{m._name} ({m._type})' for m in user_metrics.values()],
             )
+
+    async def _collect_agent_notes(self) -> None:
+        """Ask the handler for its agent notes and check them, when the agent surface is on.
+
+        The hook runs on the loop like the other handler hooks. The registry the
+        notes are checked against is read on a worker thread, and the agent
+        routes reuse it. A hook that raises leaves the worker without notes; a
+        note that breaks a rule is dropped, the others stay.
+        """
+        app = self._app
+        if not app._config.agent.enabled:
+            return
+        handler = app._handler
+        try:
+            notes = handler.agent_notes()
+            if notes is not None and not isinstance(notes, AgentNotes):
+                raise TypeError(f'agent_notes returned {type(notes).__name__}, not AgentNotes or None')
+        except Exception as exc:
+            await logger.aerror(
+                'agent_notes_failed',
+                category='handler',
+                error=str(exc),
+                exc_type=type(exc).__name__,
+                exc_info=True,
+            )
+            return
+        if notes is None:
+            return
+        registry = await asyncio.to_thread(load_registry)
+        prepared, reasons = prepare_notes(
+            notes,
+            registry=registry,
+            handler_metrics=handler_metrics_of(discover_handler_metrics(handler).values()),
+        )
+        if reasons:
+            await logger.awarning('agent_notes_invalid', category='agent', reasons=reasons)
+        app._agent_registry = registry
+        app._agent_notes = prepared
 
     async def _start_recorder_and_api(self) -> None:
         """Start the recorder and the API server, each when its config asks for it.

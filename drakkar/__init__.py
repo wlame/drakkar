@@ -2,6 +2,18 @@
 
 __version__ = '3.0.1'
 
+from drakkar.agent.notes import (
+    AgentFinding,
+    AgentMetricNote,
+    AgentNotes,
+    AgentPromql,
+    AgentRecipe,
+    AgentRecipeCause,
+    AgentRecipeStep,
+    AgentRule,
+    AgentSnapshot,
+    AgentTopic,
+)
 from drakkar.annotations import AnnotatorLike
 from drakkar.app import DrakkarApp
 from drakkar.appconfig import load_app_config
@@ -49,6 +61,16 @@ from drakkar.utils import make_request_id
 from drakkar.webapp import SinkDeliverySummary, WebReport, WebRequestContext
 
 __all__ = [
+    'AgentFinding',
+    'AgentMetricNote',
+    'AgentNotes',
+    'AgentPromql',
+    'AgentRecipe',
+    'AgentRecipeCause',
+    'AgentRecipeStep',
+    'AgentRule',
+    'AgentSnapshot',
+    'AgentTopic',
     'AnnotatorLike',
     'BaseDrakkarHandler',
     'CacheLike',

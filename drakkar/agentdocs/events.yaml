@@ -306,7 +306,7 @@
     - concept:agent-surface
 
 - key: log:agent_notes_invalid
-  summary: The handler notes break a rule (a key or a reference); the notes are dropped.
+  summary: A handler note breaks a rule (a key, a metric or a reference); that note is dropped and the other notes stay.
   when: Once at startup, after on_startup.
   fields:
     reasons: The problems found in the notes.

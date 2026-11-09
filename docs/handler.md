@@ -21,6 +21,7 @@ right time during the message-processing pipeline. See [Configuration](configura
 | `message_label(msg)` | Before logging each message in arrange | Once per message | `str` |
 | `task_priority(task)` | Before each task waits on the executor pool | Once per task (incl. retries) | sortable key (any `<`-comparable value) |
 | `task_run_seconds(result)` | Optional; right after a task's subprocess exits, before its `task_completed` / `task_failed` event | Once per task that ran a process, only when overridden | `float \| None` |
+| `agent_notes()` | Once after `on_startup`, when `agent.enabled` is true | Once per worker lifetime | [`AgentNotes`](#agent-notes) `\| None` |
 | `arrange_http_request(req, pending)` | One HTTP request passed auth + rate-limit + body parsing | Once per HTTP request (webapp only) | `list[`[`ExecutorTask`](executor.md#executortask)`]` |
 | `on_http_request_complete(group)` | All tasks from one HTTP request reached a terminal state | Once per HTTP request (webapp only) | `HttpResponseT` (a Pydantic model) |
 | `http_request_id(req, headers)` | After body parsing, before task fan-out | Once per HTTP request (webapp only) | `str` (validated; ≤64 chars, ASCII, no whitespace) |
@@ -1118,3 +1119,122 @@ attributes that are instances of `MetricWrapperBase` (Counter, Gauge,
 Histogram, Summary, Info). Use an `app_` prefix to distinguish your
 metrics from Drakkar's built-in `drakkar_` metrics in dashboards and
 queries.
+
+## Agent Notes
+
+When `agent.enabled` is true, the worker serves the agent routes under
+`/api/v1/agent`: a read-only surface that explains the worker to an AI
+agent. The framework knows its own concepts, metrics and rules. Your handler
+can add the business knowledge with `agent_notes()`:
+
+```python
+import drakkar as dk
+from prometheus_client import Counter
+
+
+def refunds_waiting(snapshot: dk.AgentSnapshot) -> dk.AgentFinding | None:
+    budget = snapshot.part('budget')
+    if budget is None or budget['tasks'] < 100:
+        return None
+    return dk.AgentFinding(evidence={'tasks': budget['tasks']})
+
+
+class BillingHandler(dk.BaseDrakkarHandler[BillingInput, BillingOutput]):
+    refunds_written = Counter('app_refunds_written', 'Refunds written to the ledger.')
+
+    def agent_notes(self) -> dk.AgentNotes | None:
+        return dk.AgentNotes(
+            concepts=[
+                dk.AgentTopic(
+                    key='refund',
+                    summary='Each task writes the refunds of one customer.',
+                    body='The task label `customer` holds the customer id.',
+                    related=['concept:pipeline', 'app:recipe:missing-refund'],
+                ),
+            ],
+            recipes=[
+                dk.AgentRecipe(
+                    key='missing-refund',
+                    summary='Find a refund that was not written.',
+                    question='Why is the refund of a customer missing?',
+                    steps=[
+                        dk.AgentRecipeStep(
+                            do='Call /api/v1/agent/state?parts=recent_failures.',
+                            why='A failed task names the customer in its label.',
+                        ),
+                    ],
+                    causes=[
+                        dk.AgentRecipeCause(
+                            cause='The ledger sink failed.',
+                            check='The sink row of the ledger has breaker_open true.',
+                            fix='Fix the ledger database, then replay the DLQ records.',
+                        ),
+                    ],
+                ),
+            ],
+            metrics={
+                'app_refunds_written_total': dk.AgentMetricNote(
+                    meaning='Refunds the ledger accepted.',
+                    healthy='Grows while refund messages arrive.',
+                    promql=[dk.AgentPromql(title='Refunds per second', query='rate(app_refunds_written_total{{{worker}}}[5m])')],
+                ),
+            },
+            app_config={'ledger.url': 'The address of the ledger service.'},
+            rules=[
+                dk.AgentRule(
+                    key='refunds-waiting',
+                    severity='warning',
+                    title='Many refund tasks wait',
+                    suggestion='Check the ledger latency before you add executors.',
+                    explain='app:concept:refund',
+                    check=refunds_waiting,
+                ),
+            ],
+        )
+```
+
+**What each field adds.**
+
+| Field | Where it appears |
+|---|---|
+| `concepts`, `recipes` | The manual part `app` (`/api/v1/agent/manual?parts=app`), as `app:concept:<key>` and `app:recipe:<key>`. |
+| `metrics` | The `meaning`, `healthy` and (with `detail=full`) `promql` of the handler metric on `/api/v1/agent/metrics`, and an entry `app:metric:<name>` in the manual part `app`. The key is the name the metric is exposed with (`app_refunds_written_total`) or its family name (`app_refunds_written`); it must be a metric that the handler declares. |
+| `app_config` | The `meaning` of the `app` keys on `/api/v1/agent/config`. The key is a path below `app` (`ledger.url`; `app.ledger.url` is the same path). |
+| `rules` | Run by `/api/v1/agent/diagnose` after the framework rules, named `app:<key>`, and listed in the manual part `app` as `app:rule:<key>`. |
+
+**References.** `related` and a rule's `explain` hold references: a framework
+entry (`concept:pipeline`, `metric:drakkar_pending_tasks`, `rule:budget-saturated`),
+a config path (`config:executor.max_executors`), or another note
+(`app:concept:<key>`, `app:recipe:<key>`, `app:metric:<name>`, `app:rule:<key>`).
+A rule with no `explain` points at its own entry `app:rule:<key>`.
+
+**Checks.** The models refuse a key that is not lower-case letters, digits,
+`-` and `_`, a summary longer than 200 characters, and text with a line break
+where one line is expected. The worker calls `agent_notes()` once after
+`on_startup`, only when `agent.enabled` is true. Then it checks the notes:
+
+| Problem | Result |
+|---|---|
+| The hook raises, or returns something that is not `AgentNotes` or `None` | `agent_notes_failed` (error, category `handler`); the worker runs without notes. |
+| A key used twice in one kind, a metric the handler does not declare, a reference that names nothing (also a note that names a dropped note) | That note is dropped; one `agent_notes_invalid` warning (category `agent`) lists every reason; the other notes stay. |
+
+**Rules.** A rule gets an `AgentSnapshot`: `state` holds every part of
+`/api/v1/agent/state` (a part that could not be read is `None`), and
+`metrics` holds the values of the counters the framework rules read, by
+exposed name. The snapshot is read-only: maps cannot be changed and lists are
+tuples. Return an `AgentFinding` with JSON evidence (numbers, names, ids;
+never payload text), or `None`. Read your own metric objects directly when a
+rule needs them.
+
+Each rule runs on a thread of its own, never on the event loop, with a limit
+of 1 second. The rules of one call run at the same time.
+
+| Rule outcome | Diagnose answer |
+|---|---|
+| Returns `None` | Listed in `checked`, no finding. |
+| Returns an `AgentFinding` | A finding with the rule's severity, title, suggestion and explain. |
+| Raises, returns another type, or gives evidence that is not plain JSON with finite numbers | Listed in `failed` with the error text; the other rules still run. |
+| Runs longer than 1 second | Listed in `failed` with `timed out after 1 s`; the worker logs `agent_rule_abandoned` (warning, category `agent`, `rule`) once and does not wait for it. Python cannot stop a running thread, so the rule runs on; until it returns, later calls list it as failed again and do not start it a second time. |
+
+Keep rules fast and pure: a rule that blocks holds its thread, not the API
+server, the event loop or the other rules.
