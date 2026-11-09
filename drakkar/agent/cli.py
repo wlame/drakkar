@@ -2,7 +2,7 @@
 
 It needs no running worker::
 
-    drakkar-agent manual [--parts=<p,...>] [--detail=brief|full] [--format=json|markdown] [--topic=<ref>]
+    drakkar-agent manual [--parts=<p,...>] [--detail=brief|full] [--format=json|markdown] [--topic=<kind>:<key>]
     drakkar-agent config --config=<path> [--parts=<p,...>] [--detail=brief|full]
     drakkar-agent reference
     python -m drakkar.agent ...
@@ -15,6 +15,7 @@ then nothing goes to stdout.
 
 from __future__ import annotations
 
+import io
 import sys
 from collections.abc import Sequence
 from typing import IO
@@ -190,7 +191,18 @@ def main(
     return EXIT_OK
 
 
+def use_utf8_lf(stream: IO[str]) -> None:
+    """Make a text stream write UTF-8 with LF line breaks, whatever the locale says."""
+    if isinstance(stream, io.TextIOWrapper):
+        stream.reconfigure(encoding='utf-8', newline='\n')
+
+
 def run() -> int:
-    """The console entry: log lines of the config load go to stderr, so stdout holds only the output."""
+    """The console entry: UTF-8 bytes with LF on both streams, and log lines of the config load on stderr.
+
+    So stdout holds only the output, with the same bytes in every locale.
+    """
+    use_utf8_lf(sys.stdout)
+    use_utf8_lf(sys.stderr)
     structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=sys.stderr))
     return main()

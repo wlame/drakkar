@@ -183,6 +183,8 @@ def test_the_console_script_names_the_cli():
 
 def test_the_package_runs_as_a_module(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     monkeypatch.setattr(sys, 'argv', ['drakkar.agent', 'manual', '--parts=rules'])
+    # The entry reconfigures the real streams; a test worker keeps its own (the subprocess tests cover it).
+    monkeypatch.setattr(cli, 'use_utf8_lf', lambda stream: None)
     saved = structlog.get_config()
     try:
         with pytest.raises(SystemExit) as stopped:
@@ -217,3 +219,40 @@ def test_an_empty_part_of_the_reference_page_says_so():
     page = reference.reference_markdown(reg.Registry(parts=parts, config_paths=frozenset(), version='0' * 16))
     assert page.endswith('## Rules\n\nNo entries.\n')
     assert page.count('No entries.') == len(reference.REFERENCE_PARTS)
+
+
+@pytest.mark.parametrize(
+    ('argv', 'expected'),
+    [
+        (['--help'], lambda: cli.USAGE_TEXT),
+        (
+            ['manual', '--parts=concepts', '--format=markdown'],
+            lambda: _run(['manual', '--parts=concepts', '--format=markdown'])[1],
+        ),
+    ],
+    ids=['help', 'manual-markdown'],
+)
+def test_a_subprocess_writes_utf8_with_lf_in_an_ascii_locale(argv: list[str], expected: Any):
+    env = {name: value for name, value in os.environ.items() if not name.startswith(('DK_', 'LC_', 'LANG', 'PYTHON'))}
+    # The C locale gives Python an ASCII stdout unless the command sets UTF-8 itself.
+    env |= {'LC_ALL': 'C', 'LANG': 'C', 'PYTHONCOERCECLOCALE': '0', 'PYTHONUTF8': '0'}
+    done = subprocess.run(
+        [sys.executable, '-m', 'drakkar.agent', *argv],
+        capture_output=True,
+        env=env,
+        check=False,
+        timeout=60,
+    )
+    assert done.returncode == cli.EXIT_OK, done.stderr
+    assert done.stdout == expected().encode('utf-8')
+    assert b'\r' not in done.stdout
+
+
+def test_use_utf8_lf_sets_the_encoding_of_a_text_stream_and_leaves_other_streams():
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding='ascii', newline='\r\n')
+    cli.use_utf8_lf(stream)
+    stream.write('— é\n')
+    stream.flush()
+    assert raw.getvalue() == '— é\n'.encode()
+    cli.use_utf8_lf(io.StringIO())  # not a TextIOWrapper: nothing to change

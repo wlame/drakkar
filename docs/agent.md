@@ -55,6 +55,8 @@ The common parameters:
 - `detail` is `brief` (the default: `key` and `summary`, and the live
   values) or `full` (every field). Another value answers 400
   `detail must be brief or full`.
+- `/api/v1/agent/state` and `/api/v1/agent/diagnose` accept `detail` and
+  ignore it; a bad value still answers 400.
 - `topic` names one entry by its reference: `concept:pending-budget`,
   `config:executor.max_pending_tasks`, `metric:drakkar_pending_tasks`,
   `event:task_failed`, `recipe:lag-growing`,
@@ -180,7 +182,7 @@ drakkar-agent config --config=drakkar.yaml --parts=executor,sinks --detail=full
 drakkar-agent reference
 ```
 
-- `manual [--parts=...] [--detail=brief|full] [--format=json|markdown] [--topic=<ref>]`
+- `manual [--parts=...] [--detail=brief|full] [--format=json|markdown] [--topic=<kind>:<key>]`
   prints the framework manual, without handler notes. PromQL queries keep
   their `{{worker}}` and `{{cluster}}` placeholders.
 - `config --config=<path> [--parts=...] [--detail=brief|full]` loads the
@@ -205,8 +207,14 @@ name: drakkar-worker
 description: Explain or debug a running Drakkar worker through its agent routes.
 ---
 
-The worker is at $DRAKKAR_URL. Send `Authorization: Bearer $DRAKKAR_AGENT_TOKEN`
-with every request.
+$DRAKKAR_URL is the API server of one worker: its `api.public_url`, or
+`http://<host>:<api.port>` (port 8080 by default). Send
+`Authorization: Bearer $DRAKKAR_AGENT_TOKEN` with every request.
+
+- A 404 with "the agent surface is off" means `agent.enabled` is false on that
+  worker. Stop and ask the operator to turn it on.
+- A 401 means the token is missing or wrong. Stop and ask for the token. Do
+  not retry with other values.
 
 1. Read `GET /api/v1/agent` first. Note `start_here`, the `registry_version`
    and the `approx_tokens` of each part. Ask only for parts you can afford.
@@ -214,7 +222,8 @@ with every request.
    highest severity.
 3. For each finding, read `GET /api/v1/agent/manual?topic=<explain>` (the
    `explain` reference of the finding), then the recipe it names with
-   `topic=recipe:<key>`.
+   `topic=recipe:<key>`. URL-encode the reference: a route reference holds
+   spaces (`topic=route%3AGET%20%2Fapi%2Fv1%2Fdebug%2Fdatabases`).
 4. Check what the recipe asks for with `/api/v1/agent/state?parts=...`,
    `/api/v1/agent/metrics?names=...` and `/api/v1/agent/config?parts=...`.
 5. Report what you found and the evidence. Do not guess a config change:
