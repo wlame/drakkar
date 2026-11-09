@@ -2728,5 +2728,235 @@
         "tail": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
       }
     ]
+  },
+  "notes_cases": {
+    "_comment": "Handler notes on the tiny registry: plain notes in (a rule has no check here; the test adds one), the manual part app (detail full, the given promql_filters) as JSON text, the agent_notes_invalid reasons, the app config meanings and the kept rule keys out. handler_metrics are the metrics the handler declares.",
+    "evidence_max_bytes": 4096,
+    "evidence_too_large_error": "the evidence is larger than 4096 bytes",
+    "handler_metrics": [
+      {
+        "family": "app_orders",
+        "type": "counter",
+        "help": "Orders written to the ledger."
+      },
+      {
+        "family": "app_queue_depth",
+        "type": "gauge",
+        "help": ""
+      },
+      {
+        "family": "app_latency",
+        "type": "histogram",
+        "help": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+      }
+    ],
+    "promql_filters": {
+      "worker": "worker=\"w-1\"",
+      "cluster": "cluster=\"c-1\""
+    },
+    "cases": [
+      {
+        "name": "every_kind",
+        "notes": {
+          "concepts": [
+            {
+              "key": "billing",
+              "summary": "Each task bills one customer.",
+              "body": "The task label `customer` holds the customer id.",
+              "related": [
+                "concept:pipeline",
+                "config:executor.max_executors",
+                "config:sinks.kafka.*.topic",
+                "app:recipe:refund"
+              ]
+            },
+            {
+              "key": "ledger",
+              "summary": "The ledger keeps every refund."
+            }
+          ],
+          "recipes": [
+            {
+              "key": "refund",
+              "summary": "Find a refund that was not written.",
+              "question": "Where is my refund?",
+              "steps": [
+                {
+                  "do": "Trace the message.",
+                  "why": "It shows the sinks."
+                }
+              ],
+              "causes": [
+                {
+                  "cause": "The sink failed.",
+                  "check": "A sink_error event exists.",
+                  "fix": "Replay the DLQ record."
+                }
+              ],
+              "related": [
+                "app:concept:billing",
+                "app:metric:app_orders_total",
+                "event:task_failed"
+              ]
+            },
+            {
+              "key": "slow-ledger",
+              "summary": "Find why the ledger is slow.",
+              "question": "Why is the ledger slow?",
+              "steps": [
+                {
+                  "do": "Read app_latency.",
+                  "why": "It times each ledger call."
+                }
+              ]
+            }
+          ],
+          "metrics": {
+            "app_orders": {
+              "meaning": "Orders the ledger accepted.",
+              "healthy": "Grows while messages arrive.",
+              "promql": [
+                {
+                  "title": "Orders per second",
+                  "query": "rate(app_orders_total{{{worker}}}[5m])"
+                }
+              ]
+            },
+            "app_queue_depth": {
+              "meaning": "Orders that wait for the ledger."
+            },
+            "app_latency": {
+              "meaning": "Seconds per ledger call."
+            }
+          },
+          "app_config": {
+            "ledger.url": "The address of the ledger.",
+            "app.retries": "How often a call is retried."
+          },
+          "rules": [
+            {
+              "key": "orders-stuck",
+              "severity": "warning",
+              "title": "Orders wait for the ledger",
+              "suggestion": "Check the ledger latency.",
+              "explain": "app:concept:ledger"
+            },
+            {
+              "key": "budget-full",
+              "severity": "critical",
+              "title": "The budget is full for billing",
+              "suggestion": "Raise the budget.",
+              "summary": "The budget is full while orders wait.",
+              "explain": "rule:budget-saturated"
+            },
+            {
+              "key": "plain",
+              "severity": "info",
+              "title": "A plain rule",
+              "suggestion": "Nothing to do."
+            }
+          ]
+        },
+        "json_text": "{\"parts\":{\"app\":[{\"key\":\"app:concept:billing\",\"summary\":\"Each task bills one customer.\",\"body\":\"The task label `customer` holds the customer id.\",\"related\":[\"concept:pipeline\",\"config:executor.max_executors\",\"config:sinks.kafka.*.topic\",\"app:recipe:refund\"]},{\"key\":\"app:concept:ledger\",\"summary\":\"The ledger keeps every refund.\"},{\"key\":\"app:metric:app_orders_total\",\"summary\":\"Orders written to the ledger.\",\"meaning\":\"Orders the ledger accepted.\",\"healthy\":\"Grows while messages arrive.\",\"promql\":[{\"title\":\"Orders per second\",\"query\":\"rate(app_orders_total{worker=\\\"w-1\\\"}[5m])\"}]},{\"key\":\"app:metric:app_queue_depth\",\"summary\":\"Orders that wait for the ledger.\",\"meaning\":\"Orders that wait for the ledger.\"},{\"key\":\"app:metric:app_latency\",\"summary\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB...\",\"meaning\":\"Seconds per ledger call.\"},{\"key\":\"app:recipe:refund\",\"summary\":\"Find a refund that was not written.\",\"question\":\"Where is my refund?\",\"steps\":[{\"do\":\"Trace the message.\",\"why\":\"It shows the sinks.\"}],\"causes\":[{\"cause\":\"The sink failed.\",\"check\":\"A sink_error event exists.\",\"fix\":\"Replay the DLQ record.\"}],\"related\":[\"app:concept:billing\",\"app:metric:app_orders_total\",\"event:task_failed\"]},{\"key\":\"app:recipe:slow-ledger\",\"summary\":\"Find why the ledger is slow.\",\"question\":\"Why is the ledger slow?\",\"steps\":[{\"do\":\"Read app_latency.\",\"why\":\"It times each ledger call.\"}]},{\"key\":\"app:rule:orders-stuck\",\"summary\":\"Orders wait for the ledger\",\"severity\":\"warning\",\"title\":\"Orders wait for the ledger\",\"explain\":\"app:concept:ledger\",\"suggestion\":\"Check the ledger latency.\"},{\"key\":\"app:rule:budget-full\",\"summary\":\"The budget is full while orders wait.\",\"severity\":\"critical\",\"title\":\"The budget is full for billing\",\"explain\":\"rule:budget-saturated\",\"suggestion\":\"Raise the budget.\"},{\"key\":\"app:rule:plain\",\"summary\":\"A plain rule\",\"severity\":\"info\",\"title\":\"A plain rule\",\"suggestion\":\"Nothing to do.\"}]}}",
+        "reasons": [],
+        "config_meanings": {
+          "app.ledger.url": "The address of the ledger.",
+          "app.retries": "How often a call is retried."
+        },
+        "rules": [
+          "orders-stuck",
+          "budget-full",
+          "plain"
+        ]
+      },
+      {
+        "name": "invalid_notes_are_dropped",
+        "notes": {
+          "concepts": [
+            {
+              "key": "kept",
+              "summary": "Kept.",
+              "related": [
+                "concept:offsets"
+              ]
+            },
+            {
+              "key": "kept",
+              "summary": "The same key again."
+            },
+            {
+              "key": "broken",
+              "summary": "Broken.",
+              "related": [
+                "concept:no-such-concept",
+                "app:concept:kept"
+              ]
+            },
+            {
+              "key": "names-broken",
+              "summary": "Names a dropped note.",
+              "related": [
+                "app:concept:broken"
+              ]
+            },
+            {
+              "key": "bad-config",
+              "summary": "A config path that is not in the metadata.",
+              "related": [
+                "config:executor.no_such_key"
+              ]
+            },
+            {
+              "key": "family-ref",
+              "summary": "A metric reference by family name.",
+              "related": [
+                "app:metric:app_orders"
+              ]
+            }
+          ],
+          "metrics": {
+            "app_orders": {
+              "meaning": "First note of the counter."
+            },
+            "app_orders_total": {
+              "meaning": "Second note of the same counter."
+            },
+            "app_missing": {
+              "meaning": "No such metric."
+            }
+          },
+          "rules": [
+            {
+              "key": "bad-explain",
+              "severity": "info",
+              "title": "Bad explain",
+              "suggestion": "None.",
+              "explain": "rule:no-such-rule"
+            },
+            {
+              "key": "unknown-app",
+              "severity": "info",
+              "title": "Unknown app note",
+              "suggestion": "None.",
+              "explain": "app:recipe:missing"
+            }
+          ]
+        },
+        "json_text": "{\"parts\":{\"app\":[{\"key\":\"app:concept:kept\",\"summary\":\"Kept.\",\"related\":[\"concept:offsets\"]},{\"key\":\"app:metric:app_orders_total\",\"summary\":\"Orders written to the ledger.\",\"meaning\":\"First note of the counter.\"}]}}",
+        "reasons": [
+          "concept 'kept': the key is used twice",
+          "metric 'app_orders_total': the key is used twice",
+          "metric 'app_missing': the handler declares no such metric",
+          "concept 'broken': the reference 'concept:no-such-concept' names nothing",
+          "concept 'bad-config': the reference 'config:executor.no_such_key' names nothing",
+          "concept 'family-ref': the reference 'app:metric:app_orders' names nothing",
+          "rule 'bad-explain': the reference 'rule:no-such-rule' names nothing",
+          "rule 'unknown-app': the reference 'app:recipe:missing' names nothing",
+          "concept 'names-broken': the reference 'app:concept:broken' names nothing"
+        ],
+        "config_meanings": {},
+        "rules": []
+      }
+    ]
   }
 }

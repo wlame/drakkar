@@ -32,6 +32,7 @@ Design notes
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import signal
 import sys
@@ -44,7 +45,7 @@ import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar import __version__
-from drakkar.agent.notes import AgentNotes, handler_metrics_of, prepare_notes
+from drakkar.agent.notes import AGENT_NOTES_ASYNC_MESSAGE, AgentNotes, handler_metrics_of, prepare_notes
 from drakkar.agent.registry import load_registry
 from drakkar.annotations import Annotator
 from drakkar.app import (
@@ -644,6 +645,10 @@ class AppLifecycle:
         handler = app._handler
         try:
             notes = handler.agent_notes()
+            if inspect.iscoroutine(notes):
+                # Close it, so no "never awaited" warning follows the error line.
+                notes.close()
+                raise TypeError(AGENT_NOTES_ASYNC_MESSAGE)
             if notes is not None and not isinstance(notes, AgentNotes):
                 raise TypeError(f'agent_notes returned {type(notes).__name__}, not AgentNotes or None')
         except Exception as exc:

@@ -318,7 +318,7 @@
   summary: A handler diagnose rule ran longer than 1 second; the diagnose answer lists it as failed and does not wait for it.
   when: When a handler rule passes its time limit.
   fields:
-    rule: The key of the rule.
+    rule: The name of the rule in the diagnose answer, app:<key>.
   action: Make the rule a fast, pure check of the snapshot.
   related:
     - concept:agent-surface

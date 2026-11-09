@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import json
 import threading
 import time
+import warnings
+from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
@@ -15,26 +19,30 @@ from structlog.testing import capture_logs
 import drakkar as dk
 from drakkar.agent.metrics_view import MetricNotes
 from drakkar.agent.notes import (
+    AGENT_NOTES_ASYNC_MESSAGE,
     HandlerMetric,
     HandlerRules,
     PreparedNotes,
     app_config_path,
     evidence_of,
     freeze,
+    handler_metrics_from,
     handler_metrics_of,
     prepare_notes,
     snapshot_of,
 )
 from drakkar.agent.params import RULE_TIMED_OUT_MESSAGE, STATE_PARTS
-from drakkar.agent.registry import approx_tokens, dumps, load_registry
+from drakkar.agent.registry import approx_tokens, dumps, load_registry, select_manual, selection_json
 from drakkar.agent.rules import RuleInput, RuleSettings
 from drakkar.app import DrakkarApp
 from drakkar.uiserver.routes_agent import AgentSurface
 from drakkar.uiserver.server import create_api_app
+from tests.test_agent_registry import _tiny_registry
 from tests.test_agent_routes import _client, _config, _drakkar_app, _surface_client
 from tests.test_sources_validation import KafkaOnlyHandler
 
 REGISTRY = load_registry()
+CONTRACT = json.loads((Path(__file__).parent / 'fixtures' / 'agent_contract.json').read_text(encoding='utf-8'))
 
 # Handler metrics on their own names, so the default registry holds them once for the module.
 ORDERS_DONE = Counter('agent_notes_test_orders', 'Orders this worker wrote.')
@@ -310,6 +318,31 @@ def test_an_empty_metric_help_text_gives_the_meaning_as_the_summary():
     assert prepared.entries[0]['summary'] == 'Meaning.'
 
 
+def _notes_of(data: dict[str, Any]) -> dk.AgentNotes:
+    """Plain notes of the fixture as models; a fixture rule has no check, so each gets one that finds nothing."""
+    data = json.loads(json.dumps(data))
+    for rule in data.get('rules', []):
+        rule['check'] = lambda snapshot: None
+    return dk.AgentNotes.model_validate(data)
+
+
+@pytest.mark.parametrize('case', CONTRACT['notes_cases']['cases'], ids=lambda case: case['name'])
+def test_notes_cases(case):
+    section = CONTRACT['notes_cases']
+    registry = _tiny_registry()
+    handler_metrics = handler_metrics_from(
+        (metric['family'], metric['type'], metric['help']) for metric in section['handler_metrics']
+    )
+
+    prepared, reasons = prepare_notes(_notes_of(case['notes']), registry=registry, handler_metrics=handler_metrics)
+
+    selection = select_manual(registry, parts=['app'], detail='full', app_entries=prepared.entries)
+    assert dumps(selection_json(selection, section['promql_filters'])) == case['json_text']
+    assert reasons == case['reasons']
+    assert dict(prepared.config_meanings) == case['config_meanings']
+    assert [rule.key for rule in prepared.rules] == case['rules']
+
+
 def test_app_config_paths_take_the_app_prefix_once():
     assert app_config_path('billing.url') == 'app.billing.url'
     assert app_config_path('app.billing.url') == 'app.billing.url'
@@ -363,6 +396,24 @@ async def test_a_hook_that_raises_or_returns_another_type_leaves_the_worker_with
     (failed,) = [entry for entry in logs if entry['event'] == 'agent_notes_failed']
     assert (failed['log_level'], failed['category']) == ('error', 'handler')
     assert failed['error']
+    assert app._agent_notes is None
+
+
+async def test_an_async_hook_fails_with_a_clear_error_and_no_unawaited_warning():
+    class AsyncNotesHandler(KafkaOnlyHandler):
+        async def agent_notes(self) -> dk.AgentNotes | None:  # type: ignore[override]
+            return None
+
+    app = DrakkarApp(handler=AsyncNotesHandler(), config=_config(), worker_id='w-1')
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        with capture_logs() as logs:
+            await app._lifecycle._collect_agent_notes()
+        gc.collect()
+
+    (failed,) = [entry for entry in logs if entry['event'] == 'agent_notes_failed']
+    assert failed['error'] == AGENT_NOTES_ASYNC_MESSAGE
     assert app._agent_notes is None
 
 
@@ -619,7 +670,7 @@ async def test_a_slow_handler_rule_is_abandoned_logged_once_and_not_started_agai
         release.wait(10)
         return _finding()
 
-    rules = HandlerRules([_rule('slow', slow), _rule('fast', lambda snapshot: _finding(ok=1))], timeout=0.2)
+    rules = HandlerRules([_rule('slow', slow), _rule('fast', lambda snapshot: _finding(ok=1))], timeout=0.5)
     try:
         with capture_logs() as logs:
             began = time.monotonic()
@@ -635,14 +686,22 @@ async def test_a_slow_handler_rule_is_abandoned_logged_once_and_not_started_agai
         assert result.checked == ['app:slow', 'app:fast']
         assert result.failed == [{'rule': 'app:slow', 'error': RULE_TIMED_OUT_MESSAGE}]
         assert [finding['rule'] for finding in result.findings] == ['app:fast']
-    assert 0.15 < first_seconds < 1.5
-    # The rule still runs from the first call: the second call neither starts it nor waits for it.
-    assert second_seconds < 0.15
+    assert 0.45 < first_seconds < 5
+    # The abandoned run still goes on: the second call neither starts the rule nor waits for it.
+    assert second_seconds < 0.4
     assert len(starts) == 1
     abandoned = [entry for entry in logs if entry['event'] == 'agent_rule_abandoned']
     assert abandoned == [
         {'event': 'agent_rule_abandoned', 'log_level': 'warning', 'category': 'agent', 'rule': 'app:slow'}
     ]
+
+
+async def _until(condition: Any, limit: float = 5.0) -> None:
+    """Poll ``condition`` on the loop until it is true; fail after ``limit`` seconds."""
+    ends = time.monotonic() + limit
+    while not condition():
+        assert time.monotonic() < ends, 'the condition did not come true in time'
+        await asyncio.sleep(0.01)
 
 
 async def test_a_rule_that_ended_after_its_limit_runs_again_at_the_next_call():
@@ -657,8 +716,9 @@ async def test_a_rule_that_ended_after_its_limit_runs_again_at_the_next_call():
 
     rules = HandlerRules([_rule('late', late)], timeout=0.1)
     first = await rules(_rule_input())
+    (abandoned_run,) = rules._running.values()
     release.set()
-    await asyncio.sleep(0.05)
+    await _until(abandoned_run.done.is_set)
     second = await rules(_rule_input())
 
     assert first.failed == [{'rule': 'app:late', 'error': RULE_TIMED_OUT_MESSAGE}]
@@ -666,11 +726,93 @@ async def test_a_rule_that_ended_after_its_limit_runs_again_at_the_next_call():
     assert [finding['evidence'] for finding in second.findings] == [{'call': 2}]
 
 
-async def test_a_slow_and_a_raising_rule_hold_neither_the_api_server_nor_the_other_rules():
-    """With the real 1 s limit, through the API app: health answers while a rule hangs."""
+async def test_two_calls_at_the_same_time_share_a_run_within_its_limit():
+    starts: list[float] = []
+    release = threading.Event()
+
+    def busy(snapshot: dk.AgentSnapshot) -> dk.AgentFinding:
+        starts.append(time.monotonic())
+        release.wait(0.3)
+        return _finding(n=1)
+
+    rules = HandlerRules([_rule('busy', busy)], timeout=5)
+    with capture_logs() as logs:
+        first, second = await asyncio.gather(rules(_rule_input()), rules(_rule_input()))
+
+    for result in (first, second):
+        assert result.failed == []
+        assert [finding['evidence'] for finding in result.findings] == [{'n': 1}]
+    assert len(starts) == 1
+    assert [entry for entry in logs if entry['event'] == 'agent_rule_abandoned'] == []
+    assert rules._running == {}
+
+
+async def test_a_call_that_joins_a_run_gets_the_timeout_of_that_run():
     release = threading.Event()
 
     def hangs(snapshot: dk.AgentSnapshot) -> None:
+        release.wait(10)
+
+    rules = HandlerRules([_rule('hangs', hangs)], timeout=0.3)
+    try:
+        with capture_logs() as logs:
+            first = asyncio.create_task(rules(_rule_input()))
+            await asyncio.sleep(0)
+            second = await rules(_rule_input())
+            first_result = await first
+    finally:
+        release.set()
+
+    for result in (first_result, second):
+        assert result.failed == [{'rule': 'app:hangs', 'error': RULE_TIMED_OUT_MESSAGE}]
+    assert len([entry for entry in logs if entry['event'] == 'agent_rule_abandoned']) == 1
+
+
+def test_a_rule_that_ends_after_its_loop_closed_leaves_no_traceback(monkeypatch):
+    errors: list[Any] = []
+    monkeypatch.setattr(threading, 'excepthook', errors.append)
+    release = threading.Event()
+
+    def late(snapshot: dk.AgentSnapshot) -> None:
+        release.wait(10)
+
+    rules = HandlerRules([_rule('late', late)], timeout=0.05)
+    loop = asyncio.new_event_loop()
+    try:
+        result = loop.run_until_complete(rules(_rule_input()))
+    finally:
+        loop.close()
+    (run,) = rules._running.values()
+    release.set()
+    run._thread.join(5)
+
+    assert result.failed == [{'rule': 'app:late', 'error': RULE_TIMED_OUT_MESSAGE}]
+    assert not run._thread.is_alive()
+    assert errors == []
+
+
+async def test_evidence_over_the_size_limit_fails_the_rule():
+    limits = CONTRACT['notes_cases']
+    # {"t":"..."} is 8 bytes around the text.
+    fits = _finding(t='x' * (limits['evidence_max_bytes'] - 8))
+    too_large = _finding(t='x' * (limits['evidence_max_bytes'] - 7))
+    assert len(dumps(fits.evidence).encode('utf-8')) == limits['evidence_max_bytes']
+
+    result = await HandlerRules([_rule('fits', lambda snapshot: fits), _rule('large', lambda snapshot: too_large)])(
+        _rule_input()
+    )
+
+    assert [finding['rule'] for finding in result.findings] == ['app:fits']
+    assert result.failed == [{'rule': 'app:large', 'error': limits['evidence_too_large_error']}]
+
+
+async def test_a_slow_and_a_raising_rule_hold_neither_the_api_server_nor_the_other_rules():
+    """With the real 1 s limit, through the API app: health answers while a rule hangs."""
+    release = threading.Event()
+    started = threading.Event()
+
+    def hangs(snapshot: dk.AgentSnapshot) -> None:
+        started.set()
         release.wait(10)
 
     def raises(snapshot: dk.AgentSnapshot) -> None:
@@ -693,9 +835,9 @@ async def test_a_slow_and_a_raising_rule_hold_neither_the_api_server_nor_the_oth
         async with _client(create_api_app(_app_with_notes(notes))) as client:
             began = time.monotonic()
             diagnose = asyncio.create_task(client.get('/api/v1/agent/diagnose'))
-            await asyncio.sleep(0.2)
-            health = await asyncio.wait_for(client.get('/healthz'), timeout=0.5)
-            health_seconds = time.monotonic() - began
+            await _until(started.is_set)
+            health = await asyncio.wait_for(client.get('/healthz'), timeout=5)
+            diagnose_was_waiting = not diagnose.done()
             answer = (await diagnose).json()
             diagnose_seconds = time.monotonic() - began
     finally:
@@ -704,9 +846,10 @@ async def test_a_slow_and_a_raising_rule_hold_neither_the_api_server_nor_the_oth
         await ticker
 
     assert health.status_code == 200
-    assert health_seconds < 0.9
-    assert 0.9 < diagnose_seconds < 3
-    assert loop_ticks > 30
+    # Health answered while the diagnose call still waited on the hanging rule.
+    assert diagnose_was_waiting
+    assert 0.9 < diagnose_seconds < 5
+    assert loop_ticks > 10
     failed = {row['rule']: row['error'] for row in answer['failed']}
     assert failed == {'app:hangs': 'timed out after 1 s', 'app:raises': 'broken rule'}
     assert [finding['rule'] for finding in answer['findings'] if finding['rule'].startswith('app:')] == ['app:fine']

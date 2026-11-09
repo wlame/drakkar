@@ -1206,7 +1206,9 @@ class BillingHandler(dk.BaseDrakkarHandler[BillingInput, BillingOutput]):
 entry (`concept:pipeline`, `metric:drakkar_pending_tasks`, `rule:budget-saturated`),
 a config path (`config:executor.max_executors`), or another note
 (`app:concept:<key>`, `app:recipe:<key>`, `app:metric:<name>`, `app:rule:<key>`).
-A rule with no `explain` points at its own entry `app:rule:<key>`.
+In `app:metric:<name>`, the name is the exposed name (`app_refunds_written_total`);
+a family name there names nothing. A rule with no `explain` points at its own
+entry `app:rule:<key>`.
 
 **Checks.** The models refuse a key that is not lower-case letters, digits,
 `-` and `_`, a summary longer than 200 characters, and text with a line break
@@ -1215,13 +1217,15 @@ where one line is expected. The worker calls `agent_notes()` once after
 
 | Problem | Result |
 |---|---|
-| The hook raises, or returns something that is not `AgentNotes` or `None` | `agent_notes_failed` (error, category `handler`); the worker runs without notes. |
+| The hook raises, is an `async def`, or returns something that is not `AgentNotes` or `None` | `agent_notes_failed` (error, category `handler`); the worker runs without notes. |
 | A key used twice in one kind, a metric the handler does not declare, a reference that names nothing (also a note that names a dropped note) | That note is dropped; one `agent_notes_invalid` warning (category `agent`) lists every reason; the other notes stay. |
 
 **Rules.** A rule gets an `AgentSnapshot`: `state` holds every part of
 `/api/v1/agent/state` (a part that could not be read is `None`), and
-`metrics` holds the values of the counters the framework rules read, by
-exposed name. The snapshot is read-only: maps cannot be changed and lists are
+`metrics` holds three framework counters by exposed name:
+`drakkar_recorder_dropped_events_total`,
+`drakkar_recorder_postgres_dropped_rows_total` and
+`drakkar_sink_dlq_messages_total`. The snapshot is read-only: maps cannot be changed and lists are
 tuples. Return an `AgentFinding` with JSON evidence (numbers, names, ids;
 never payload text), or `None`. Read your own metric objects directly when a
 rule needs them.
@@ -1234,7 +1238,12 @@ of 1 second. The rules of one call run at the same time.
 | Returns `None` | Listed in `checked`, no finding. |
 | Returns an `AgentFinding` | A finding with the rule's severity, title, suggestion and explain. |
 | Raises, returns another type, or gives evidence that is not plain JSON with finite numbers | Listed in `failed` with the error text; the other rules still run. |
-| Runs longer than 1 second | Listed in `failed` with `timed out after 1 s`; the worker logs `agent_rule_abandoned` (warning, category `agent`, `rule`) once and does not wait for it. Python cannot stop a running thread, so the rule runs on; until it returns, later calls list it as failed again and do not start it a second time. |
+| Gives evidence larger than 4096 bytes of compact JSON | Listed in `failed` with `the evidence is larger than 4096 bytes`. |
+| Runs longer than 1 second | Listed in `failed` with `timed out after 1 s`; the worker logs `agent_rule_abandoned` (warning, category `agent`, `rule`) once and does not wait for it. Python cannot stop a running thread, so the rule goes on; until it returns, later calls list it as failed at once and do not start it a second time. |
+
+Two diagnose calls at the same time share one run of a rule: the second call
+waits for the run the first call started and gets its result, as long as the
+run is within its 1 second.
 
 Keep rules fast and pure: a rule that blocks holds its thread, not the API
 server, the event loop or the other rules.

@@ -12,9 +12,9 @@ manual part ``app``, the meanings of the ``app`` config keys, the notes of the
 handler metrics and the rules. :class:`HandlerRules` runs the rules for the
 diagnose route. Each rule runs on a thread of its own with a limit of
 :data:`RULE_TIMEOUT_SECONDS`; the route stops waiting for a rule that passes it
-and lists it as failed. A rule that is still running from an earlier call is
-not started again and fails at once, so a rule that never returns holds one
-thread, not one per call.
+and lists it as failed. A call that finds a run of a rule still within its
+limit waits for that run; a run past its limit is not started again and fails
+at once, so a rule that never returns holds one thread, not one per call.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import math
 import threading
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -41,7 +42,11 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 RULE_TIMEOUT_SECONDS = 1.0
+# The largest evidence a handler rule may give, as compact UTF-8 JSON.
+EVIDENCE_MAX_BYTES = 4096
+EVIDENCE_TOO_LARGE_MESSAGE = 'the evidence is larger than 4096 bytes'
 APP_CONFIG_PREFIX = 'app.'
+AGENT_NOTES_ASYNC_MESSAGE = 'agent_notes must be a plain method, not async def'
 SUMMARY_MAX_LENGTH = 200
 SUMMARY_CUT_MARK = '...'
 
@@ -191,17 +196,23 @@ class PreparedNotes:
     rules: tuple[AgentRule, ...] = ()
 
 
-def handler_metrics_of(metrics: Iterable[MetricWrapperBase]) -> dict[str, HandlerMetric]:
-    """The handler's metrics by every name a note may use: the exposed name and the family name."""
+def handler_metrics_from(rows: Iterable[tuple[str, str, str]]) -> dict[str, HandlerMetric]:
+    """The handler's metrics by every name a note may use, from ``(family name, type, help)`` rows.
+
+    A metric answers to the name it is exposed with and to its family name.
+    """
     found: dict[str, HandlerMetric] = {}
-    for metric in metrics:
-        family = metric._name
-        metric_type = metric._type or ''
+    for family, metric_type, help_text in rows:
         exposed = exposed_name(family, metric_type)
-        described = HandlerMetric(exposed=exposed, help=metric._documentation)
+        described = HandlerMetric(exposed=exposed, help=help_text)
         found[exposed] = described
         found.setdefault(family, described)
     return found
+
+
+def handler_metrics_of(metrics: Iterable[MetricWrapperBase]) -> dict[str, HandlerMetric]:
+    """The handler's metrics by every name a note may use, from the metric objects it declares."""
+    return handler_metrics_from((metric._name, metric._type or '', metric._documentation) for metric in metrics)
 
 
 def _cut_summary(text: str) -> str:
@@ -300,7 +311,7 @@ def _candidates(
         if metric is None:
             reasons.append(f"metric '{name}': the handler declares no such metric")
             continue
-        add('metric', name, _metric_entry(metric, metric_note), [], (metric, metric_note))
+        add('metric', metric.exposed, _metric_entry(metric, metric_note), [], (metric, metric_note))
     for recipe in notes.recipes:
         add('recipe', recipe.key, _recipe_entry(recipe), list(recipe.related), recipe)
     for rule in notes.rules:
@@ -402,7 +413,12 @@ def _finite_json(value: Any) -> bool:
 
 
 def evidence_of(outcome: Any) -> dict[str, Any] | None:
-    """The evidence of a rule's return value; raises ``TypeError`` for a value that is not a finding or ``None``."""
+    """The evidence of a rule's return value.
+
+    Raises ``TypeError`` for a value that is not a finding or ``None`` and for
+    evidence that is not plain JSON with finite numbers, and ``ValueError`` for
+    evidence whose compact JSON is larger than :data:`EVIDENCE_MAX_BYTES`.
+    """
     if outcome is None:
         return None
     if not isinstance(outcome, AgentFinding):
@@ -410,18 +426,25 @@ def evidence_of(outcome: Any) -> dict[str, Any] | None:
     evidence = outcome.evidence
     if not _finite_json(evidence):
         raise TypeError('the evidence is not plain JSON with finite numbers')
-    # A round trip through the answer encoder proves the evidence can be sent.
-    dumps(evidence)
+    if len(dumps(evidence).encode('utf-8')) > EVIDENCE_MAX_BYTES:
+        raise ValueError(EVIDENCE_TOO_LARGE_MESSAGE)
     return evidence
 
 
 class _RuleRun:
-    """One run of a handler rule on a daemon thread; ``done`` is set when the rule returned or raised."""
+    """One run of a handler rule on a daemon thread.
 
-    def __init__(self, rule: AgentRule, snapshot: AgentSnapshot) -> None:
+    ``done`` is set when the rule returned or raised. ``deadline`` (monotonic
+    seconds) is the end of the run's limit; a run still going then is
+    abandoned, once. Several diagnose calls may wait on one run.
+    """
+
+    def __init__(self, rule: AgentRule, snapshot: AgentSnapshot, *, timeout: float) -> None:
         self.done = threading.Event()
         self.outcome: Any = None
         self.error: BaseException | None = None
+        self.deadline = time.monotonic() + timeout
+        self.abandoned = False
         self._rule = rule
         self._snapshot = snapshot
         self._waiters: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = []
@@ -445,20 +468,36 @@ class _RuleRun:
             self.done.set()
             waiters, self._waiters = self._waiters, []
         for loop, future in waiters:
-            loop.call_soon_threadsafe(_resolve, future)
+            try:
+                loop.call_soon_threadsafe(_resolve, future)
+            except RuntimeError:
+                # The loop that waited has closed (the worker stopped): nobody reads this outcome.
+                pass
 
-    async def wait(self, timeout: float) -> bool:
-        """Wait at most ``timeout`` seconds on the calling loop; True when the rule ended."""
+    def mark_abandoned(self) -> bool:
+        """Mark the run abandoned; True only for the first mark, so the run is logged once."""
+        with self._lock:
+            if self.abandoned:
+                return False
+            self.abandoned = True
+            return True
+
+    async def wait(self) -> bool:
+        """Wait on the calling loop until the run ends or its deadline passes; True when the rule ended."""
         loop = asyncio.get_running_loop()
         future: asyncio.Future[None] = loop.create_future()
+        waiter = (loop, future)
         with self._lock:
             if self.done.is_set():
                 return True
-            self._waiters.append((loop, future))
+            self._waiters.append(waiter)
         try:
-            await asyncio.wait_for(future, timeout)
+            await asyncio.wait_for(future, max(0.0, self.deadline - time.monotonic()))
         except TimeoutError:
-            return False
+            with self._lock:
+                if waiter in self._waiters:
+                    self._waiters.remove(waiter)
+            return self.done.is_set()
         return True
 
 
@@ -471,9 +510,12 @@ class HandlerRules:
     """Runs the handler's rules for the diagnose route, each bounded by :data:`RULE_TIMEOUT_SECONDS`.
 
     The rules of one call run at the same time, so a call waits at most the
-    limit once. A rule that passes the limit is listed as failed with
+    limit once. A call that finds a run of a rule still in progress within its
+    limit (started by another call) waits for that run and takes its outcome.
+    A run that passes its limit is abandoned: it is listed as failed with
     ``timed out after 1 s`` and logged once (``agent_rule_abandoned``); while
-    it still runs, later calls list it as failed again without starting it.
+    it still runs, later calls list it as failed at once without starting it
+    again, so a rule that never returns holds one thread.
     """
 
     def __init__(self, rules: Sequence[AgentRule], *, timeout: float = RULE_TIMEOUT_SECONDS) -> None:
@@ -487,22 +529,20 @@ class HandlerRules:
         """The rules, in the order the handler gave them."""
         return self._rules
 
+    def _run_for(self, rule: AgentRule, snapshot: AgentSnapshot) -> _RuleRun:
+        """The run this call reads: the one in progress, or a new one."""
+        previous = self._running.get(rule.key)
+        if previous is not None and not previous.done.is_set():
+            return previous
+        run = _RuleRun(rule, snapshot, timeout=self._timeout)
+        run.start()
+        self._running[rule.key] = run
+        return run
+
     async def __call__(self, rule_input: RuleInput) -> DiagnoseResult:
         """Run every rule on one frozen snapshot of ``rule_input``."""
         snapshot = snapshot_of(rule_input)
-        runs: dict[str, _RuleRun | None] = {}
-        for rule in self._rules:
-            previous = self._running.get(rule.key)
-            if previous is not None and not previous.done.is_set():
-                # Still running from an earlier call: do not start a second thread.
-                runs[rule.key] = None
-                continue
-            run = _RuleRun(rule, snapshot)
-            run.start()
-            self._running[rule.key] = run
-            runs[rule.key] = run
-
-        deadline = asyncio.get_running_loop().time() + self._timeout
+        runs = {rule.key: self._run_for(rule, snapshot) for rule in self._rules}
         findings: list[dict[str, Any]] = []
         checked: list[str] = []
         failed: list[dict[str, str]] = []
@@ -510,15 +550,13 @@ class HandlerRules:
             name = f'{APP_REFERENCE_PREFIX}{rule.key}'
             checked.append(name)
             run = runs[rule.key]
-            if run is None:
+            if run.abandoned or not await run.wait():
                 failed.append({'rule': name, 'error': RULE_TIMED_OUT_MESSAGE})
+                if run.mark_abandoned():
+                    await logger.awarning('agent_rule_abandoned', category='agent', rule=name)
                 continue
-            left = max(0.0, deadline - asyncio.get_running_loop().time())
-            if not await run.wait(left):
-                failed.append({'rule': name, 'error': RULE_TIMED_OUT_MESSAGE})
-                await logger.awarning('agent_rule_abandoned', category='agent', rule=name)
-                continue
-            self._running.pop(rule.key, None)
+            if self._running.get(rule.key) is run:
+                del self._running[rule.key]
             if run.error is not None:
                 failed.append({'rule': name, 'error': error_text(run.error)})
                 continue
