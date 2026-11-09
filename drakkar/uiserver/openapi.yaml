@@ -12,7 +12,7 @@
 openapi: 3.1.0
 info:
   title: Drakkar Backend API
-  version: "1.30"
+  version: "1.31"
   description: >-
     The JSON surface every Drakkar backend (Python reference and Go port)
     serves identically under /api/v1, plus the unprefixed Kubernetes probes.
@@ -20,7 +20,9 @@ info:
     ui.auth_token and send `Authorization: Bearer <t>` or `?token=<t>`;
     with no token configured, auth is disabled (private-contour default).
     Routes under /api/v1/peer/ are always public (worker-to-worker cache
-    exchange).
+    exchange). The six /api/v1/agent routes (v1.31) are the exception: they
+    follow agent.auth_token (bearer header only), not ui.auth_token, and are
+    served with ui.enabled false too.
 
 
     Not modeled by OpenAPI but part of the contract: GET /api/v1/debug/trace,
@@ -62,6 +64,10 @@ tags:
     description: Every config field Drakkar accepts, joined with live values.
   - name: meta
     description: Self-description of this API surface.
+  - name: agent
+    description: >-
+      Read-only agent insight routes (v1.31). Off unless agent.enabled; the
+      token is agent.auth_token, not ui.auth_token. The UI does not call them.
 
 paths:
   /healthz:
@@ -1586,8 +1592,326 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/ErrorEnvelope'}
 
+  /api/v1/agent:
+    get:
+      tags: [agent]
+      operationId: getAgentIndex
+      summary: Agent index, what this worker offers
+      security:
+        - agentBearer: []
+      description: >-
+        v1.31. The index of the agent surface: framework and registry version, worker identity, capabilities, the routes with the parts they accept and the approximate size of each part. Start here.
+        Checks in order: agent.enabled (404), the agent token (401), the
+        parameters (400). Needs api.enabled only; served with ui.enabled false.
+      responses:
+        '200':
+          description: The answer.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentIndex'}
+        '400':
+          description: >-
+            A parameter is not understood; the message is in the error key.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '401':
+          description: '{"error": "agent token required"}'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '404':
+          description: >-
+            '{"error": "the agent surface is off; set agent.enabled to true"}'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+
+  /api/v1/agent/manual:
+    get:
+      tags: [agent]
+      operationId: getAgentManual
+      summary: Knowledge registry of concepts, advice, metrics, events, recipes and rules
+      security:
+        - agentBearer: []
+      description: >-
+        v1.31. The knowledge registry plus the handler's notes. With format=markdown the body is text/markdown: one # heading per part, one ## heading per entry.
+        Checks in order: agent.enabled (404), the agent token (401), the
+        parameters (400). Needs api.enabled only; served with ui.enabled false.
+      parameters:
+        - name: parts
+          in: query
+          required: false
+          description: >-
+            Comma list of concepts, config, metrics, events, recipes, routes, rules, app. Absent: all parts. An unknown or
+            empty item answers 400 "unknown part '<p>'; known: <sorted list>".
+          schema: {type: string}
+        - name: detail
+          in: query
+          required: false
+          description: >-
+            brief (default) or full; another value answers 400. Manual: brief
+            gives key and summary, full every field. Config: advice only in
+            full. Metrics: promql and related only in full. State and
+            diagnose: no effect, the value is still validated.
+          schema: {type: string, enum: [brief, full], default: brief}
+        - name: topic
+          in: query
+          required: false
+          description: >-
+            A reference kind:key (handler entries app:kind:key). Overrides
+            parts. Answers the entry in full detail and the entries it
+            references, one level deep, in brief, each under the part of its
+            kind. Unknown or malformed: 404.
+          schema: {type: string}
+        - name: format
+          in: query
+          required: false
+          description: json (default) or markdown. Another value answers 400.
+          schema: {type: string, enum: [json, markdown], default: json}
+      responses:
+        '200':
+          description: The answer.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentManual'}
+            text/markdown:
+              schema: {type: string}
+          headers:
+            Cache-Control:
+              description: no-store, on every agent answer.
+              schema: {type: string, const: no-store}
+        '400':
+          description: >-
+            A parameter is not understood; the message is in the error key.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '401':
+          description: '{"error": "agent token required"}'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '404':
+          description: >-
+            '{"error": "the agent surface is off; set agent.enabled to true"}'.
+            For the manual, also '{"error": "no such topic '<ref>'"}'.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+
+  /api/v1/agent/config:
+    get:
+      tags: [agent]
+      operationId: getAgentConfig
+      summary: Effective config with origin and meaning
+      security:
+        - agentBearer: []
+      description: >-
+        v1.31. Every config key with value, default, origin, type, meaning and (detail=full) advice. Secret values are masked. App keys with secret-like names are masked.
+        Checks in order: agent.enabled (404), the agent token (401), the
+        parameters (400). Needs api.enabled only; served with ui.enabled false.
+      parameters:
+        - name: parts
+          in: query
+          required: false
+          description: >-
+            Comma list of the root config sections (worker, cluster, ..., ui, agent, app). Absent: all parts. An unknown or
+            empty item answers 400 "unknown part '<p>'; known: <sorted list>".
+          schema: {type: string}
+        - name: detail
+          in: query
+          required: false
+          description: >-
+            brief (default) or full; another value answers 400. Manual: brief
+            gives key and summary, full every field. Config: advice only in
+            full. Metrics: promql and related only in full. State and
+            diagnose: no effect, the value is still validated.
+          schema: {type: string, enum: [brief, full], default: brief}
+      responses:
+        '200':
+          description: The answer.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentConfig'}
+        '400':
+          description: >-
+            A parameter is not understood; the message is in the error key.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '401':
+          description: '{"error": "agent token required"}'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '404':
+          description: >-
+            '{"error": "the agent surface is off; set agent.enabled to true"}'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+
+  /api/v1/agent/metrics:
+    get:
+      tags: [agent]
+      operationId: getAgentMetrics
+      summary: Metric values with their meaning
+      security:
+        - agentBearer: []
+      description: >-
+        v1.31. Framework and handler metrics with help, meaning, healthy range and current samples. At most 100 samples per family; samples_total is the full count.
+        Checks in order: agent.enabled (404), the agent token (401), the
+        parameters (400). Needs api.enabled only; served with ui.enabled false.
+      parameters:
+        - name: names
+          in: query
+          required: false
+          description: Comma list of metric names; unknown names are listed in `unknown`.
+          schema: {type: string}
+        - name: prefix
+          in: query
+          required: false
+          description: A metric name prefix.
+          schema: {type: string}
+        - name: detail
+          in: query
+          required: false
+          description: >-
+            brief (default) or full; another value answers 400. Manual: brief
+            gives key and summary, full every field. Config: advice only in
+            full. Metrics: promql and related only in full. State and
+            diagnose: no effect, the value is still validated.
+          schema: {type: string, enum: [brief, full], default: brief}
+      responses:
+        '200':
+          description: The answer.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentMetrics'}
+        '400':
+          description: >-
+            A parameter is not understood; the message is in the error key.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '401':
+          description: '{"error": "agent token required"}'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '404':
+          description: >-
+            '{"error": "the agent surface is off; set agent.enabled to true"}'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+
+  /api/v1/agent/state:
+    get:
+      tags: [agent]
+      operationId: getAgentState
+      summary: Live worker state snapshot
+      security:
+        - agentBearer: []
+      description: >-
+        v1.31. Health, budget, partitions, sinks, recorder, autodiscover and the last 20 failed tasks. Payload text (stderr_tail, args) only when agent.include_payloads is true.
+        Checks in order: agent.enabled (404), the agent token (401), the
+        parameters (400). Needs api.enabled only; served with ui.enabled false.
+      parameters:
+        - name: parts
+          in: query
+          required: false
+          description: >-
+            Comma list of health, budget, partitions, sinks, recorder, autodiscover, recent_failures. Absent: all parts. An unknown or
+            empty item answers 400 "unknown part '<p>'; known: <sorted list>".
+          schema: {type: string}
+        - name: detail
+          in: query
+          required: false
+          description: >-
+            brief (default) or full; another value answers 400. Manual: brief
+            gives key and summary, full every field. Config: advice only in
+            full. Metrics: promql and related only in full. State and
+            diagnose: no effect, the value is still validated.
+          schema: {type: string, enum: [brief, full], default: brief}
+      responses:
+        '200':
+          description: The answer.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentState'}
+        '400':
+          description: >-
+            A parameter is not understood; the message is in the error key.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '401':
+          description: '{"error": "agent token required"}'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '404':
+          description: >-
+            '{"error": "the agent surface is off; set agent.enabled to true"}'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+
+  /api/v1/agent/diagnose:
+    get:
+      tags: [agent]
+      operationId: getAgentDiagnose
+      summary: Rule-based findings
+      security:
+        - agentBearer: []
+      description: >-
+        v1.31. Runs every diagnose rule on one state snapshot. A rule that raises or exceeds 1 s (handler rules) is listed in failed and does not stop the others. Rules that compare with the previous call keep one in-memory baseline per worker process.
+        Checks in order: agent.enabled (404), the agent token (401), the
+        parameters (400). Needs api.enabled only; served with ui.enabled false.
+      parameters:
+        - name: detail
+          in: query
+          required: false
+          description: >-
+            brief (default) or full; another value answers 400. Manual: brief
+            gives key and summary, full every field. Config: advice only in
+            full. Metrics: promql and related only in full. State and
+            diagnose: no effect, the value is still validated.
+          schema: {type: string, enum: [brief, full], default: brief}
+      responses:
+        '200':
+          description: The answer.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AgentDiagnose'}
+        '400':
+          description: >-
+            A parameter is not understood; the message is in the error key.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '401':
+          description: '{"error": "agent token required"}'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+        '404':
+          description: >-
+            '{"error": "the agent surface is off; set agent.enabled to true"}'
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ErrorEnvelope'}
+
 components:
   securitySchemes:
+    agentBearer:
+      type: http
+      scheme: bearer
+      description: >-
+        v1.31. Only the /api/v1/agent routes. Enforced when agent.auth_token
+        is not empty; ui.auth_token and ?token= do not apply to them.
     bearerAuth:
       type: http
       scheme: bearer
@@ -3393,3 +3717,268 @@ components:
           type: array
           items: {$ref: '#/components/schemas/UIPageWidget'}
       required: [slug, title, widgets]
+
+    AgentIndex:
+      type: object
+      properties:
+        schema: {type: integer, const: 1}
+        framework:
+          type: object
+          properties:
+            backend: {type: string, enum: [python, go]}
+            version: {type: string}
+            registry_version:
+              type: string
+              description: First 16 hex characters of the SHA-256 of the canonical registry bytes.
+          required: [backend, version, registry_version]
+        worker:
+          type: object
+          properties:
+            name: {type: string}
+            cluster: {type: [string, 'null']}
+            instance: {type: string}
+          required: [name, cluster, instance]
+        capabilities: {$ref: '#/components/schemas/Capabilities'}
+        include_payloads: {type: boolean}
+        app_notes: {type: boolean}
+        routes:
+          type: array
+          items:
+            type: object
+            properties:
+              path: {type: string}
+              parts: {type: array, items: {type: string}}
+              approx_tokens:
+                type: object
+                additionalProperties: {type: integer}
+              use: {type: string}
+            required: [path, parts, approx_tokens, use]
+        start_here: {type: string}
+      required: [schema, framework, worker, capabilities, include_payloads, app_notes, routes, start_here]
+
+    AgentEntry:
+      description: >-
+        One registry entry. key and summary always; the other fields by kind
+        and only with detail=full (concepts: body, principles, related;
+        config: advice, related; metrics: meaning, healthy, promql, related;
+        events: when, fields, action, related; recipes: question, steps,
+        causes, related; routes: use, cost, related; rules: severity, title,
+        explain, suggestion, inputs). An optional field with no value is absent.
+      type: object
+      additionalProperties: true
+      properties:
+        key: {type: string}
+        summary: {type: string}
+      required: [key, summary]
+
+    AgentManual:
+      type: object
+      properties:
+        parts:
+          type: object
+          additionalProperties:
+            type: array
+            items: {$ref: '#/components/schemas/AgentEntry'}
+      required: [parts]
+
+    AgentConfigEntry:
+      type: object
+      properties:
+        path: {type: string}
+        value: {type: string, description: 'Canonical text; a secret is "***" when set and "" when empty.'}
+        default: {type: string}
+        origin: {type: string, enum: [default, yaml, env, on_startup]}
+        type: {type: string}
+        secret: {type: boolean}
+        meaning: {type: string}
+        advice: {type: string, description: detail=full only, absent when the registry has none.}
+      required: [path, value, default, origin, type, secret, meaning]
+
+    AgentConfig:
+      type: object
+      properties:
+        entries:
+          type: array
+          items: {$ref: '#/components/schemas/AgentConfigEntry'}
+      required: [entries]
+
+    AgentMetricSample:
+      type: object
+      properties:
+        labels:
+          type: object
+          additionalProperties: {type: string}
+        value: {type: number}
+        count: {type: number}
+        sum: {type: number}
+        buckets:
+          type: array
+          items:
+            type: object
+            properties:
+              le: {type: string, description: 'Upper bound in Prometheus text form, such as "0.005" or "+Inf".'}
+              count: {type: integer, description: Cumulative count.}
+            required: [le, count]
+      required: [labels]
+
+    AgentMetric:
+      type: object
+      properties:
+        name: {type: string}
+        type: {type: string}
+        help: {type: string}
+        meaning: {type: [string, 'null']}
+        healthy: {type: [string, 'null']}
+        promql:
+          type: array
+          items:
+            type: object
+            properties:
+              title: {type: string}
+              query: {type: string}
+            required: [title, query]
+        related: {type: array, items: {type: string}}
+        samples:
+          type: array
+          maxItems: 100
+          items: {$ref: '#/components/schemas/AgentMetricSample'}
+        samples_total: {type: integer}
+      required: [name, type, help, meaning, healthy, samples, samples_total]
+
+    AgentMetrics:
+      type: object
+      properties:
+        metrics:
+          type: array
+          items: {$ref: '#/components/schemas/AgentMetric'}
+        unknown:
+          type: array
+          items: {type: string}
+      required: [metrics, unknown]
+
+    AgentState:
+      description: Only the parts asked for (all when `parts` is absent).
+      type: object
+      properties:
+        health:
+          type: object
+          properties:
+            state: {type: string}
+            heartbeat_age_ms: {type: [number, 'null']}
+            current_lag_ms: {type: [number, 'null']}
+            window_peak_lag_ms: {type: [number, 'null']}
+            stalls_total: {type: integer}
+            open_episode: {type: [string, 'null']}
+            uptime_seconds: {type: number}
+          required: [state, stalls_total, uptime_seconds]
+        budget:
+          type: object
+          properties:
+            tasks: {type: integer}
+            max_tasks: {type: integer}
+            bytes: {type: integer}
+            max_bytes: {type: integer}
+            waiting_loops: {type: integer}
+            backpressure_active: {type: boolean}
+            pool_active: {type: integer}
+            pool_max: {type: integer}
+            pool_waiting: {type: integer}
+        partitions:
+          type: array
+          items:
+            type: object
+            properties:
+              partition: {type: integer}
+              queued: {type: integer}
+              pending_offsets: {type: integer}
+              committed: {type: [integer, 'null']}
+              lag: {type: [integer, 'null']}
+              paused: {type: boolean}
+              paused_by:
+                type: array
+                items: {type: string, enum: [backpressure, debug, death]}
+              dead: {type: boolean}
+            required: [partition, queued, pending_offsets, committed, lag, paused, paused_by, dead]
+        sinks:
+          type: array
+          items:
+            type: object
+            properties:
+              type: {type: string}
+              name: {type: string}
+              breaker_open: {type: boolean}
+              delivered_total: {type: integer}
+              failed_total: {type: integer}
+              last_delivery_seconds: {type: [number, 'null']}
+            required: [type, name, breaker_open, delivered_total, failed_total, last_delivery_seconds]
+        recorder:
+          type: object
+          additionalProperties: true
+          description: The `recorder` block of GET /api/v1/debug/databases (v1.30).
+        autodiscover:
+          type: object
+          properties:
+            enabled: {type: boolean}
+            provider: {type: [string, 'null']}
+            peers_online: {type: [integer, 'null']}
+            peers_offline: {type: [integer, 'null']}
+            cluster_tasks_match: {type: [boolean, 'null']}
+          required: [enabled, provider, peers_online, peers_offline, cluster_tasks_match]
+        recent_failures:
+          type: object
+          properties:
+            failures:
+              type: array
+              maxItems: 20
+              items:
+                type: object
+                properties:
+                  task_id: {type: string}
+                  ts: {type: number}
+                  partition: {type: [integer, 'null']}
+                  offset: {type: [integer, 'null']}
+                  exit_code: {type: [integer, 'null']}
+                  duration: {type: [number, 'null']}
+                  error_kind: {type: [string, 'null']}
+                  stderr_tail:
+                    type: string
+                    description: Last 2048 bytes of stderr; only with agent.include_payloads.
+                  args:
+                    type: array
+                    items: {type: string}
+                    description: Only with agent.include_payloads.
+                required: [task_id, ts, partition, offset, exit_code, duration, error_kind]
+            note:
+              type: string
+              description: '"no recorder store on this worker" when the list is empty for that reason.'
+          required: [failures]
+
+    AgentFinding:
+      type: object
+      properties:
+        rule: {type: string}
+        severity: {type: string, enum: [critical, warning, info]}
+        title: {type: string}
+        evidence: {type: object, additionalProperties: true}
+        explain: {type: string, description: A reference into the manual.}
+        suggestion: {type: string}
+      required: [rule, severity, title, evidence, explain, suggestion]
+
+    AgentDiagnose:
+      type: object
+      properties:
+        findings:
+          type: array
+          items: {$ref: '#/components/schemas/AgentFinding'}
+        checked:
+          type: array
+          items: {type: string}
+        failed:
+          type: array
+          items:
+            type: object
+            properties:
+              rule: {type: string}
+              error: {type: string}
+            required: [rule, error]
+      required: [findings, checked, failed]

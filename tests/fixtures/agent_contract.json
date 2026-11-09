@@ -837,5 +837,80 @@
     "app:concept:nope",
     "Concept:pipeline",
     "pipeline"
-  ]
+  ],
+
+  "index": {
+    "schema": 1,
+    "keys": [
+      "schema",
+      "framework",
+      "worker",
+      "capabilities",
+      "include_payloads",
+      "app_notes",
+      "routes",
+      "start_here"
+    ],
+    "framework_keys": [
+      "backend",
+      "version",
+      "registry_version"
+    ],
+    "worker_keys": [
+      "name",
+      "cluster",
+      "instance"
+    ],
+    "route_keys": [
+      "path",
+      "parts",
+      "approx_tokens",
+      "use"
+    ],
+    "routes": [
+      {
+        "path": "/api/v1/agent/manual",
+        "parts": "manual"
+      },
+      {
+        "path": "/api/v1/agent/config",
+        "parts": "config"
+      },
+      {
+        "path": "/api/v1/agent/metrics",
+        "parts": null
+      },
+      {
+        "path": "/api/v1/agent/state",
+        "parts": "state"
+      },
+      {
+        "path": "/api/v1/agent/diagnose",
+        "parts": null
+      }
+    ],
+    "whole_answer_key": "all",
+    "start_here": "Read the 'pipeline' and 'at-least-once' concepts, then call /api/v1/agent/diagnose."
+  },
+  "answers": {
+    "config_entry_keys": [
+      "path",
+      "value",
+      "default",
+      "origin",
+      "type",
+      "secret",
+      "meaning",
+      "advice"
+    ],
+    "secret_text": "***",
+    "app_secret_words": [
+      "password",
+      "secret",
+      "token",
+      "key",
+      "dsn"
+    ],
+    "max_samples": 100
+  }
 }

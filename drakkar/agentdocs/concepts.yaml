@@ -424,3 +424,5 @@
     - config:agent.auth_token
     - config:agent.include_payloads
     - rule:agent-unauthenticated
+    - route:GET /api/v1/agent
+    - route:GET /api/v1/agent/diagnose

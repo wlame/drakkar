@@ -41,6 +41,7 @@ from drakkar.config.root import (
     DrakkarConfig,
     _parse_env_overrides,
     load_config,
+    load_config_with_origins,
     load_yaml_document,
     own_storage_dir,
 )
@@ -184,6 +185,7 @@ __all__ = [
     'format_duration',
     'format_size',
     'load_config',
+    'load_config_with_origins',
     'load_yaml_document',
     'own_storage_dir',
     'parse_duration',

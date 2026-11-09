@@ -9,6 +9,7 @@ the drakkar-ui bundle through ``routes_spa``, not rendered here.
 
   * ``routes_health`` — ``/healthz`` and ``/readyz``.
   * ``routes_peer``   — ``/api/v1/peer/*``, the routes workers call on each other.
+  * ``routes_agent``  — ``/api/v1/agent*``, the read-only routes for AI agents.
   * ``routes_pages``  — WebSocket, and the top-level JSON
     APIs (dashboard, partitions, task, identity, sinks, workers,
     processors).
@@ -79,6 +80,7 @@ from drakkar.uiserver.cors import install_fanout_cors
 from drakkar.uiserver.server_helpers import (
     hook_flags,  # noqa: F401  (re-exported for tests)
     origin_allowed,  # noqa: F401  (re-exported for tests)
+    prometheus_label_filters,
     worker_group,  # noqa: F401  (re-exported for tests)
 )
 
@@ -463,31 +465,16 @@ class UIDeps:
             return {'card_links': {}, 'worker_links': [], 'cluster_links': []}
 
         rate = prometheus.rate_interval
-        metrics_port = str(drakkar_app._config.metrics.port)
-        tpl_vars = {
-            'worker_id': drakkar_app._worker_id,
-            'cluster_name': drakkar_app._cluster_name or '',
-            'metrics_port': metrics_port,
-            'debug_port': str(drakkar_app._config.api.port),
-        }
-
-        def _expand(template: str) -> str:
-            result = template
-            for key, val in tpl_vars.items():
-                result = result.replace('{' + key + '}', val)
-            return result
-
-        # Worker-scoped label filter
-        if prometheus.worker_label:
-            wf = _expand(prometheus.worker_label)
-        else:
-            import socket
-
-            hostname = socket.gethostname()
-            wf = f'instance="{hostname}:{metrics_port}"'
-
-        # Cluster-scoped label filter
-        cf = _expand(prometheus.cluster_label) if prometheus.cluster_label else ''
+        filters = prometheus_label_filters(
+            prometheus,
+            metrics_port=drakkar_app._config.metrics.port,
+            api_port=drakkar_app._config.api.port,
+            worker_id=drakkar_app._worker_id,
+            cluster_name=drakkar_app._cluster_name or '',
+        )
+        # Worker-scoped and cluster-scoped label filters.
+        wf = filters['worker']
+        cf = filters['cluster']
 
         def _graph_url(expr: str, range_input: str = '1h') -> str:
             return f'{prom_url}/graph?g0.expr={quote(expr)}&g0.tab=0&g0.range_input={range_input}'
@@ -594,11 +581,12 @@ class UIDeps:
 def create_api_app(drakkar_app: DrakkarApp) -> FastAPI:
     """Create the FastAPI application every worker with an API serves.
 
-    It holds ``/healthz``, ``/readyz`` and the peer routes, which read only
-    the worker itself: no recorder, no ``ui`` section, no bundle. Any other
-    path answers 404. :func:`create_ui_app` adds the UI to this app.
+    It holds ``/healthz``, ``/readyz``, the peer routes and the agent routes,
+    which need no ``ui`` section and no bundle. Any other path answers 404.
+    :func:`create_ui_app` adds the UI to this app.
     """
     # Local imports for the same reason as in ``create_ui_app``.
+    from drakkar.uiserver.routes_agent import create_agent_router
     from drakkar.uiserver.routes_health import create_health_router
     from drakkar.uiserver.routes_peer import create_peer_router
 
@@ -637,6 +625,7 @@ def create_api_app(drakkar_app: DrakkarApp) -> FastAPI:
 
     app.include_router(create_health_router(drakkar_app))
     app.include_router(create_peer_router(drakkar_app))
+    app.include_router(create_agent_router(drakkar_app))
     return app
 
 

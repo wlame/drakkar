@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import socket
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -295,3 +296,39 @@ def backend_version() -> str:
         from drakkar import __version__
 
         return __version__
+
+
+def prometheus_label_filters(
+    prometheus: Any,
+    *,
+    metrics_port: int,
+    api_port: int,
+    worker_id: str,
+    cluster_name: str,
+) -> dict[str, str]:
+    """The PromQL label filters of this worker and its cluster, from the ``ui.prometheus`` block.
+
+    ``worker`` is ``worker_label`` with its placeholders filled, else
+    ``instance="<host name>:<metrics port>"``. ``cluster`` is ``cluster_label``
+    filled, else ``''``. The placeholders are ``{worker_id}``,
+    ``{cluster_name}``, ``{metrics_port}`` and ``{debug_port}``.
+    """
+    values = {
+        'worker_id': worker_id,
+        'cluster_name': cluster_name,
+        'metrics_port': str(metrics_port),
+        'debug_port': str(api_port),
+    }
+
+    def expand(template: str) -> str:
+        for key, value in values.items():
+            template = template.replace('{' + key + '}', value)
+        return template
+
+    worker = (
+        expand(prometheus.worker_label)
+        if prometheus.worker_label
+        else f'instance="{socket.gethostname()}:{metrics_port}"'
+    )
+    cluster = expand(prometheus.cluster_label) if prometheus.cluster_label else ''
+    return {'worker': worker, 'cluster': cluster}

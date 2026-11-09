@@ -19,6 +19,7 @@ from drakkar.config.autodiscover import CONNECTION_PROVIDERS, FILESYSTEM_PROVIDE
 from drakkar.config.cache import CacheConfig
 from drakkar.config.connections import ConnectionsConfig, KafkaConnectionConfig
 from drakkar.config.identity import ClusterConfig, WorkerConfig
+from drakkar.config.origins import ConfigOrigins
 from drakkar.config.recorder import (
     PERSISTENCE_NONE,
     PERSISTENCE_POSTGRES,
@@ -402,8 +403,9 @@ class DrakkarConfig(BaseSettings):
         (kafka, then http). ``api`` is the port of the API server, or ``off``;
         ``ui`` says whether its UI routes are served (the ``ui.release``
         bundle-fetch settings are left out: they never affect pipeline
-        behavior). ``agent`` says whether the agent routes are served. ``storage`` is the own-files folder (``mem`` with none),
-        and ``shared`` appears only when the shared folder differs from it.
+        behavior). ``agent`` says whether the agent routes are served.
+        ``storage`` is the own-files folder (``mem`` with none), and
+        ``shared`` appears only when the shared folder differs from it.
         ``recorder`` is the durable store, or ``off``; ``autodiscover`` the
         provider, or ``off``. The cache token reads ``cache.exchange`` for
         ``s=`` and shows ``/max=<n>`` only for a bounded memory cache. ``dlq``
@@ -559,6 +561,12 @@ def load_config(config_path: str | Path | None = None) -> DrakkarConfig:
     Environment variables override YAML values. Use DK_ prefix
     with __ for nesting (e.g., DK_EXECUTOR__MAX_EXECUTORS).
     """
+    config, _ = load_config_with_origins(config_path)
+    return config
+
+
+def load_config_with_origins(config_path: str | Path | None = None) -> tuple[DrakkarConfig, ConfigOrigins]:
+    """Load the configuration like :func:`load_config`, and record which keys YAML and ``DK_`` gave."""
     if config_path is None:
         config_path = os.environ.get('DK_CONFIG')
 
@@ -583,7 +591,8 @@ def load_config(config_path: str | Path | None = None) -> DrakkarConfig:
     found = find_unknown_keys(merged, DrakkarConfig)
     if found:
         raise ValueError(unknown_keys_message(found))
-    return DrakkarConfig(_env_prefix=_NO_ENV_VARIABLE_PREFIX, **merged)
+    config = DrakkarConfig(_env_prefix=_NO_ENV_VARIABLE_PREFIX, **merged)
+    return config, ConfigOrigins.from_sources(yaml_data=yaml_data, env_overrides=env_overrides)
 
 
 def _apply_list_field_defaults(merged: dict) -> dict:

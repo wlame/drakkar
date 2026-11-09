@@ -15,6 +15,7 @@ FORMAT_MESSAGE = 'format must be json or markdown'
 NO_SUCH_TOPIC_MESSAGE = "no such topic '{ref}'"
 RULE_TIMED_OUT_MESSAGE = 'timed out after 1 s'
 NO_RECORDER_STORE_NOTE = 'no recorder store on this worker'
+START_HERE = "Read the 'pipeline' and 'at-least-once' concepts, then call /api/v1/agent/diagnose."
 
 MANUAL_PARTS = ('concepts', 'config', 'metrics', 'events', 'recipes', 'routes', 'rules', 'app')
 STATE_PARTS = ('health', 'budget', 'partitions', 'sinks', 'recorder', 'autodiscover', 'recent_failures')

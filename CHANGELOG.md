@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A new `agent` config section with `enabled`, `auth_token` and `include_payloads`. The summary line shows `agent=on` or `agent=off`. With `agent.enabled` and no token, the worker logs `agent_surface_unauthenticated`.
 - A knowledge registry in `drakkar/agentdocs/` explains the concepts, config keys, metrics, recorder events, routes, recipes and diagnose rules of the framework. Tests check that every metric, recorder event and API route has an entry.
+- The API server answers `GET /api/v1/agent` (the index), `/api/v1/agent/manual`, `/api/v1/agent/config` and `/api/v1/agent/metrics` when `agent.enabled` is true, also with the UI off. The config route shows each value with its origin (`default`, `yaml`, `env` or `on_startup`) and masks every secret.
 
 ### Fixed
 

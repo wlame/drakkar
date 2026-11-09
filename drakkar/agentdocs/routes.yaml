@@ -239,3 +239,39 @@
   cost: moderate
   related:
     - concept:cache-exchange
+- key: GET /api/v1/agent
+  summary: The index of the agent routes, with the parts of each route and the approximate size of each part.
+  use: Call it first; it names the routes, their parts and their size, so you can ask only for what you need.
+  cost: cheap
+  related:
+    - concept:agent-surface
+- key: GET /api/v1/agent/manual
+  summary: The knowledge of the framework, such as concepts, config advice, metrics, events, recipes, routes and rules.
+  use: Read one topic with topic=<kind>:<key>, or one part with parts=; brief entries give only the key and the summary.
+  cost: moderate
+  related:
+    - concept:agent-surface
+- key: GET /api/v1/agent/config
+  summary: The effective config of the worker, with the origin, the default and the meaning of each key; secrets are masked.
+  use: Check which value the worker really runs with and where the value came from.
+  cost: moderate
+  related:
+    - concept:agent-surface
+- key: GET /api/v1/agent/metrics
+  summary: The current samples of the framework and handler metrics, with the meaning of each metric.
+  use: Read the value of a metric now, with names= or prefix= to keep the answer small.
+  cost: moderate
+  related:
+    - concept:agent-surface
+- key: GET /api/v1/agent/state
+  summary: One snapshot of the live state, such as health, the pending budget, partitions, sinks, the recorder and recent failures.
+  use: See what the worker does now, with parts= to keep the answer small.
+  cost: moderate
+  related:
+    - concept:agent-surface
+- key: GET /api/v1/agent/diagnose
+  summary: The findings of the diagnose rules on one snapshot of the state and the metrics.
+  use: Call it after the index to find problems; each finding names the manual topic that explains it.
+  cost: moderate
+  related:
+    - concept:agent-surface

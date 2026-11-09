@@ -65,6 +65,7 @@ from drakkar.cluster_tasks import (
 )
 from drakkar.config.autodiscover import FILESYSTEM_PROVIDER
 from drakkar.config.recorder import PERSISTENCE_POSTGRES
+from drakkar.configmeta import dump_by_yaml_key
 from drakkar.executor import ExecutorPool
 from drakkar.fleet.providers import BUILTIN_PROVIDERS
 from drakkar.fleet.service import FleetRegistry
@@ -272,6 +273,10 @@ class AppLifecycle:
         """
         app = self._app
         before = snapshot_consumed_settings(app._config)
+        # The whole config before the hook, so the agent config route can name
+        # the keys the hook changed. A dump, so a hook that changes the config
+        # in place cannot change it too.
+        app._config_before_on_startup = dump_by_yaml_key(app._config, mode='json')
 
         bind_contextvars(hook='on_startup')
         try:

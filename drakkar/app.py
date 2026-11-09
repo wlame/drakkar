@@ -28,8 +28,9 @@ from drakkar.appconfig import load_app_config
 from drakkar.budget import PendingBudget
 from drakkar.cache import CacheEngine
 from drakkar.cluster_tasks import ClusterElection
-from drakkar.config import BUILTIN_LINK_BASES, DrakkarConfig, SinkPolicy, load_config, own_storage_dir
+from drakkar.config import BUILTIN_LINK_BASES, DrakkarConfig, SinkPolicy, load_config_with_origins, own_storage_dir
 from drakkar.config.identity import WORKER_NAME_FROM_ARGUMENT, check_worker_name, generated_worker_name
+from drakkar.config.origins import ConfigOrigins
 from drakkar.config.sinks import POLICY_KEYS, SINK_TYPES
 from drakkar.consume_pause import ConsumePauseController
 from drakkar.consumer import KafkaConsumer
@@ -208,10 +209,17 @@ class DrakkarApp:
         config: DrakkarConfig | None = None,
         worker_id: str = '',
     ) -> None:
+        # Which keys the YAML document and the ``DK_`` variables gave, for the
+        # agent config route. ``None`` for a config built in code: no file and
+        # no variable were read for it.
+        self._config_origins: ConfigOrigins | None = None
+        # The config as it was before ``on_startup`` ran, dumped by YAML key;
+        # ``None`` until the hook has run.
+        self._config_before_on_startup: dict[str, Any] | None = None
         if config is not None:
             self._config = config
         else:
-            self._config = load_config(config_path)
+            self._config, self._config_origins = load_config_with_origins(config_path)
 
         self._handler = handler
         # Fail fast when the handler cannot serve an enabled source: a

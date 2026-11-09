@@ -30,6 +30,13 @@ from tests.test_sources_validation import KafkaOnlyHandler
 UI_NEEDS_API = 'ui.enabled needs api.enabled; set ui.enabled to false, or set api.enabled to true'
 AUTODISCOVER_NEEDS_API = 'autodiscover.enabled needs api.enabled: peers reach a worker through its API'
 PEER_ROUTE = '/api/v1/peer/cache/changes'
+AGENT_ROUTES = {
+    ('GET', '/api/v1/agent'),
+    ('GET', '/api/v1/agent/manual'),
+    ('GET', '/api/v1/agent/config'),
+    ('GET', '/api/v1/agent/metrics'),
+}
+API_APP_ROUTES = {('GET', '/healthz'), ('GET', '/readyz'), ('GET', PEER_ROUTE), *AGENT_ROUTES}
 TOKEN = 'secret-token'
 CONTRACT = json.loads((Path(__file__).parent / 'fixtures' / 'config_contract.json').read_text(encoding='utf-8'))
 
@@ -107,7 +114,7 @@ def _gated_get_paths() -> list[str]:
 # --- the routes of a worker with the UI off ---
 
 
-async def test_ui_off_serves_health_ready_and_peer_only():
+async def test_ui_off_serves_health_ready_peer_and_agent_only():
     app = create_api_app(_drakkar_app(_config(ui={'enabled': False})))
 
     async with _client(app) as client:
@@ -119,7 +126,7 @@ async def test_ui_off_serves_health_ready_and_peer_only():
         for path in [*_gated_get_paths(), '/', '/ws', '/docs/', '/api-docs', '/some/page']:
             assert (await client.get(path)).status_code == 404, path
 
-    assert _app_routes(app) == {('GET', '/healthz'), ('GET', '/readyz'), ('GET', PEER_ROUTE)}
+    assert _app_routes(app) == API_APP_ROUTES
 
 
 async def test_ui_off_refuses_a_websocket():
@@ -205,7 +212,7 @@ async def test_a_ui_section_that_is_off_builds_the_api_app_only():
 
     app = await server._build_app()
 
-    assert _app_routes(app) == {('GET', '/healthz'), ('GET', '/readyz'), ('GET', PEER_ROUTE)}
+    assert _app_routes(app) == API_APP_ROUTES
 
 
 async def test_api_off_starts_no_server(monkeypatch):
@@ -233,6 +240,18 @@ async def test_ui_off_logs_no_missing_probes_warning_while_the_api_is_on(monkeyp
         await app._lifecycle._start_recorder_and_api()
 
     assert [entry for entry in logs if entry['event'] == 'ui_disabled_no_probes'] == []
+
+
+async def test_start_warns_when_the_agent_surface_has_no_token(monkeypatch):
+    monkeypatch.setattr('drakkar.uiserver.server.APIServer', MagicMock(return_value=AsyncMock()))
+    config = _config(ui={'enabled': False}, recorder={'enabled': False}, agent={'enabled': True})
+    app = DrakkarApp(handler=KafkaOnlyHandler(), config=config, worker_id='w-1')
+
+    with capture_logs() as logs:
+        await app._lifecycle._start_recorder_and_api()
+
+    (warning,) = [entry for entry in logs if entry['event'] == 'agent_surface_unauthenticated']
+    assert (warning['log_level'], warning['category']) == ('warning', 'agent')
 
 
 def test_ui_on_needs_api_with_the_message():

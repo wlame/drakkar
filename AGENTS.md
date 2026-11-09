@@ -176,9 +176,10 @@ parametrize).
 ## API server footguns
 
 - The API server (`drakkar/uiserver/`) runs on its own thread and event loop. It is
-  one listener: `/healthz`, `/readyz` and the peer route need only `api.enabled`
-  (`create_api_app`; they read no recorder), and every other route needs
-  `ui.enabled` too (`create_ui_app` adds them to that app).
+  one listener: `/healthz`, `/readyz`, the peer route and the agent routes
+  (`routes_agent.py`, behind `agent.enabled` and their own token) need only
+  `api.enabled` (`create_api_app`; they read no recorder), and every other route
+  needs `ui.enabled` too (`create_ui_app` adds them to that app).
   Every read of live worker state goes through `dispatch_to_loop(...)` to the
   main loop, plus a dedicated SQLite reader connection. Follow that pattern
   for any new endpoint.
