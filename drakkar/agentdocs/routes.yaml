@@ -1,0 +1,241 @@
+# One entry per route of the API (method and path), in the order of the API document.
+
+- key: GET /healthz
+  summary: The liveness probe of the worker.
+  use: Check that the API server of the worker answers at all.
+  cost: cheap
+- key: GET /readyz
+  summary: The readiness probe; it fails before startup ends, while a sink is not connected, or when a partition loop is dead.
+  use: Check that the worker takes work; a failure names the reason.
+  cost: cheap
+  related:
+    - recipe:partition-dead
+- key: GET /api/v1/dashboard
+  summary: The aggregates of the Dashboard page, such as throughput, lag, pool use and sink counts.
+  use: Get one overview of the worker in one call.
+  cost: moderate
+  related:
+    - concept:pipeline
+- key: GET /api/v1/identity
+  summary: The name, cluster, instance, versions and capabilities of the worker.
+  use: Learn which worker answers and which features it has on.
+  cost: cheap
+- key: GET /api/v1/partitions
+  summary: The pipeline state of each assigned partition.
+  use: Find the partition that holds the lag or the commits.
+  cost: moderate
+  related:
+    - concept:offsets
+- key: GET /api/v1/task/{task_id}
+  summary: The events and details of one task.
+  use: Read the arguments, output, exit code and timing of one task that a failure names.
+  cost: moderate
+  related:
+    - recipe:tasks-failing
+- key: GET /api/v1/sinks
+  summary: The delivery counters and breaker states of every sink.
+  use: Find the sink that fails or is slow.
+  cost: cheap
+  related:
+    - recipe:sink-failing
+- key: GET /api/v1/workers
+  summary: This worker and its peers from the registry, with their state and card age.
+  use: Check which workers of the cluster are online.
+  cost: cheap
+  related:
+    - concept:autodiscover
+- key: GET /api/v1/events
+  summary: Recorder event rows, filtered by type, partition and time.
+  use: Read recent events of one kind, such as sink_error or task_failed.
+  cost: moderate
+  related:
+    - concept:recorder
+- key: GET /api/v1/recent-tasks
+  summary: The recent tasks for the timeline of the UI.
+  use: See which tasks ran recently and how long they took.
+  cost: moderate
+- key: GET /api/v1/timeline/events
+  summary: The custom timeline events of the visible time window.
+  use: Read the handler-defined events that the timeline draws.
+  cost: moderate
+- key: GET /api/v1/live/overview
+  summary: The live overview of the worker and the runtime settings of the UI.
+  use: Get the live counts that the Live page starts from.
+  cost: cheap
+- key: POST /api/v1/live/arrange-tasks
+  summary: Looks up many tasks by id in one call.
+  use: Resolve a list of task ids to their tasks.
+  cost: moderate
+- key: GET /api/v1/live/task-results
+  summary: Recent results per task.
+  use: Read the recent task outcomes of the Live page.
+  cost: moderate
+- key: GET /api/v1/live/message-results
+  summary: Recent results per source message.
+  use: Read the recent message outcomes of the Live page.
+  cost: moderate
+- key: GET /api/v1/live/window-results
+  summary: Recent results per window.
+  use: Read the recent window outcomes of the Live page.
+  cost: moderate
+- key: POST /api/v1/live/sink-breakdown
+  summary: Which output topics the results of given offsets went to.
+  use: Find where the results of some source offsets were delivered.
+  cost: moderate
+- key: GET /api/v1/runtime/health
+  summary: The runtime health snapshot with the state, lag, stalls and lag episodes.
+  use: Read the health of the event loop with its recent episodes.
+  cost: cheap
+  related:
+    - concept:runtime-health
+- key: GET /api/v1/debug/processors
+  summary: The internal state of each partition loop, with stuck tasks.
+  use: Inspect a partition that does not move.
+  cost: moderate
+  related:
+    - recipe:partition-dead
+- key: GET /api/v1/debug/databases
+  summary: The own recorder files, the shared history, the archives, the storage and the recorder state.
+  use: See which recorder files exist and how much disk they use.
+  cost: moderate
+  related:
+    - concept:databases-view
+    - recipe:disk-filling
+- key: POST /api/v1/debug/merge
+  summary: Merges recorder files into one file.
+  use: Build one file of several recorder files for an offline look; it writes to disk.
+  cost: heavy
+- key: GET /api/v1/debug/download/{path}
+  summary: Downloads a sealed file, an archive or a merge result.
+  use: Take a recorder file for an offline look.
+  cost: heavy
+- key: GET /api/v1/debug/download-live
+  summary: Downloads a snapshot of the live recorder file, the memory store or the cache.
+  use: Take the current recorder events for an offline look.
+  cost: heavy
+- key: GET /api/v1/debug/slice
+  summary: Downloads the recorder events of one time range as one file.
+  use: Take the events of an incident without the whole history.
+  cost: heavy
+  related:
+    - concept:databases-view
+- key: GET /api/v1/debug/databases/postgres
+  summary: The hour partitions of the recorder Postgres table.
+  use: Check the size and the hours of the Postgres history.
+  cost: moderate
+- key: DELETE /api/v1/debug/files/{path}
+  summary: Deletes one merge result; it needs ui.delete_enabled.
+  use: Remove a merge result that is no longer needed. It changes the disk.
+  cost: cheap
+- key: GET /api/v1/debug/autodiscover
+  summary: The registry cards from the last refresh.
+  use: Read the cards of the peers as the provider gave them.
+  cost: cheap
+  related:
+    - concept:autodiscover
+- key: GET /api/v1/debug/autodiscover/leases
+  summary: The holder of the lease of each cluster task.
+  use: Find which worker runs a cluster task now.
+  cost: moderate
+  related:
+    - recipe:cluster-task-not-running
+- key: GET /api/v1/debug/archives
+  summary: The compressed recorder archives of the history folder.
+  use: List the archives and their sizes.
+  cost: moderate
+  related:
+    - concept:archive
+- key: GET /api/v1/debug/trace
+  summary: All events of one message, by partition and offset.
+  use: Follow one message through arrange, tasks, deliveries and commit.
+  cost: moderate
+- key: GET /api/v1/debug/label-keys
+  summary: The distinct label keys of recent tasks.
+  use: Learn which task labels exist before a trace by label.
+  cost: cheap
+- key: GET /api/v1/debug/trace-by-label
+  summary: The events of the tasks with one label value.
+  use: Follow the work of one business key, such as a customer id.
+  cost: moderate
+- key: GET /api/v1/debug/metrics
+  summary: The Prometheus metric families of the worker as JSON.
+  use: Read raw metric values; the agent metrics route adds their meaning.
+  cost: moderate
+- key: GET /api/v1/debug/periodic
+  summary: The history of the periodic task runs.
+  use: Check when a periodic task last ran and how it ended.
+  cost: moderate
+  related:
+    - concept:cluster-tasks
+- key: GET /api/v1/debug/runtime/units
+  summary: A census of the live concurrency units, grouped by where they wait.
+  use: See what the event loop carries during a slowdown.
+  cost: moderate
+  related:
+    - recipe:worker-stalled
+- key: POST /api/v1/debug/probe
+  summary: Runs one message through the handler as a dry run.
+  use: Test what the handler does with one message; it runs the tasks but writes nothing to sinks, offsets, the recorder or the cache.
+  cost: heavy
+- key: GET /api/v1/debug/cache/entries
+  summary: Pages through the cache entries.
+  use: Inspect what the cache holds.
+  cost: moderate
+- key: GET /api/v1/debug/cache/entry/{key}
+  summary: One cache entry with its decoded value.
+  use: Read one cache entry.
+  cost: cheap
+- key: GET /api/v1/debug/cache/stats
+  summary: The memory and disk numbers of the cache.
+  use: Check the size of the cache.
+  cost: cheap
+- key: GET /api/v1/debug/consume-pause
+  summary: The state of the operator consume pause.
+  use: Check whether an operator paused consuming.
+  cost: cheap
+- key: POST /api/v1/debug/consume-pause
+  summary: Pauses consuming for a bounded time.
+  use: Stop new input for a short time; it changes the worker, so only an operator should call it.
+  cost: cheap
+- key: POST /api/v1/debug/consume-resume
+  summary: Resumes consuming now.
+  use: End an operator pause; it changes the worker, so only an operator should call it.
+  cost: cheap
+  related:
+    - rule:partition-paused-by-debug
+- key: GET /api/v1/debug/kafka/topics
+  summary: The Kafka topic aliases this worker may read.
+  use: Learn the aliases before reading a message or the DLQ.
+  cost: cheap
+- key: GET /api/v1/debug/kafka/{alias}/message
+  summary: One Kafka message by partition and offset.
+  use: Read the input or a DLQ record of one message.
+  cost: moderate
+- key: GET /api/v1/debug/kafka/{alias}/messages
+  summary: The Kafka messages of one time window, streamed as lines of JSON.
+  use: Read many records, such as the recent DLQ records.
+  cost: heavy
+  related:
+    - recipe:dlq-filling
+- key: GET /api/v1/config-reference
+  summary: Every config key with its description, default and live value.
+  use: Read the config in the form of the UI; the agent config route adds origin and advice.
+  cost: moderate
+- key: GET /api/v1/pages
+  summary: The UI pages the handler declared.
+  use: List the custom pages of the deployment.
+  cost: cheap
+- key: GET /api/v1/ui/renderers.js
+  summary: The custom cell renderers module of the deployment.
+  use: Not needed by an agent; the UI loads it.
+  cost: cheap
+- key: GET /api/v1/openapi.json
+  summary: The API document as JSON.
+  use: Read the exact shapes of every route.
+  cost: heavy
+- key: GET /api/v1/peer/cache/changes
+  summary: The cache rows this worker wrote after a cursor, for its peers.
+  use: Not needed by an agent; peers call it for the cache exchange.
+  cost: moderate
+  related:
+    - concept:cache-exchange

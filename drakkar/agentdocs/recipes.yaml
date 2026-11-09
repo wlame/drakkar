@@ -1,0 +1,337 @@
+# Recipes: an operator question, the steps to answer it and the usual causes.
+
+- key: lag-growing
+  summary: Find out why the consumer lag grows and what limits the worker.
+  question: Why does the consumer lag grow?
+  steps:
+    - do: Call /api/v1/agent/state?parts=budget,partitions.
+      why: It shows the lag per partition, the pending budget and the executor pool in one answer.
+    - do: Compare rate(drakkar_messages_consumed_total) with rate(drakkar_executor_tasks_total{status="completed"}).
+      why: Input faster than output means the worker is too slow; low input means fetching is paused.
+    - do: Read drakkar_executor_pool_waiting and drakkar_executor_pool_active.
+      why: A full pool with waiting tasks means the subprocesses are the limit.
+    - do: Read drakkar_window_admission_wait_seconds_total and drakkar_backpressure_active.
+      why: Waits with an idle pool mean hooks or deliveries hold the budget.
+    - do: Look for a partition with dead true or a lag much higher than the others.
+      why: One stuck partition shows as lag on that partition only.
+  causes:
+    - cause: The executor pool is full.
+      check: pool_active equals pool_max and pool_waiting stays above 0.
+      fix: Add workers, or raise executor.max_executors when the host has free CPU.
+    - cause: Tasks became slower.
+      check: The p90 of drakkar_executor_duration_seconds rose.
+      fix: Follow the tasks-slow recipe.
+    - cause: A slow hook or sink delivery holds the pending budget.
+      check: budget.tasks is at max_tasks while the pool is not full; drakkar_sink_deliver_duration_seconds or drakkar_handler_duration_seconds is high.
+      fix: Make the hook or the sink faster, or raise executor.max_pending_tasks when memory allows.
+    - cause: One message holds the commit of its partition.
+      check: drakkar_offset_lag of one partition grows while the others commit.
+      fix: Trace the oldest pending offset of that partition with /api/v1/debug/trace.
+    - cause: A partition loop is dead.
+      check: partitions[].dead is true.
+      fix: Follow the partition-dead recipe.
+  related:
+    - concept:offsets
+    - concept:backpressure
+    - concept:pending-budget
+    - metric:drakkar_consumer_lag
+    - rule:lag-growing
+
+- key: worker-memory-high
+  summary: Find out what uses the memory of a worker container.
+  question: Why does the worker use so much memory?
+  steps:
+    - do: Read process_resident_memory_bytes and the cgroup memory.current of the container.
+      why: The container also counts the task subprocesses and the page cache, which the worker process does not hold.
+    - do: Read drakkar_pending_bytes.
+      why: It is the task stdin and output that the worker holds for pending tasks.
+    - do: Read drakkar_recorder_memory_allocated_bytes.
+      why: It is a lower bound of the memory of the recorder memory store.
+    - do: Read drakkar_cache_bytes_in_memory and drakkar_cache_entries_in_memory.
+      why: The cache keeps values in memory up to cache.max_memory_entries.
+    - do: Read drakkar_recorder_buffer_size and drakkar_recorder_file_queue_bytes.
+      why: A slow disk makes the recorder queues grow.
+  causes:
+    - cause: Large task output is kept while hooks run.
+      check: drakkar_pending_bytes is near executor.max_pending_bytes.
+      fix: Lower executor.max_pending_bytes, or cap the output with executor.max_stdout and executor.max_stderr.
+    - cause: The recorder memory store is large.
+      check: drakkar_recorder_memory_allocated_bytes is a large part of the resident memory.
+      fix: Lower recorder.memory.max_size or recorder.memory.window.
+    - cause: The task subprocesses use the memory.
+      check: The cgroup anon memory minus the worker resident memory is large.
+      fix: Lower executor.max_executors or give the container more memory.
+    - cause: The cache holds too many entries.
+      check: drakkar_cache_entries_in_memory is near cache.max_memory_entries with large values.
+      fix: Lower cache.max_memory_entries.
+  related:
+    - concept:pending-budget
+    - concept:memory-store
+    - metric:drakkar_pending_bytes
+    - metric:drakkar_suspected_oom_kills_total
+
+- key: tasks-slow
+  summary: Find out whether slow tasks come from the task binary, the host or the worker process.
+  question: Why are tasks slow?
+  steps:
+    - do: Read the p90 of drakkar_executor_duration_seconds and drakkar_executor_queue_wait_seconds.
+      why: Duration is the run of the subprocess; queue wait is the time before it.
+    - do: Read drakkar_executor_spawn_seconds and drakkar_executor_exit_notice_seconds.
+      why: Large values mean the worker process, not the binary, is slow.
+    - do: Read drakkar_host_pressure_percent, drakkar_cgroup_cpu_throttled_seconds_total and drakkar_host_effective_cpus.
+      why: CPU pressure or a CPU quota slows every subprocess.
+    - do: Compare slow tasks by their labels with drakkar_task_label_value.
+      why: Large inputs explain long runs.
+  causes:
+    - cause: The host has no free CPU.
+      check: drakkar_executor_pool_max is above drakkar_host_effective_cpus, or the CPU pressure is high.
+      fix: Lower executor.max_executors to the CPU count, or give the container more CPU.
+    - cause: The event loop is busy.
+      check: drakkar_executor_exit_notice_seconds is often above 0.1 s and the loop lag is high.
+      fix: Follow the worker-stalled recipe.
+    - cause: The inputs are larger.
+      check: drakkar_task_label_value of a size label grew.
+      fix: Split large inputs into more tasks in arrange.
+    - cause: A shared filesystem is slow.
+      check: rate(drakkar_nfs_rtt_seconds_total) over rate(drakkar_nfs_operations_total) grew.
+      fix: Check the NFS server, or move the task files to a local disk.
+  related:
+    - concept:task
+    - metric:drakkar_executor_duration_seconds
+    - metric:drakkar_executor_queue_wait_seconds
+
+- key: tasks-failing
+  summary: Find out why tasks fail and what happens to their messages.
+  question: Why do tasks fail?
+  steps:
+    - do: Call /api/v1/agent/state?parts=recent_failures.
+      why: It lists the last failed tasks with their exit code and error kind.
+    - do: Read rate(drakkar_executor_tasks_total{status="failed"}) and drakkar_executor_timeouts_total.
+      why: It tells whether failures are timeouts or exit codes.
+    - do: Read drakkar_task_retries_total and drakkar_dlq_records_total{stage="execute"}.
+      why: It tells what the on_error hook did with the failures.
+    - do: Open /api/v1/task/{task_id} for one failed task.
+      why: It shows the arguments, the stderr and the timing of the task.
+  causes:
+    - cause: The task binary is missing or not executable.
+      check: The error kind is launch_failure.
+      fix: Install the binary or set executor.binary_path.
+    - cause: Tasks run longer than the timeout.
+      check: The error kind is timeout and drakkar_executor_timeouts_total grows.
+      fix: Raise executor.task_timeout or split the work into smaller tasks.
+    - cause: The input data is bad.
+      check: The same exit code and stderr repeat for some inputs only.
+      fix: Send those messages to the DLQ from on_error and fix the producer.
+    - cause: The host kills the subprocesses.
+      check: Exit codes are negative or 137 and the container is near its memory limit.
+      fix: Lower executor.max_executors or give the container more memory.
+  related:
+    - concept:task
+    - event:task_failed
+    - metric:drakkar_executor_tasks_total
+    - config:executor.on_failure
+
+- key: dlq-filling
+  summary: Find out why messages go to the DLQ and whether any are lost.
+  question: Why do messages go to the DLQ?
+  steps:
+    - do: Read drakkar_dlq_records_total by stage.
+      why: The stage (parse, execute, sink) names the failing step.
+    - do: Read records on the DLQ topic with /api/v1/debug/kafka/dlq/messages.
+      why: The dk-error and dk-sink headers give the error text and the sink.
+    - do: Read drakkar_dlq_dropped_payloads_total and drakkar_dlq_send_failures_total.
+      why: Non-zero values mean messages were lost or the DLQ topic cannot be written.
+  causes:
+    - cause: Messages cannot be parsed.
+      check: The stage is parse and drakkar_message_parse_failures_total grows.
+      fix: Fix the producer or the input model.
+    - cause: Tasks fail and on_error sends them to the DLQ.
+      check: The stage is execute.
+      fix: Follow the tasks-failing recipe.
+    - cause: A sink fails.
+      check: The stage is sink and drakkar_sink_deliver_errors_total grows for one sink.
+      fix: Follow the sink-failing recipe.
+  related:
+    - concept:dlq
+    - metric:drakkar_sink_dlq_messages_total
+    - event:message_dlq
+    - rule:dlq-writing
+
+- key: sink-failing
+  summary: Find out why a sink fails to deliver and what happens to the results.
+  question: Why does a sink fail?
+  steps:
+    - do: Call /api/v1/agent/state?parts=sinks.
+      why: It shows the breaker state and the delivered and failed counts per sink.
+    - do: Read drakkar_sink_deliver_errors_total and drakkar_sink_circuit_trips_total per sink.
+      why: It names the failing sink and shows whether its breaker flaps.
+    - do: Read sink_error events of that sink with /api/v1/events.
+      why: The metadata holds the error text and the action taken.
+    - do: Read drakkar_provider_breaker_open and the connection of the sink in /api/v1/agent/config.
+      why: A wrong address or a down service fails every delivery.
+  causes:
+    - cause: The downstream system is down or slow.
+      check: Every delivery fails with a connection or timeout error, and the breaker opens.
+      fix: Fix the downstream system; the breaker closes by itself.
+    - cause: The payloads do not fit the target.
+      check: The errors name a column, a type or a constraint.
+      fix: Fix the result hook or the target schema.
+    - cause: The delivery timeout is too short.
+      check: drakkar_sink_deliver_duration_seconds is near the delivery_timeout of the sink.
+      fix: Raise delivery_timeout of the sink or make the target faster.
+  related:
+    - concept:sinks-and-delivery
+    - metric:drakkar_sink_deliver_errors_total
+    - event:sink_error
+    - rule:sink-breaker-open
+
+- key: worker-stalled
+  summary: Find out what blocks the event loop of a worker.
+  question: Why is the worker stalled or slow to answer?
+  steps:
+    - do: Call /api/v1/agent/state?parts=health.
+      why: It shows the state, the heartbeat age and the open lag episode.
+    - do: Read the last runtime_stall and runtime_lag_episode events.
+      why: They hold the stacks that ran during the stall and the verdict.
+    - do: Call /api/v1/debug/runtime/units.
+      why: It groups the live concurrency units by where they wait.
+  causes:
+    - cause: A hook makes a blocking call.
+      check: The verdict is blocked and the top stack is in handler code.
+      fix: Replace the call with a non-blocking one, or run it off the event loop.
+    - cause: A hook does heavy CPU work.
+      check: The verdict is cpu_bound.
+      fix: Move the work to the offload pool, or into the task subprocess.
+    - cause: The host gives the worker no CPU.
+      check: The verdict is starved and the CPU pressure or throttling is high.
+      fix: Give the container more CPU or lower executor.max_executors.
+  related:
+    - concept:runtime-health
+    - event:runtime_stall
+    - rule:worker-stalled
+    - rule:loop-lag-high
+
+- key: partition-dead
+  summary: Find out why a partition loop died and how to get the partition moving again.
+  question: Why does one partition make no progress?
+  steps:
+    - do: Call /api/v1/agent/state?parts=partitions.
+      why: It shows dead, paused and the lag per partition.
+    - do: Read drakkar_partition_processor_deaths_total by outcome.
+      why: restarted means the loop came back once; dead means it gave up.
+    - do: Read the partition_processor_died log lines.
+      why: They hold the error that ended the loop.
+    - do: Check /readyz.
+      why: A dead partition fails the readiness probe.
+  causes:
+    - cause: A hook raised an error that the framework did not contain.
+      check: The log line names a handler frame.
+      fix: Fix the handler and restart the worker; the offsets of the crashed window are processed again.
+    - cause: The partition is held by a DLQ write that failed with dlq.on_send_failure stall.
+      check: A partition_stalled event exists for the partition.
+      fix: Fix the DLQ topic; with dlq.on_send_failure stall the partition waits for it.
+  related:
+    - concept:offsets
+    - metric:drakkar_partition_processor_deaths_total
+    - rule:partition-dead
+    - route:GET /readyz
+
+- key: recorder-dropping
+  summary: Find out why the recorder drops events and how to stop the gaps.
+  question: Why does the recorder drop events?
+  steps:
+    - do: Read drakkar_recorder_dropped_events_total and drakkar_recorder_buffer_size.
+      why: A full queue drops the oldest events.
+    - do: Read the p99 of drakkar_recorder_flush_duration_seconds.
+      why: Flushes slower than recorder.flush_interval mean the disk is slow.
+    - do: With provider postgres, read drakkar_recorder_postgres_dropped_rows_total by reason and drakkar_provider_breaker_open{feature="recorder"}.
+      why: queue_full means the table is not reached in time.
+  causes:
+    - cause: The disk of storage.dir is slow or full.
+      check: drakkar_storage_free_bytes is low or flushes are slow.
+      fix: Free disk space or move storage.dir to a faster disk.
+    - cause: The event volume is larger than the queue.
+      check: The buffer stays near recorder.max_buffer_rows.
+      fix: Raise recorder.max_buffer_rows, or record less with recorder.capture.
+    - cause: The Postgres table cannot be written.
+      check: The provider breaker of the recorder is open.
+      fix: Fix the database; rows that waited in the queue are written when it comes back.
+  related:
+    - concept:recorder
+    - metric:drakkar_recorder_dropped_events_total
+    - rule:recorder-dropping
+
+- key: peer-missing
+  summary: Find out why a peer is missing or offline in the registry.
+  question: Why does a worker not see one of its peers?
+  steps:
+    - do: Call /api/v1/agent/state?parts=autodiscover.
+      why: It counts the online and offline peers.
+    - do: Call /api/v1/workers.
+      why: It lists the peers with their state and the age of their card.
+    - do: Read drakkar_provider_breaker_open{feature="registry"} and drakkar_fleet_registry_snapshot_age_seconds.
+      why: A provider that does not answer keeps an old peer list.
+  causes:
+    - cause: The peer is down.
+      check: The card age of the peer grows past autodiscover.offline_after.
+      fix: Restart the peer; its card is removed after autodiscover.prune_after.
+    - cause: The peer uses another cluster name or provider.
+      check: The cluster name in its card differs, or the peer is not listed at all.
+      fix: Use one cluster name and one autodiscover provider for the whole cluster.
+    - cause: The provider does not answer.
+      check: The registry breaker is open.
+      fix: Fix the provider service or its connection.
+  related:
+    - concept:autodiscover
+    - metric:drakkar_fleet_peers
+    - rule:peers-offline
+
+- key: cluster-task-not-running
+  summary: Find out why a cluster task does not run at its slots.
+  question: Why does a cluster task not run?
+  steps:
+    - do: Read drakkar_periodic_cluster_slots_total by name and outcome on every worker.
+      why: Each slot should count won on one worker and held_elsewhere on the others.
+    - do: Call /api/v1/debug/autodiscover/leases.
+      why: It shows which worker holds the lease of each cluster task.
+    - do: Read drakkar_periodic_task_runs_total{status="error"}.
+      why: A run that won the slot can still fail.
+  causes:
+    - cause: The election provider does not answer.
+      check: The outcome election_failed grows.
+      fix: Fix the autodiscover provider.
+    - cause: The worker was blocked through the acquire window.
+      check: The outcome late grows.
+      fix: Follow the worker-stalled recipe.
+    - cause: The workers declare different tasks.
+      check: drakkar_periodic_cluster_mismatch_peers is above 0.
+      fix: Deploy the same task definitions on every worker of the cluster.
+  related:
+    - concept:cluster-tasks
+    - metric:drakkar_periodic_cluster_slots_total
+    - rule:cluster-tasks-mismatch
+
+- key: disk-filling
+  summary: Find out which files fill the disk of a worker or of the shared folder.
+  question: Why does the disk fill up?
+  steps:
+    - do: Read drakkar_storage_free_bytes.
+      why: It is the free space of the filesystem that holds storage.dir.
+    - do: Call /api/v1/debug/databases.
+      why: It lists the own files, the history files, the archives and the merge results with their sizes.
+    - do: Read drakkar_recorder_archive_bytes and drakkar_recorder_unsealed_files.
+      why: Archives grow without a retention, and unsealed files stay in the own folder.
+  causes:
+    - cause: Archives are kept for ever.
+      check: recorder.archive.retention is 0, or drakkar_recorder_archive_bytes grows steadily.
+      fix: Set recorder.archive.retention.
+    - cause: Sealed files are not archived.
+      check: The history folder holds many sealed files older than recorder.archive.due_after.
+      fix: Check drakkar_recorder_archive_failures_total and the archive lease.
+    - cause: Task output is recorded.
+      check: recorder.capture.output is true and tasks write large output.
+      fix: Raise recorder.capture.min_output_duration or turn off recorder.capture.output.
+  related:
+    - concept:archive
+    - concept:own-folder
+    - metric:drakkar_storage_free_bytes

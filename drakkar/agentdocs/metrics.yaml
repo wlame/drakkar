@@ -1,0 +1,1113 @@
+# One entry per framework metric, under the name Prometheus shows (counters end in _total).
+# PromQL texts use {{worker}} and {{cluster}}: label filters of one worker or of the cluster.
+
+# --- identity, messages and partitions ---
+
+- key: drakkar_worker_info
+  summary: The identity of the worker, with the labels worker_id, version and consumer_group.
+  meaning: Join other metrics with it to read the version of each worker; consumer_group is empty on a worker without the Kafka source.
+  healthy: none
+  promql:
+    - title: Versions in the cluster
+      query: 'count by (version) (drakkar_worker_info{ {{cluster}} })'
+
+- key: drakkar_messages_consumed_total
+  summary: Messages read from the Kafka source topic, per partition.
+  meaning: The input rate of the worker; compare it with the completed task rate to see whether the worker keeps up.
+  healthy: A rate close to the produce rate of the topic.
+  promql:
+    - title: Input rate of this worker
+      query: 'sum(rate(drakkar_messages_consumed_total{ {{worker}} }[5m]))'
+  related:
+    - concept:pipeline
+    - recipe:lag-growing
+
+- key: drakkar_message_parse_failures_total
+  summary: Source messages whose value failed the input model of the handler, per partition.
+  meaning: The producer sends data the handler cannot read; sources.kafka.on_parse_error decides what happens to them.
+  healthy: 0; any rate means bad input.
+  promql:
+    - title: Parse failures per second
+      query: 'sum(rate(drakkar_message_parse_failures_total{ {{worker}} }[5m]))'
+  related:
+    - concept:dlq
+
+- key: drakkar_delivery_stalled_offsets_total
+  summary: Offsets left uncommitted because neither the delivery nor the DLQ record could be confirmed.
+  meaning: The watermark of the partition is stuck; the messages are processed again after a restart or rebalance.
+  healthy: 0; alert on any increase.
+  promql:
+    - title: Stalled offsets in the last hour
+      query: 'sum(increase(drakkar_delivery_stalled_offsets_total{ {{worker}} }[1h]))'
+  related:
+    - concept:dlq
+    - event:partition_stalled
+
+- key: drakkar_suppressed_zombie_deliveries_total
+  summary: Deliveries dropped because their task finished after the drain of its partition timed out.
+  meaning: The next owner of the partition processes these messages again; a steady rate means executor.drain_timeout is too short.
+  healthy: 0, or rare increases at deploys.
+  related:
+    - concept:at-least-once
+    - config:executor.drain_timeout
+
+- key: drakkar_messages_unassigned_dropped_total
+  summary: Messages polled for a partition that had no loop because a revoke raced the poll.
+  meaning: The next owner reads them again; the counter only shows that the race happened.
+  healthy: none
+  related:
+    - concept:at-least-once
+
+- key: drakkar_partition_queue_size
+  summary: Messages that wait in the queue of each partition loop.
+  meaning: Messages polled and not yet in a window; a growing queue means the partition cannot take windows fast enough.
+  healthy: Below sources.kafka.max_queued_messages; zero most of the time on an idle worker.
+  promql:
+    - title: Queue size per partition
+      query: 'sum by (partition) (drakkar_partition_queue_size{ {{worker}} })'
+  related:
+    - concept:backpressure
+
+- key: drakkar_offset_lag
+  summary: Pending offsets of this worker per partition, taken and not yet committed.
+  meaning: The work in flight of the worker; it is not the broker lag.
+  healthy: Stable values; a value that only grows on one partition points at a stuck message.
+  promql:
+    - title: Pending offsets per partition
+      query: 'sum by (partition) (drakkar_offset_lag{ {{worker}} })'
+  related:
+    - concept:offsets
+
+- key: drakkar_consumer_lag
+  summary: Broker lag per partition, the high watermark minus the offset this worker committed.
+  meaning: How far the worker is behind the topic; the lag of the whole group is the sum over its workers.
+  healthy: Small and not growing; a growing value means input is faster than processing.
+  promql:
+    - title: Lag of this worker
+      query: 'sum(drakkar_consumer_lag{ {{worker}} })'
+    - title: Lag of the cluster
+      query: 'sum(drakkar_consumer_lag{ {{cluster}} })'
+  related:
+    - concept:offsets
+    - recipe:lag-growing
+    - rule:lag-growing
+
+- key: drakkar_partition_processor_deaths_total
+  summary: Partition loops that ended on an unexpected error, with outcome restarted or dead.
+  meaning: A dead loop makes no progress and fails the readiness probe.
+  healthy: 0; alert on any increase.
+  promql:
+    - title: Dead partition loops
+      query: 'sum(drakkar_partition_processor_deaths_total{outcome="dead", {{worker}} })'
+  related:
+    - recipe:partition-dead
+    - rule:partition-dead
+
+- key: drakkar_backpressure_active
+  summary: 1 while Kafka fetching is paused because the partition queues are full.
+  meaning: The worker slows its input on purpose; it is normal under load.
+  healthy: Flips between 0 and 1 under load; 1 all the time means the worker is the limit.
+  promql:
+    - title: Share of time with backpressure
+      query: 'avg_over_time(drakkar_backpressure_active{ {{worker}} }[15m])'
+  related:
+    - concept:backpressure
+
+- key: drakkar_consume_pause_active
+  summary: 1 while an operator debug pause holds consuming.
+  meaning: Somebody paused the worker from the UI; it takes no new input until the pause ends.
+  healthy: 0 outside of debugging.
+  related:
+    - rule:partition-paused-by-debug
+
+- key: drakkar_total_queued
+  summary: Messages in all partition queues plus tasks in flight.
+  meaning: The total work held by the worker.
+  healthy: Stable under a steady load.
+  related:
+    - concept:backpressure
+
+- key: drakkar_pending_tasks
+  summary: Tasks created and not yet settled, the task count of the pending budget.
+  meaning: At executor.max_pending_tasks new windows wait; it can pass the limit by the fan-out of one window.
+  healthy: Below executor.max_pending_tasks most of the time.
+  promql:
+    - title: Use of the task budget
+      query: 'drakkar_pending_tasks{ {{worker}} }'
+  related:
+    - concept:pending-budget
+    - rule:budget-saturated
+
+- key: drakkar_pending_bytes
+  summary: Bytes held for pending tasks and their results, the byte count of the pending budget.
+  meaning: Task stdin plus kept output; it is the main memory use of the pipeline.
+  healthy: Below executor.max_pending_bytes.
+  promql:
+    - title: Pending bytes
+      query: 'drakkar_pending_bytes{ {{worker}} }'
+  related:
+    - concept:pending-budget
+    - recipe:worker-memory-high
+
+- key: drakkar_window_admission_wait_seconds_total
+  summary: Seconds partition loops waited for room in the pending budget, by limit (tasks or bytes).
+  meaning: The time the budget held the input; the label names the limit that bound.
+  healthy: Low; a rate near the partition count means the loops wait most of the time.
+  promql:
+    - title: Waiting loops on average
+      query: 'sum by (limit) (rate(drakkar_window_admission_wait_seconds_total{ {{worker}} }[5m]))'
+  related:
+    - concept:pending-budget
+
+- key: drakkar_window_messages
+  summary: Messages taken into one arrange window.
+  meaning: Small windows under load mean the budget is nearly full.
+  healthy: none
+  promql:
+    - title: Average window size
+      query: 'rate(drakkar_window_messages_sum{ {{worker}} }[5m]) / rate(drakkar_window_messages_count{ {{worker}} }[5m])'
+  related:
+    - concept:window
+
+- key: drakkar_queued_messages_dropped_at_stop_total
+  summary: Polled messages left out of a window at a stop or revoke.
+  meaning: Their offsets were never registered, so the next owner reads them again; no data is lost.
+  healthy: none
+  related:
+    - concept:at-least-once
+
+- key: drakkar_assigned_partitions
+  summary: The number of partitions assigned to this worker.
+  meaning: The share of the topic this worker processes.
+  healthy: About the partition count divided by the worker count.
+  promql:
+    - title: Partitions per worker
+      query: 'drakkar_assigned_partitions{ {{cluster}} }'
+
+- key: drakkar_executor_idle_slot_seconds_total
+  summary: Slot-seconds of idle executor slots while messages wait in queues.
+  meaning: The pool had room and the input was there, but no task was ready; arrange, hooks or the budget are the limit.
+  healthy: Near 0 under load.
+  related:
+    - concept:pending-budget
+
+- key: drakkar_consumer_idle_seconds_total
+  summary: Seconds with no message from Kafka and nothing in the queues.
+  meaning: Time the worker had nothing to do.
+  healthy: none
+  related:
+    - concept:pipeline
+
+- key: drakkar_consumer_errors_total
+  summary: Errors returned by the Kafka poll.
+  meaning: Broker or network problems seen by the consumer.
+  healthy: 0 or rare.
+  related:
+    - concept:pipeline
+
+- key: drakkar_offsets_committed_total
+  summary: Offset commits per partition.
+  meaning: A partition with input and no commits has a stuck watermark.
+  healthy: A steady rate on every partition with input.
+  promql:
+    - title: Commits per partition
+      query: 'sum by (partition) (rate(drakkar_offsets_committed_total{ {{worker}} }[5m]))'
+  related:
+    - concept:offsets
+
+- key: drakkar_rebalance_events_total
+  summary: Kafka rebalance events, by type assign or revoke.
+  meaning: Each rebalance drains partitions and can process messages again.
+  healthy: Increases only at deploys and scaling.
+  related:
+    - event:revoked
+
+# --- executor ---
+
+- key: drakkar_executor_tasks_total
+  summary: Executor tasks by status (started, completed, failed).
+  meaning: The output rate and the failure rate of the worker.
+  healthy: Few failures compared with completions.
+  promql:
+    - title: Completed tasks per second
+      query: 'sum(rate(drakkar_executor_tasks_total{status="completed", {{worker}} }[5m]))'
+    - title: Failure ratio
+      query: 'sum(rate(drakkar_executor_tasks_total{status="failed", {{worker}} }[5m])) / sum(rate(drakkar_executor_tasks_total{status="started", {{worker}} }[5m]))'
+  related:
+    - concept:task
+    - recipe:tasks-failing
+
+- key: drakkar_executor_duration_seconds
+  summary: The run time of task subprocesses, from spawn to exit.
+  meaning: The work time of the task binary, measured off the event loop.
+  healthy: Stable percentiles; compare them with executor.task_timeout.
+  promql:
+    - title: p90 task duration
+      query: 'histogram_quantile(0.9, sum by (le) (rate(drakkar_executor_duration_seconds_bucket{ {{worker}} }[5m])))'
+  related:
+    - recipe:tasks-slow
+
+- key: drakkar_executor_exit_notice_seconds
+  summary: Time from a task exit to the moment the worker handled it.
+  meaning: It measures the event loop, not the task; large values mean the loop was busy.
+  healthy: Mostly 0 and below 0.01 s.
+  promql:
+    - title: Share of exits handled more than 100 ms late
+      query: '1 - sum(rate(drakkar_executor_exit_notice_seconds_bucket{le="0.1", {{worker}} }[5m])) / sum(rate(drakkar_executor_exit_notice_seconds_count{ {{worker}} }[5m]))'
+  related:
+    - concept:runtime-health
+
+- key: drakkar_executor_exit_watch_fallbacks_total
+  summary: Task runs timed on the event loop instead of by the exit watcher, by reason.
+  meaning: exited_before_watch points at a busy loop, unavailable at the host, descendant_held_pipes at background processes of the task.
+  healthy: 0 or a low rate.
+  related:
+    - concept:task
+
+- key: drakkar_executor_queue_wait_seconds
+  summary: Time a task waited for a free executor slot.
+  meaning: Long waits with a full pool mean the pool or the CPU is the limit; long waits with an idle pool mean the worker process is slow.
+  healthy: Low compared with the task duration.
+  promql:
+    - title: p90 queue wait
+      query: 'histogram_quantile(0.9, sum by (le) (rate(drakkar_executor_queue_wait_seconds_bucket{ {{worker}} }[5m])))'
+  related:
+    - recipe:tasks-slow
+
+- key: drakkar_executor_spawn_seconds
+  summary: Time to start a task subprocess.
+  meaning: Spawn close to the task duration means the worker process, not the task binary, is the limit.
+  healthy: A few milliseconds.
+  related:
+    - recipe:tasks-slow
+
+- key: drakkar_executor_pool_max
+  summary: The configured size of the executor pool, executor.max_executors.
+  meaning: The upper bound of drakkar_executor_pool_active.
+  healthy: none
+  related:
+    - config:executor.max_executors
+
+- key: drakkar_executor_pool_active
+  summary: Task subprocesses that run now.
+  meaning: Equal to the pool size means every slot is busy.
+  healthy: none
+  promql:
+    - title: Pool use
+      query: 'drakkar_executor_pool_active{ {{worker}} } / drakkar_executor_pool_max{ {{worker}} }'
+  related:
+    - rule:pool-saturated
+
+- key: drakkar_executor_pool_waiting
+  summary: Tasks that wait for a free executor slot.
+  meaning: Values above 0 for a long time mean executor.max_executors limits the worker.
+  healthy: 0 or short peaks.
+  related:
+    - rule:pool-saturated
+    - config:executor.max_executors
+
+- key: drakkar_executor_timeouts_total
+  summary: Tasks killed because they ran longer than executor.task_timeout.
+  meaning: Each timeout is a failure that on_error handles.
+  healthy: 0 or rare.
+  related:
+    - config:executor.task_timeout
+    - recipe:tasks-failing
+
+- key: drakkar_executor_output_truncated_total
+  summary: Task output streams cut to executor.max_stdout or executor.max_stderr, by stream.
+  meaning: Result hooks saw only the start of the output.
+  healthy: 0 unless the caps are set on purpose.
+  related:
+    - config:executor.max_stdout
+
+- key: drakkar_executor_priority_fn_errors_total
+  summary: Times the task priority hook of the handler raised.
+  meaning: The task got the default priority; it still ran.
+  healthy: 0; any rate is a handler bug.
+  related:
+    - concept:task
+
+- key: drakkar_task_retries_total
+  summary: Failed tasks that on_error retried.
+  meaning: Retries run at once and use executor slots.
+  healthy: Low compared with completed tasks.
+  related:
+    - config:executor.max_retries
+
+- key: drakkar_tasks_precomputed_total
+  summary: Tasks whose result the handler supplied, so no subprocess ran.
+  meaning: The share of work served from a cache or a lookup.
+  healthy: none
+  related:
+    - concept:task
+
+- key: drakkar_host_effective_cpus
+  summary: CPUs the worker process can use, the affinity mask capped by the cgroup quota.
+  meaning: An executor pool larger than this makes CPU-bound tasks share cores.
+  healthy: none
+  related:
+    - config:executor.max_executors
+
+- key: drakkar_task_label_value
+  summary: Numeric values of the task labels named in metrics.task_label_histograms, by label.
+  meaning: The size of the inputs of tasks, such as bytes or line counts, to explain task duration.
+  healthy: none
+  promql:
+    - title: p90 of one label
+      query: 'histogram_quantile(0.9, sum by (le, label) (rate(drakkar_task_label_value_bucket{ {{worker}} }[5m])))'
+
+- key: drakkar_batch_duration_seconds
+  summary: The time of one window, from arrange to the end of its last task.
+  meaning: Long windows hold the commits of their partition.
+  healthy: none
+  related:
+    - concept:window
+
+- key: drakkar_handler_duration_seconds
+  summary: The time of each handler hook, by hook.
+  meaning: Hooks run on the event loop; a slow hook slows every partition.
+  healthy: Milliseconds for each hook.
+  promql:
+    - title: p90 per hook
+      query: 'histogram_quantile(0.9, sum by (le, hook) (rate(drakkar_handler_duration_seconds_bucket{ {{worker}} }[5m])))'
+  related:
+    - concept:arrange
+
+- key: drakkar_handler_hook_errors_total
+  summary: Handler hooks that raised instead of returning, by hook.
+  meaning: The framework keeps the partition moving, so this counter is the only sign of a broken hook.
+  healthy: 0; alert on any rate.
+  related:
+    - concept:pipeline
+
+# --- sinks and DLQ ---
+
+- key: drakkar_sink_deliver_duration_seconds
+  summary: The time of one delivery to a sink, by sink type and name.
+  meaning: A slow sink holds the pending budget.
+  healthy: Well below the delivery_timeout of the sink.
+  promql:
+    - title: p90 delivery time per sink
+      query: 'histogram_quantile(0.9, sum by (le, sink_type, sink_name) (rate(drakkar_sink_deliver_duration_seconds_bucket{ {{worker}} }[5m])))'
+  related:
+    - recipe:sink-failing
+
+- key: drakkar_sink_deliver_errors_total
+  summary: Failed deliveries per sink.
+  meaning: Each failure retries or ends in the on_failure policy of the sink.
+  healthy: 0 or rare.
+  promql:
+    - title: Failures per sink
+      query: 'sum by (sink_type, sink_name) (rate(drakkar_sink_deliver_errors_total{ {{worker}} }[5m]))'
+  related:
+    - recipe:sink-failing
+
+- key: drakkar_sink_payloads_delivered_total
+  summary: Payloads delivered per sink.
+  meaning: The output rate per sink.
+  healthy: none
+  promql:
+    - title: Payloads per second per sink
+      query: 'sum by (sink_type, sink_name) (rate(drakkar_sink_payloads_delivered_total{ {{worker}} }[5m]))'
+
+- key: drakkar_sink_batch_fallbacks_total
+  summary: Batched sink statements that failed and were sent again one payload at a time.
+  meaning: Delivery stays correct but slower; a steady rate means batching does not work for that sink.
+  healthy: 0 or rare.
+  related:
+    - concept:sinks-and-delivery
+
+- key: drakkar_sink_delivery_retries_total
+  summary: Delivery retries per sink.
+  meaning: Retries spend the max_retries budget of the sink.
+  healthy: Low.
+  related:
+    - concept:sinks-and-delivery
+
+- key: drakkar_sink_deliveries_skipped_total
+  summary: Deliveries skipped by the handler, by the skip policy, on an open circuit, or for a window result.
+  meaning: Skipped payloads are not written anywhere.
+  healthy: 0 unless skip is the chosen policy.
+  related:
+    - concept:sinks-and-delivery
+
+- key: drakkar_sink_deliveries_not_started_total
+  summary: Deliveries not started because the message is on the DLQ or a dependency failed, by reason.
+  meaning: The result of the message did not reach that sink.
+  healthy: Follows the DLQ rate.
+  related:
+    - event:sink_not_started
+
+- key: drakkar_sink_dlq_messages_total
+  summary: DLQ records written, one per source message, all stages.
+  meaning: Messages that need an operator.
+  healthy: 0 or a known low rate.
+  promql:
+    - title: DLQ records per minute
+      query: 'sum(rate(drakkar_sink_dlq_messages_total{ {{worker}} }[5m])) * 60'
+  related:
+    - concept:dlq
+    - rule:dlq-writing
+
+- key: drakkar_dlq_records_total
+  summary: DLQ records by the stage that failed (parse, execute, sink).
+  meaning: The stage names the step to investigate.
+  healthy: 0 or a known low rate.
+  promql:
+    - title: DLQ records by stage
+      query: 'sum by (stage) (rate(drakkar_dlq_records_total{ {{worker}} }[5m]))'
+  related:
+    - recipe:dlq-filling
+
+- key: drakkar_dlq_send_failures_total
+  summary: Failed attempts to write a DLQ record.
+  meaning: With dlq.on_send_failure drop messages are lost; with stall the partition stops.
+  healthy: 0; alert on any rate.
+  related:
+    - config:dlq.on_send_failure
+
+- key: drakkar_dlq_unconfigured_drops_total
+  summary: Payloads or source messages dropped because no DLQ topic is configured.
+  meaning: A worker without the Kafka source needs dlq.topic to keep failures.
+  healthy: The value stays 0.
+  related:
+    - config:dlq.topic
+
+- key: drakkar_dlq_dropped_payloads_total
+  summary: Source messages lost because no DLQ record could be written and dlq.on_send_failure is drop.
+  meaning: The offsets were committed; these messages are gone.
+  healthy: 0; alert on any increase.
+  related:
+    - concept:dlq
+
+- key: drakkar_sink_circuit_open
+  summary: The circuit breaker state of each sink, 0 closed, 0.5 half open, 1 open.
+  meaning: An open circuit sends deliveries straight to the on_failure policy.
+  healthy: The value stays 0.
+  promql:
+    - title: Open sink circuits
+      query: 'drakkar_sink_circuit_open{ {{worker}} } == 1'
+  related:
+    - rule:sink-breaker-open
+
+- key: drakkar_sink_circuit_trips_total
+  summary: Transitions of a sink circuit into the open state.
+  meaning: A rising rate means the circuit flaps.
+  healthy: The value stays 0.
+  related:
+    - rule:sink-breaker-open
+
+# --- periodic tasks and offload ---
+
+- key: drakkar_periodic_task_runs_total
+  summary: Periodic task runs by name and status (ok, error).
+  meaning: System tasks such as cache.flush and history.archive are included.
+  healthy: No error status.
+  promql:
+    - title: Failed periodic runs
+      query: 'sum by (name) (increase(drakkar_periodic_task_runs_total{status="error", {{worker}} }[1h]))'
+  related:
+    - event:periodic_run
+
+- key: drakkar_periodic_task_duration_seconds
+  summary: The duration of periodic task runs, by name.
+  meaning: A run longer than its interval delays the next run.
+  healthy: Below the interval of the task.
+  related:
+    - concept:cluster-tasks
+
+- key: drakkar_periodic_cluster_slots_total
+  summary: Cluster task slots by name and outcome (won, held_elsewhere, late, election_failed).
+  meaning: In a healthy cluster each slot counts won on one worker and held_elsewhere on the others.
+  healthy: No late and no election_failed.
+  promql:
+    - title: Slots won in the cluster
+      query: 'sum by (name) (increase(drakkar_periodic_cluster_slots_total{outcome="won", {{cluster}} }[1h]))'
+  related:
+    - recipe:cluster-task-not-running
+
+- key: drakkar_periodic_cluster_mismatch_peers
+  summary: Online peers of this cluster whose cluster task definitions differ.
+  meaning: A rolling change is not finished, or workers run other code.
+  healthy: 0 outside of deploys.
+  related:
+    - rule:cluster-tasks-mismatch
+
+- key: drakkar_offload_running
+  summary: Offloaded computations that run now.
+  meaning: The use of the offload thread pool.
+  healthy: none
+  related:
+    - config:threads.offload
+
+- key: drakkar_offload_queued
+  summary: Offloaded computations that wait for a free thread.
+  meaning: Values above 0 for a long time mean threads.offload is too small.
+  healthy: 0 or short peaks.
+  related:
+    - config:threads.offload
+
+- key: drakkar_offload_duration_seconds
+  summary: The run time of offloaded computations, by hook.
+  meaning: The CPU work that hooks moved off the event loop.
+  healthy: none
+
+# --- runtime health, host and process ---
+
+- key: drakkar_loop_lag_seconds
+  summary: The event loop lag of each heartbeat tick.
+  meaning: How late every coroutine of the worker runs.
+  healthy: Most ticks below runtime_health.warn_lag.
+  promql:
+    - title: p99 loop lag
+      query: 'histogram_quantile(0.99, sum by (le) (rate(drakkar_loop_lag_seconds_bucket{ {{worker}} }[5m])))'
+  related:
+    - concept:runtime-health
+
+- key: drakkar_loop_lag_peak_seconds
+  summary: The largest lag of one heartbeat tick in the last 60 seconds.
+  meaning: Compare it with runtime_health.warn_lag and runtime_health.stall.
+  healthy: Below runtime_health.warn_lag.
+  related:
+    - rule:loop-lag-high
+
+- key: drakkar_runtime_health_state
+  summary: The runtime health state, 0 healthy, 1 degraded, 2 stalled.
+  meaning: Read at scrape time, so a stall shows even while the loop does not run.
+  healthy: The value stays 0.
+  promql:
+    - title: Workers not healthy
+      query: 'drakkar_runtime_health_state{ {{cluster}} } > 0'
+  related:
+    - rule:worker-stalled
+
+- key: drakkar_runtime_heartbeat_age_seconds
+  summary: Seconds since the last heartbeat of the runtime health monitor.
+  meaning: At or above runtime_health.stall the loop is stalled now.
+  healthy: Below runtime_health.tick plus a little.
+  related:
+    - concept:runtime-health
+
+- key: drakkar_runtime_stalls_total
+  summary: Stalls of the event loop longer than runtime_health.stall.
+  meaning: Each stall has its stacks in a runtime_stall event.
+  healthy: The value stays 0.
+  related:
+    - event:runtime_stall
+
+- key: drakkar_runtime_lag_episodes_total
+  summary: Lag episodes that ended, by verdict (blocked, cpu_bound, starved, inconclusive).
+  meaning: The verdict tells whether code or the host caused the lag.
+  healthy: Rare.
+  related:
+    - event:runtime_lag_episode
+
+- key: drakkar_host_load
+  summary: The load average of the host, by period 1m and 5m.
+  meaning: Runnable and waiting tasks of the whole host, not only this worker.
+  healthy: Below the CPU count of the host.
+
+- key: drakkar_host_pressure_percent
+  summary: Kernel pressure stall information by resource (cpu, io, memory) and kind (some, full).
+  meaning: The share of time tasks waited for the resource.
+  healthy: Low single digits.
+  related:
+    - recipe:tasks-slow
+
+- key: drakkar_cgroup_cpu_throttled_periods_total
+  summary: Periods in which the cgroup CPU quota descheduled the container.
+  meaning: The container hits its CPU limit.
+  healthy: 0 or a low rate.
+  related:
+    - recipe:tasks-slow
+
+- key: drakkar_cgroup_cpu_throttled_seconds_total
+  summary: Time the cgroup CPU quota kept the container descheduled.
+  meaning: A rate near the CPU count of the quota means the container is CPU-capped.
+  healthy: 0 or a low rate.
+  related:
+    - recipe:tasks-slow
+
+- key: drakkar_nfs_operations_total
+  summary: NFS operations on each mount, by every process of the host.
+  meaning: The divisor of the average NFS round trip.
+  healthy: none
+
+- key: drakkar_nfs_rtt_seconds_total
+  summary: Total server round-trip time of the NFS operations on each mount.
+  meaning: Divided by the operation rate it gives the average round trip.
+  healthy: A few milliseconds per operation.
+  promql:
+    - title: Average NFS round trip
+      query: 'rate(drakkar_nfs_rtt_seconds_total{ {{worker}} }[5m]) / rate(drakkar_nfs_operations_total{ {{worker}} }[5m])'
+
+- key: drakkar_nfs_retransmits_total
+  summary: NFS requests sent again because the server did not answer in time.
+  meaning: The NFS server or the network is overloaded.
+  healthy: The value stays 0.
+
+- key: drakkar_process_threads
+  summary: Threads of the worker process.
+  meaning: A count that only grows points at a thread leak.
+  healthy: Stable.
+
+- key: drakkar_children_cpu_seconds_total
+  summary: CPU time of the task subprocesses that ended.
+  meaning: The CPU the tasks used; read it as a rate over a few minutes.
+  healthy: none
+
+- key: drakkar_storage_free_bytes
+  summary: Bytes free on the filesystem that holds storage.dir.
+  meaning: Recorder and cache files need this space.
+  healthy: Above a few rotations of recorder files.
+  related:
+    - recipe:disk-filling
+
+# --- recorder ---
+
+- key: drakkar_recorder_buffer_size
+  summary: Events in the recorder intake plus rows in its file queue.
+  meaning: A value near recorder.max_buffer_rows means the recorder cannot keep up.
+  healthy: Near 0.
+  related:
+    - recipe:recorder-dropping
+
+- key: drakkar_recorder_dropped_events_total
+  summary: Recorder rows dropped because a queue was full.
+  meaning: The event history has gaps; the processing is not affected.
+  healthy: The value stays 0.
+  promql:
+    - title: Dropped events in the last hour
+      query: 'increase(drakkar_recorder_dropped_events_total{ {{worker}} }[1h])'
+  related:
+    - rule:recorder-dropping
+
+- key: drakkar_recorder_file_queue_bytes
+  summary: Characters of the large fields of the rows that wait for the recorder file.
+  meaning: Bounded by recorder.sqlite.max_queue.
+  healthy: Low.
+  related:
+    - concept:recorder
+
+- key: drakkar_recorder_flush_duration_seconds
+  summary: The time of one write to the recorder file.
+  meaning: The disk latency of the recorder.
+  healthy: p99 below recorder.flush_interval.
+  related:
+    - recipe:recorder-dropping
+
+- key: drakkar_recorder_flush_retries_total
+  summary: Recorder file writes that failed and were queued again.
+  meaning: The disk had a transient problem.
+  healthy: 0 or rare.
+  related:
+    - concept:recorder
+
+- key: drakkar_recorder_flush_batches_dropped_total
+  summary: Recorder batches dropped after recorder.sqlite.max_flush_retries failures.
+  meaning: History is lost.
+  healthy: 0; alert on any increase.
+  related:
+    - recipe:recorder-dropping
+
+- key: drakkar_recorder_requeue_overflow_total
+  summary: Rows dropped from a full recorder queue while a failed write was put back.
+  meaning: History is lost.
+  healthy: The value stays 0.
+  related:
+    - concept:recorder
+
+- key: drakkar_recorder_memory_rows
+  summary: Rows in the recorder memory store.
+  meaning: The size of the live history of the UI.
+  healthy: none
+  related:
+    - concept:memory-store
+
+- key: drakkar_recorder_memory_bytes
+  summary: Bytes of data in the recorder memory store.
+  meaning: Bounded by recorder.memory.max_size.
+  healthy: Below recorder.memory.max_size.
+  related:
+    - concept:memory-store
+
+- key: drakkar_recorder_memory_allocated_bytes
+  summary: The database size of the recorder memory store, free pages included.
+  meaning: A lower bound of the memory the store holds; it can stay near its peak.
+  healthy: none
+  related:
+    - recipe:worker-memory-high
+
+- key: drakkar_recorder_memory_oldest_age_seconds
+  summary: The age of the oldest event in the recorder memory store.
+  meaning: How much time the live history covers.
+  healthy: Near recorder.memory.window.
+  related:
+    - concept:memory-store
+
+- key: drakkar_recorder_memory_evicted_rows_total
+  summary: Rows removed from the recorder memory store, by reason (window, rows, bytes, gap).
+  meaning: rows or bytes mean a cap binds before the time window.
+  healthy: Mostly reason window.
+  related:
+    - concept:memory-store
+
+- key: drakkar_recorder_memory_write_failures_total
+  summary: Event chunks that could not be written to the recorder memory store.
+  meaning: The live history has gaps.
+  healthy: The value stays 0.
+  related:
+    - concept:memory-store
+
+- key: drakkar_recorder_postgres_queue_rows
+  summary: Rows that wait for the recorder Postgres table.
+  meaning: Grows while the database is slow or down.
+  healthy: Near 0.
+  related:
+    - recipe:recorder-dropping
+
+- key: drakkar_recorder_postgres_queue_bytes
+  summary: Characters of text of the rows in the recorder Postgres queue.
+  meaning: Bounded by recorder.postgres.max_queue.
+  healthy: Low.
+  related:
+    - concept:recorder
+
+- key: drakkar_recorder_postgres_rows_written_total
+  summary: Rows written to the recorder Postgres table.
+  meaning: The write volume of the Postgres history.
+  healthy: none
+  related:
+    - concept:recorder
+
+- key: drakkar_recorder_postgres_dropped_rows_total
+  summary: Rows that never reached the recorder Postgres table, by reason.
+  meaning: The Postgres history has gaps.
+  healthy: The value stays 0.
+  related:
+    - rule:recorder-dropping
+
+- key: drakkar_recorder_postgres_partitions_dropped_total
+  summary: Recorder Postgres partitions dropped, by reason retention or size.
+  meaning: A steady size rate means the table is too small for its retention.
+  healthy: Only reason retention.
+  related:
+    - concept:recorder
+
+- key: drakkar_recorder_ws_dropped_events_total
+  summary: Events dropped for a live UI subscriber whose queue was full.
+  meaning: Only that view lost events; it reloads by itself.
+  healthy: 0 or rare.
+  related:
+    - concept:recorder
+
+- key: drakkar_recorder_archive_bytes
+  summary: The size of the compressed recorder archives in the history folder.
+  meaning: Archives are removed only by recorder.archive.retention.
+  healthy: Stable when a retention is set.
+  promql:
+    - title: Archive size
+      query: 'max(drakkar_recorder_archive_bytes{ {{cluster}} })'
+  related:
+    - concept:archive
+    - recipe:disk-filling
+
+- key: drakkar_recorder_archive_files
+  summary: The number of compressed recorder archives in the history folder.
+  meaning: Read it with the archive size to tell many small archives from a few large ones.
+  healthy: none
+  related:
+    - concept:archive
+
+- key: drakkar_recorder_unsealed_files
+  summary: Own recorder files closed and not yet sealed into the history folder.
+  meaning: Above 0 for two rotations means the history folder cannot be written.
+  healthy: 0 most of the time.
+  related:
+    - concept:sealed-history
+
+- key: drakkar_recorder_seal_failures_total
+  summary: Recorder files whose seal or move failed; they are tried again.
+  meaning: The history folder or the file has a problem.
+  healthy: The value stays 0.
+  related:
+    - concept:sealed-history
+
+- key: drakkar_recorder_orphan_failures_total
+  summary: Orphan worker folders that the leftover pass could not handle.
+  meaning: Files of a gone worker stay in storage.dir.
+  healthy: The value stays 0.
+  related:
+    - concept:own-folder
+
+- key: drakkar_recorder_archive_failures_total
+  summary: Archive passes that did not finish cleanly.
+  meaning: A window failed, the lease was lost, or an error stopped the pass.
+  healthy: 0 or rare.
+  related:
+    - concept:archive
+
+- key: drakkar_recorder_annotations_total
+  summary: Handler annotations written to the recorder.
+  meaning: The volume of custom recorder payloads.
+  healthy: none
+  related:
+    - event:annotation
+
+- key: drakkar_recorder_annotations_dropped_total
+  summary: Handler annotations dropped, by reason.
+  meaning: no_context is a handler bug; oversize and budget_exhausted mean payloads are too large.
+  healthy: The value stays 0.
+  related:
+    - event:annotation
+
+# --- cache ---
+
+- key: drakkar_cache_hits_total
+  summary: Cache reads served from memory or from the database, by source.
+  meaning: With the misses it gives the hit ratio.
+  healthy: none
+  promql:
+    - title: Cache hit ratio
+      query: 'sum(rate(drakkar_cache_hits_total{ {{worker}} }[5m])) / (sum(rate(drakkar_cache_hits_total{ {{worker}} }[5m])) + sum(rate(drakkar_cache_misses_total{ {{worker}} }[5m])))'
+
+- key: drakkar_cache_misses_total
+  summary: Cache reads that found no live entry.
+  meaning: Work the cache did not save.
+  healthy: none
+
+- key: drakkar_cache_writes_total
+  summary: Cache writes by scope (local, cluster, global).
+  meaning: Cluster and global writes travel to the peers.
+  healthy: none
+  related:
+    - concept:cache-exchange
+
+- key: drakkar_cache_deletes_total
+  summary: Cache deletes.
+  meaning: A delete is local; peers keep their copy.
+  healthy: none
+  related:
+    - concept:cache-exchange
+
+- key: drakkar_cache_evictions_total
+  summary: Entries removed from cache memory by the entry cap.
+  meaning: A high rate means cache.max_memory_entries is small for the hot keys.
+  healthy: Low.
+  related:
+    - config:cache.max_memory_entries
+
+- key: drakkar_cache_flush_entries_total
+  summary: Cache entries written from memory to the cache file, by operation.
+  meaning: The write volume of the cache file.
+  healthy: none
+
+- key: drakkar_cache_flush_failures_total
+  summary: Cache flush cycles that failed.
+  meaning: Writes stay in memory and are lost at stop if the last flush fails too.
+  healthy: 0; alert on a rising rate.
+  related:
+    - metric:drakkar_storage_free_bytes
+
+- key: drakkar_cache_cleanup_removed_total
+  summary: Expired cache rows removed from the cache file.
+  meaning: A spike means many entries expired together.
+  healthy: none
+
+- key: drakkar_cache_sync_entries_fetched_total
+  summary: Cache rows pulled from each peer and accepted.
+  meaning: The volume of the cache exchange per peer.
+  healthy: none
+  related:
+    - concept:cache-exchange
+
+- key: drakkar_cache_sync_entries_upserted_total
+  summary: Cache rows from each peer passed to the last-write-wins upsert.
+  meaning: Equal to the fetched rows.
+  healthy: none
+  related:
+    - concept:cache-exchange
+
+- key: drakkar_cache_sync_errors_total
+  summary: Cache exchange errors per peer, failed requests, failed pages and rejected rows.
+  meaning: The worker misses rows of that peer.
+  healthy: 0 or rare.
+  related:
+    - concept:cache-exchange
+
+- key: drakkar_cache_peer_sync_timeouts_total
+  summary: Cache exchange cycles cut by their deadline.
+  meaning: Peers are slow, or there are more peers than one interval can pull.
+  healthy: The value stays 0.
+  related:
+    - config:cache.exchange.interval
+
+- key: drakkar_cache_entries_in_memory
+  summary: Cache entries in memory.
+  meaning: Bounded by cache.max_memory_entries.
+  healthy: none
+  related:
+    - recipe:worker-memory-high
+
+- key: drakkar_cache_bytes_in_memory
+  summary: The size of the cached values in memory.
+  meaning: Part of the memory of the worker, without object overhead.
+  healthy: none
+  related:
+    - recipe:worker-memory-high
+
+- key: drakkar_cache_entries_in_db
+  summary: Rows in the cache file.
+  meaning: Refreshed by the cleanup loop.
+  healthy: none
+
+- key: drakkar_cache_bytes_in_db
+  summary: The size of the values in the cache file.
+  meaning: Refreshed by the cleanup loop.
+  healthy: none
+
+# --- autodiscover and providers ---
+
+- key: drakkar_provider_calls_total
+  summary: Provider operations by feature, provider, operation and outcome.
+  meaning: Outcomes other than ok mean the provider failed, timed out, was skipped by an open breaker or had not started.
+  healthy: Mostly outcome ok.
+  promql:
+    - title: Failed provider operations
+      query: 'sum by (feature, op, outcome) (rate(drakkar_provider_calls_total{outcome!="ok", {{worker}} }[5m]))'
+  related:
+    - concept:autodiscover
+
+- key: drakkar_provider_call_duration_seconds
+  summary: The time of one provider operation with its retries.
+  meaning: Slow operations delay the registry, the election or the recorder table writes.
+  healthy: Well below the resilience timeout.
+  related:
+    - concept:autodiscover
+
+- key: drakkar_provider_breaker_open
+  summary: 1 while the circuit breaker of a provider is open.
+  meaning: The provider is down; its operations are skipped.
+  healthy: 0; alert while 1.
+  related:
+    - event:log:provider_breaker_opened
+
+- key: drakkar_fleet_registry_errors_total
+  summary: Registry operations that failed or timed out, by operation.
+  meaning: The card of the worker or the peer list may be stale.
+  healthy: 0 or rare.
+  related:
+    - concept:autodiscover
+
+- key: drakkar_fleet_registry_duration_seconds
+  summary: The time of registry operations.
+  meaning: The latency of the provider for the registry.
+  healthy: none
+
+- key: drakkar_fleet_peers
+  summary: Peers in the last registry snapshot, by state (online, offline, unknown).
+  meaning: This worker is not counted.
+  healthy: No offline peers.
+  promql:
+    - title: Offline peers
+      query: 'drakkar_fleet_peers{state="offline", {{worker}} }'
+  related:
+    - rule:peers-offline
+
+- key: drakkar_fleet_registry_snapshot_age_seconds
+  summary: Seconds since the last successful registry refresh.
+  meaning: It grows while the provider does not answer.
+  healthy: Below autodiscover.refresh plus a little.
+  related:
+    - recipe:peer-missing
+
+- key: drakkar_fleet_duplicate_worker_name_total
+  summary: Other live instances seen with the name of this worker.
+  meaning: Two processes use one worker name; their files and cards collide.
+  healthy: The value stays 0.
+  related:
+    - concept:worker-name
+
+- key: drakkar_fleet_peer_requests_total
+  summary: Requests this worker sent to peers, by endpoint and outcome.
+  meaning: Outcomes other than ok mean a peer could not be reached.
+  healthy: Mostly outcome ok.
+  related:
+    - concept:cache-exchange
+
+- key: drakkar_fleet_peer_request_duration_seconds
+  summary: The time of one request to a peer, by endpoint.
+  meaning: Slow peers slow the cache exchange.
+  healthy: none
+  related:
+    - concept:cache-exchange
+
+# --- HTTP source ---
+
+- key: drakkar_webapp_requests_total
+  summary: HTTP source requests by client and outcome status.
+  meaning: Status values other than ok are timeouts, errors and refusals.
+  healthy: Mostly status ok.
+  promql:
+    - title: Requests by status
+      query: 'sum by (status) (rate(drakkar_webapp_requests_total{ {{worker}} }[5m]))'
+  related:
+    - concept:http-source
+
+- key: drakkar_webapp_request_duration_seconds
+  summary: The server time of HTTP source requests, by client and status.
+  meaning: Compare the p99 with sources.http.request_timeout.
+  healthy: p99 below sources.http.request_timeout.
+  related:
+    - config:sources.http.request_timeout
+
+- key: drakkar_webapp_inflight
+  summary: HTTP source requests that run now.
+  meaning: Above sources.http.max_concurrent points at a permit that was not released.
+  healthy: Up to sources.http.max_concurrent.
+  related:
+    - config:sources.http.max_concurrent
+
+- key: drakkar_webapp_dropped_after_timeout_total
+  summary: HTTP requests whose result came after their 504 answer.
+  meaning: The work was done but nobody received it.
+  healthy: 0 or rare.
+  related:
+    - event:webapp_request_dropped_after_timeout
+
+- key: drakkar_webapp_rpm_limit
+  summary: The configured requests-per-minute limit of each HTTP client.
+  meaning: Read it with the rate_limited status of the requests.
+  healthy: none
+
+# --- stop and restart ---
+
+- key: drakkar_uncommitted_offsets_at_stop
+  summary: Offsets in flight and not committed when the last stop began.
+  meaning: Messages that the next owner processes again.
+  healthy: none
+  related:
+    - concept:at-least-once
+
+- key: drakkar_inflight_at_stop
+  summary: Task subprocesses that ran when the last stop began.
+  meaning: Work that the stop had to drain or cancel.
+  healthy: none
+  related:
+    - config:executor.drain_timeout
+
+- key: drakkar_drain_timeout_hit_total
+  summary: Drains of an input source that timed out before their work finished.
+  meaning: Work was cancelled at a stop or a revoke; its messages are processed again.
+  healthy: 0 or rare.
+  related:
+    - config:executor.drain_timeout
+
+- key: drakkar_suspected_oom_kills_total
+  summary: Starts after a previous run that was killed before its clean stop.
+  meaning: Usually the memory limit of the container killed the worker.
+  healthy: The value stays 0.
+  related:
+    - recipe:worker-memory-high
+    - event:log:previous_run_ended_unexpectedly

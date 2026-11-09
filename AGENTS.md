@@ -239,6 +239,8 @@ drakkar/
                            answers), streaming.py (download streams and the open-download bound),
                            files_in_use.py (merge results being sent or merged)
   webapp/                  synchronous HTTP ingress pipeline
+  agent/                   the agent routes' knowledge registry: load, check, render; route parameters
+  agentdocs/               the registry files (YAML entries and their JSON Schema); a contract, read as raw bytes
   uihost/                  drakkar-ui bundle fetch/cache/serve engine
   config/                  pydantic-settings config (YAML + DK_ env overrides),
                            split per domain and re-exported from the package

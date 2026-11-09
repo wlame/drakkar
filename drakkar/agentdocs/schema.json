@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Drakkar agent knowledge registry",
+  "description": "The entries of the seven registry files, one property per file. A file holds a YAML list of entries.",
+  "type": "object",
+  "required": ["concepts", "config", "metrics", "events", "recipes", "routes", "rules"],
+  "additionalProperties": false,
+  "properties": {
+    "concepts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/concept"}},
+    "config": {"type": "array", "items": {"$ref": "#/$defs/config"}},
+    "metrics": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/metric"}},
+    "events": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/event"}},
+    "recipes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/recipe"}},
+    "routes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/route"}},
+    "rules": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/rule"}}
+  },
+  "$defs": {
+    "line": {
+      "description": "One line of text: not empty, no line break.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000,
+      "pattern": "^[^\n]+$"
+    },
+    "summary": {
+      "description": "One sentence of at most 200 characters.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[^\n]+$"
+    },
+    "body": {
+      "description": "Markdown of at most 2000 characters that ends with a visible character.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000,
+      "pattern": "[^ \n\t]$"
+    },
+    "reference": {
+      "description": "A reference <kind>:<key> to another entry or to a config path.",
+      "type": "string",
+      "pattern": "^(concept|config|metric|event|recipe|route|rule):[^ \n][^\n]*$"
+    },
+    "references": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/reference"}},
+    "lines": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/line"}},
+    "concept": {
+      "type": "object",
+      "required": ["key", "summary", "body"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+        "summary": {"$ref": "#/$defs/summary"},
+        "body": {"$ref": "#/$defs/body"},
+        "principles": {"$ref": "#/$defs/lines"},
+        "related": {"$ref": "#/$defs/references"}
+      }
+    },
+    "config": {
+      "type": "object",
+      "required": ["key", "summary", "advice"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {"type": "string", "pattern": "^[a-z_]+(\\.([a-z0-9_]+|\\*))*$"},
+        "summary": {"$ref": "#/$defs/summary"},
+        "advice": {"$ref": "#/$defs/line"},
+        "related": {"$ref": "#/$defs/references"}
+      }
+    },
+    "metric": {
+      "type": "object",
+      "required": ["key", "summary", "meaning", "healthy"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {"type": "string", "pattern": "^drakkar_[a-z0-9_]+$"},
+        "summary": {"$ref": "#/$defs/summary"},
+        "meaning": {"$ref": "#/$defs/line"},
+        "healthy": {"$ref": "#/$defs/line"},
+        "promql": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["title", "query"],
+            "additionalProperties": false,
+            "properties": {
+              "title": {"$ref": "#/$defs/line"},
+              "query": {"$ref": "#/$defs/line"}
+            }
+          }
+        },
+        "related": {"$ref": "#/$defs/references"}
+      }
+    },
+    "event": {
+      "type": "object",
+      "required": ["key", "summary", "when"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {"type": "string", "pattern": "^(log:)?[a-z][a-z0-9_]*$"},
+        "summary": {"$ref": "#/$defs/summary"},
+        "when": {"$ref": "#/$defs/line"},
+        "fields": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"$ref": "#/$defs/line"}
+        },
+        "action": {"$ref": "#/$defs/line"},
+        "related": {"$ref": "#/$defs/references"}
+      }
+    },
+    "recipe": {
+      "type": "object",
+      "required": ["key", "summary", "question", "steps", "causes"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+        "summary": {"$ref": "#/$defs/summary"},
+        "question": {"$ref": "#/$defs/line"},
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["do", "why"],
+            "additionalProperties": false,
+            "properties": {
+              "do": {"$ref": "#/$defs/line"},
+              "why": {"$ref": "#/$defs/line"}
+            }
+          }
+        },
+        "causes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["cause", "check", "fix"],
+            "additionalProperties": false,
+            "properties": {
+              "cause": {"$ref": "#/$defs/line"},
+              "check": {"$ref": "#/$defs/line"},
+              "fix": {"$ref": "#/$defs/line"}
+            }
+          }
+        },
+        "related": {"$ref": "#/$defs/references"}
+      }
+    },
+    "route": {
+      "type": "object",
+      "required": ["key", "summary", "use", "cost"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {"type": "string", "pattern": "^(GET|POST|PUT|PATCH|DELETE) /[^ \n]*$"},
+        "summary": {"$ref": "#/$defs/summary"},
+        "use": {"$ref": "#/$defs/line"},
+        "cost": {"enum": ["cheap", "moderate", "heavy"]},
+        "related": {"$ref": "#/$defs/references"}
+      }
+    },
+    "rule": {
+      "type": "object",
+      "required": ["key", "summary", "severity", "title", "explain", "suggestion", "inputs"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+        "summary": {"$ref": "#/$defs/summary"},
+        "severity": {"enum": ["info", "warning", "critical"]},
+        "title": {"$ref": "#/$defs/line"},
+        "explain": {"$ref": "#/$defs/reference"},
+        "suggestion": {"$ref": "#/$defs/line"},
+        "inputs": {"$ref": "#/$defs/lines"}
+      }
+    }
+  }
+}

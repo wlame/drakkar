@@ -1,0 +1,355 @@
+# Recorder events (one entry per event of the vocabulary) and selected log events (keys log:<name>).
+
+- key: consumed
+  summary: The Kafka source took one message into the queue of its partition.
+  when: Once per message read from Kafka, before the message is in a window.
+  fields:
+    partition: The Kafka partition of the message.
+    offset: The Kafka offset of the message.
+  related:
+    - concept:pipeline
+    - metric:drakkar_messages_consumed_total
+
+- key: arranged
+  summary: The arrange hook turned one window into tasks.
+  when: Once per window, after the arrange hook returned.
+  fields:
+    duration: Seconds the arrange hook took.
+    metadata: The offsets of the window, the task ids, the counts and the window id.
+  action: A long duration slows the partition; move slow work out of arrange.
+  related:
+    - concept:arrange
+    - concept:window
+
+- key: assigned
+  summary: Kafka assigned a partition to this worker.
+  when: Once per partition at each rebalance that gives the partition to this worker.
+  fields:
+    partition: The assigned partition.
+  related:
+    - metric:drakkar_rebalance_events_total
+    - metric:drakkar_assigned_partitions
+
+- key: revoked
+  summary: Kafka took a partition away from this worker.
+  when: Once per partition at each rebalance that removes it; the worker drains the partition before the rebalance goes on.
+  fields:
+    partition: The revoked partition.
+  action: Frequent revokes mean the group is unstable; check session and poll timeouts and the worker restarts.
+  related:
+    - concept:at-least-once
+    - metric:drakkar_rebalance_events_total
+
+- key: committed
+  summary: The worker committed the watermark of a partition to Kafka.
+  when: After a commit of a new watermark.
+  fields:
+    partition: The partition.
+    offset: The committed offset.
+  related:
+    - concept:offsets
+    - metric:drakkar_offsets_committed_total
+
+- key: partition_stalled
+  summary: A partition was paused because a DLQ record could not be written and dlq.on_send_failure is stall.
+  when: When the delivery of a message and its DLQ record both failed under the stall policy.
+  fields:
+    partition: The paused partition.
+  action: Fix the DLQ topic or its connection; the partition stays paused until the worker restarts or loses it.
+  related:
+    - concept:dlq
+    - config:dlq.on_send_failure
+    - metric:drakkar_delivery_stalled_offsets_total
+
+- key: message_complete
+  summary: Every task of one source message ended and the on_message_complete hook ran.
+  when: Once per source message that had tasks.
+  fields:
+    offset: The offset of the message.
+    duration: Seconds from the first task start to the end of the last task.
+    metadata: The task count, the succeeded, failed and replaced counts and the output message count.
+  related:
+    - concept:offsets
+
+- key: window_complete
+  summary: Every task of one window ended and the on_window_complete hook ran.
+  when: Once per window that had tasks.
+  fields:
+    duration: Seconds the window took.
+    metadata: The window id, the task count and the output message count.
+  related:
+    - concept:window
+    - metric:drakkar_batch_duration_seconds
+
+- key: task_started
+  summary: A task got an executor slot and its subprocess started.
+  when: When the subprocess of a task starts; a precomputed task has no start.
+  fields:
+    task_id: The id of the task.
+    args: The arguments of the subprocess.
+    metadata: The slot, the queue wait in milliseconds and the source offsets of the task.
+    labels: The labels the handler gave the task.
+  related:
+    - concept:task
+    - metric:drakkar_executor_queue_wait_seconds
+
+- key: task_completed
+  summary: A task subprocess exited with code 0.
+  when: When the subprocess of a task ends with exit code 0.
+  fields:
+    duration: Seconds the subprocess ran, from spawn to exit.
+    stdout_size: The size of the standard output in bytes.
+    metadata: The run start time, the exit notice delay, the spawn time and the reported run time.
+  related:
+    - concept:task
+    - metric:drakkar_executor_duration_seconds
+
+- key: task_failed
+  summary: A task failed by a non-zero exit code, a timeout or a launch failure.
+  when: When the subprocess of a task fails; each attempt of a retried task writes one event.
+  fields:
+    exit_code: The exit code of the subprocess, or null when it did not exit by itself.
+    stderr: The standard error text when the recorder keeps output.
+    duration: Seconds the subprocess ran.
+    metadata: The exception text of a timeout or launch failure, the task stdin (capped by recorder.capture.max_stdin) and the run timing.
+  action: Read the exit code, stderr and the exception text; follow the tasks-failing recipe.
+  related:
+    - recipe:tasks-failing
+    - metric:drakkar_executor_tasks_total
+
+- key: task_complete
+  summary: The on_task_complete hook of a task ran.
+  when: Once per successful task, after its result hook returned.
+  fields:
+    duration: Seconds the hook took.
+    metadata: The number of output messages the hook returned.
+  related:
+    - metric:drakkar_handler_duration_seconds
+
+- key: produced
+  summary: A payload was written to a Kafka sink topic.
+  when: Once per Kafka payload delivered.
+  fields:
+    output_topic: The sink that received the payload.
+  related:
+    - concept:sinks-and-delivery
+
+- key: sink_delivered
+  summary: One sink delivered a group of payloads.
+  when: After a delivery to one sink succeeded.
+  fields:
+    metadata: The sink type and name, the payload count and the duration.
+  related:
+    - concept:sinks-and-delivery
+    - metric:drakkar_sink_payloads_delivered_total
+
+- key: sink_error
+  summary: A delivery to one sink failed.
+  when: After each failed delivery attempt and after its final decision.
+  fields:
+    metadata: The sink, the error text, the attempt and the action (retry, skip, dlq or failed).
+  action: Follow the sink-failing recipe.
+  related:
+    - recipe:sink-failing
+    - metric:drakkar_sink_deliver_errors_total
+
+- key: message_dlq
+  summary: A source message was written to the DLQ; no later delivery of it starts.
+  when: Once per source message that gets a DLQ record, at the parse, execute or sink stage.
+  fields:
+    metadata: The stage, the sink, the error, the sinks that already delivered and the attempts.
+  action: Read the stage and the error; follow the dlq-filling recipe.
+  related:
+    - concept:dlq
+    - recipe:dlq-filling
+
+- key: sink_not_started
+  summary: A sink delivery did not start because the message is on the DLQ or a dependency failed.
+  when: For each sink group of a message that was not started.
+  fields:
+    metadata: The sink and the reason (message_dlq or dependency_failed).
+  related:
+    - concept:sinks-and-delivery
+    - metric:drakkar_sink_deliveries_not_started_total
+
+- key: runtime_health
+  summary: The runtime health monitor changed state or wrote its periodic sample.
+  when: At each state change and every runtime_health.sample_interval.
+  fields:
+    metadata: The state, the lag numbers and the stall count.
+  related:
+    - concept:runtime-health
+
+- key: runtime_stall
+  summary: The event loop was silent for longer than runtime_health.stall; the event holds the stacks it ran.
+  when: When the loop runs again after a stall.
+  fields:
+    duration: Seconds the loop was stalled.
+    metadata: The captured stacks with their sample counts.
+  action: The top stack names the code that blocked the loop; follow the worker-stalled recipe.
+  related:
+    - concept:runtime-health
+    - recipe:worker-stalled
+    - metric:drakkar_runtime_stalls_total
+
+- key: runtime_lag_episode
+  summary: A span of degraded or stalled runtime health ended; the event holds its verdict and evidence.
+  when: When the runtime returns to healthy, or every runtime_health.max_episode during a long episode.
+  fields:
+    metadata: The duration, the peak lag, the verdict, the aggregated stacks, the loop CPU and the host evidence.
+  action: Act on the verdict; blocked and cpu_bound point at code, starved points at the host.
+  related:
+    - concept:runtime-health
+    - metric:drakkar_runtime_lag_episodes_total
+
+- key: runtime_probe
+  summary: One stack sample of the event loop, taken while runtime_health.stack_probe_enabled is true.
+  when: Every runtime_health.stack_probe_interval.
+  fields:
+    metadata: The lag, the number of concurrency units and the stacks.
+  related:
+    - config:runtime_health.stack_probe_enabled
+
+- key: resource_sample
+  summary: A sample of the host and the worker process resources.
+  when: Every recorder.sqlite.state_interval with a recorder file, else every 10 seconds.
+  fields:
+    metadata: Load, pressure, CPU throttling, NFS numbers, threads, free storage and the memory of the worker.
+  related:
+    - metric:drakkar_host_load
+    - metric:drakkar_storage_free_bytes
+
+- key: annotation
+  summary: The handler attached a custom payload to a message, a task or a window.
+  when: When a hook calls the annotation API and the payload fits the size limits.
+  fields:
+    metadata: The kind and the payload the handler gave.
+  related:
+    - metric:drakkar_recorder_annotations_total
+    - metric:drakkar_recorder_annotations_dropped_total
+
+- key: periodic_run
+  summary: A periodic task ran once.
+  when: After each run of a periodic task, system tasks included.
+  fields:
+    metadata: The name, the status, the duration and, for a cluster task, the scope and the slot.
+  related:
+    - concept:cluster-tasks
+    - metric:drakkar_periodic_task_runs_total
+
+- key: offload
+  summary: A hook ran one computation on the offload thread pool.
+  when: After each offloaded computation.
+  fields:
+    metadata: The hook, the function, the queue wait, the duration and the status.
+  related:
+    - metric:drakkar_offload_duration_seconds
+
+- key: webapp_request_received
+  summary: The HTTP source accepted a request and started its pipeline.
+  when: Once per accepted HTTP request.
+  fields:
+    request_id: The id of the request.
+    client_name: The client that sent it.
+  related:
+    - concept:http-source
+
+- key: webapp_request_completed
+  summary: An HTTP request finished and was answered with its result.
+  when: Once per request that ended with status ok.
+  fields:
+    duration: Seconds the request took.
+  related:
+    - concept:http-source
+    - metric:drakkar_webapp_requests_total
+
+- key: webapp_request_timeout
+  summary: An HTTP request took longer than sources.http.request_timeout and was answered 504.
+  when: Once per request that timed out.
+  action: Raise sources.http.request_timeout or make the tasks of the request faster.
+  related:
+    - config:sources.http.request_timeout
+
+- key: webapp_request_rate_limited
+  summary: An HTTP request was refused with 429 because its client passed its requests-per-minute limit.
+  when: Once per refused request.
+  related:
+    - metric:drakkar_webapp_rpm_limit
+
+- key: webapp_request_auth_failed
+  summary: An HTTP request was refused with 401 because its client token is missing or wrong.
+  when: Once per refused request; the event holds only a short prefix of the token.
+  related:
+    - concept:http-source
+
+- key: webapp_request_dropped_after_timeout
+  summary: The pipeline of an HTTP request finished after its 504 answer, so its result was dropped.
+  when: Once per request whose result came too late.
+  related:
+    - metric:drakkar_webapp_dropped_after_timeout_total
+
+- key: log:agent_surface_unauthenticated
+  summary: The agent routes are on and agent.auth_token is empty.
+  when: Once at startup.
+  fields:
+    hint: What to set to protect the routes.
+  action: Set agent.auth_token.
+  related:
+    - concept:agent-surface
+    - rule:agent-unauthenticated
+
+- key: log:agent_notes_failed
+  summary: The agent_notes hook of the handler raised; the worker runs without handler notes.
+  when: Once at startup, after on_startup.
+  action: Fix the agent_notes hook of the handler.
+  related:
+    - concept:agent-surface
+
+- key: log:agent_notes_invalid
+  summary: The handler notes break a rule (a key or a reference); the notes are dropped.
+  when: Once at startup, after on_startup.
+  fields:
+    reasons: The problems found in the notes.
+  action: Fix the notes; every reference must name a framework entry or another note.
+  related:
+    - concept:agent-surface
+
+- key: log:agent_rule_abandoned
+  summary: A handler diagnose rule ran longer than 1 second; the diagnose answer lists it as failed and does not wait for it.
+  when: When a handler rule passes its time limit.
+  fields:
+    rule: The key of the rule.
+  action: Make the rule a fast, pure check of the snapshot.
+  related:
+    - concept:agent-surface
+
+- key: log:partition_processor_died
+  summary: A partition loop ended on an unexpected error.
+  when: When the loop of a partition raises; it is restarted once, then marked dead.
+  action: Read the error; follow the partition-dead recipe.
+  related:
+    - recipe:partition-dead
+    - metric:drakkar_partition_processor_deaths_total
+
+- key: log:previous_run_ended_unexpectedly
+  summary: The previous process with this worker name was killed before its clean stop.
+  when: Once at startup, when the watchdog file has no clean exit marker.
+  action: Check the container memory limit and the kill events of the platform.
+  related:
+    - metric:drakkar_suspected_oom_kills_total
+    - recipe:worker-memory-high
+
+- key: log:provider_breaker_opened
+  summary: The circuit breaker of a provider opened; its operations are skipped until a probe succeeds.
+  when: Once per opening.
+  action: Check the provider service (the autodiscover provider or the recorder Postgres database).
+  related:
+    - metric:drakkar_provider_breaker_open
+
+- key: log:zombie_delivery_suppressed
+  summary: A task finished after the drain of its partition timed out; its result was not delivered.
+  when: Once per suppressed delivery.
+  action: Raise executor.drain_timeout when this happens at each rebalance.
+  related:
+    - concept:at-least-once
+    - metric:drakkar_suppressed_zombie_deliveries_total

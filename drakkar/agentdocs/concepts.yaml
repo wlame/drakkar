@@ -1,0 +1,426 @@
+# The concepts of the framework. One entry per concept, in reading order.
+# Text rules: plain, literal sentences; describe behaviour, not history.
+
+- key: pipeline
+  summary: A worker reads messages, turns them into tasks, runs the tasks as subprocesses, delivers the results to sinks and commits the offsets.
+  body: |-
+    A worker has one control loop. The steps of one message are:
+
+    1. A source reads the message (the Kafka source or the HTTP source).
+    2. The partition loop puts the message in a window.
+    3. The `arrange` hook of the handler turns the window into tasks.
+    4. The executor pool runs each task as a subprocess, at most `executor.max_executors` at one time.
+    5. The result hooks (`on_task_complete`, `on_message_complete`, `on_window_complete`) turn the output into sink payloads.
+    6. The sinks deliver the payloads. A failure goes to the DLQ or is skipped, by the sink policy.
+    7. The worker commits the offset of the message when every task and delivery of the message is done.
+
+    The framework owns steps 1, 2, 4, 6 and 7. The handler owns steps 3 and 5. The work itself runs in the subprocess.
+  principles:
+    - The handler code runs on the event loop of the worker. A blocking call in a hook stops every partition.
+    - The worker commits an offset only after the message is fully done.
+    - Every limit of the pipeline is a config key; read the effective config before you change one.
+  related:
+    - concept:window
+    - concept:arrange
+    - concept:task
+    - concept:offsets
+    - concept:sinks-and-delivery
+    - concept:at-least-once
+    - route:GET /api/v1/dashboard
+
+- key: window
+  summary: A window is a group of 1 to executor.window_size messages of one partition that the arrange hook gets in one call.
+  body: |-
+    Each partition loop takes messages from its queue into a window. The size of a window depends on the free room of the pending budget: during the first 3 windows of a partition a window holds one message; after that the worker sizes the window from the average tasks and bytes per message, between 1 and `executor.window_size`.
+
+    A partition loop does not wait for a window to finish before it takes the next one. Many windows of one partition can be in flight at one time. The offsets of a window are committed in order, so a slow message holds the commit of the messages after it.
+  principles:
+    - A window never holds messages of two partitions.
+    - The window size is an upper bound, not a target; small windows are normal when the budget is nearly full.
+  related:
+    - concept:pending-budget
+    - concept:arrange
+    - config:executor.window_size
+    - metric:drakkar_window_messages
+    - event:arranged
+    - event:window_complete
+
+- key: arrange
+  summary: The arrange hook of the handler maps a window of messages to a list of tasks; it decides how much work each message makes.
+  body: |-
+    The worker calls `arrange` once per window with the messages and a view of the tasks that are pending on the partition. The hook returns a list of tasks. Each task names the source offsets it covers. A message with no task is done at once.
+
+    The time of the hook is in `drakkar_handler_duration_seconds{hook="arrange"}` and in the `arranged` event. A slow `arrange` slows the whole partition, and a blocking `arrange` stops the event loop.
+  principles:
+    - The arrange hook must not block; do I/O with awaits, and move CPU work off the event loop.
+    - Every task must name the source offsets it covers, or the offsets are committed before the work is done.
+  related:
+    - concept:window
+    - concept:task
+    - metric:drakkar_handler_duration_seconds
+    - event:arranged
+
+- key: task
+  summary: A task is one subprocess run with its arguments, optional stdin, labels and the source offsets it covers.
+  body: |-
+    The executor pool runs tasks with at most `executor.max_executors` subprocesses at one time. A task that waits for a slot is counted in `drakkar_executor_pool_waiting`.
+
+    A task ends in one of these ways: exit code 0 (completed), another exit code, a timeout after `executor.task_timeout` (the worker kills the process group), or a launch failure. On a failure the `on_error` hook decides: retry (up to `executor.max_retries`), skip, send the message to the DLQ, or replace the task with other tasks. With no hook the answer is `executor.on_failure`.
+
+    A task can carry a precomputed result; then no subprocess runs.
+  principles:
+    - A task is settled only after its result hooks and their deliveries end; until then it counts in the pending budget.
+    - The output of a task is kept in memory until its hooks end; cap it with executor.max_stdout and executor.max_stderr.
+  related:
+    - concept:pending-budget
+    - config:executor.max_executors
+    - config:executor.task_timeout
+    - config:executor.on_failure
+    - metric:drakkar_executor_tasks_total
+    - event:task_started
+    - event:task_completed
+    - event:task_failed
+
+- key: offsets
+  summary: Each partition keeps a watermark; the worker commits the highest offset below which every message is done.
+  body: |-
+    The worker registers the offsets of a window as pending when it takes the window. A message is done when all its tasks and deliveries are done. The watermark of a partition is the offset of the oldest pending message. The worker commits that watermark to Kafka.
+
+    `drakkar_offset_lag` is the number of pending offsets of this worker. `drakkar_consumer_lag` is the broker lag: the high watermark of the partition minus the committed offset.
+
+    A message that never finishes holds the watermark: all later messages of the partition stay uncommitted, even when they are done.
+  principles:
+    - One stuck message stops the commits of its partition.
+    - The worker never commits past a message that is not done.
+  related:
+    - concept:at-least-once
+    - metric:drakkar_offset_lag
+    - metric:drakkar_consumer_lag
+    - metric:drakkar_offsets_committed_total
+    - event:committed
+    - recipe:lag-growing
+
+- key: at-least-once
+  summary: Every message is processed at least once; after a crash, a revoke or a drain timeout, messages after the last commit are processed again.
+  body: |-
+    The worker commits an offset only after the message is done. When a worker stops before a commit, the next owner of the partition reads the messages after the last committed offset again. So a sink can receive the same result twice.
+
+    On a revoke or a stop, the worker drains: it waits up to `executor.drain_timeout` for the work in flight, then commits. Work that does not finish in time is cancelled and its results are not delivered (`drakkar_suppressed_zombie_deliveries_total`), because the next owner processes those messages again.
+  principles:
+    - Sinks must accept a repeated result; make writes idempotent (upserts, keys).
+    - Do not raise executor.drain_timeout above what the Kafka rebalance allows (sources.kafka.max_poll_interval).
+  related:
+    - concept:offsets
+    - config:executor.drain_timeout
+    - metric:drakkar_suppressed_zombie_deliveries_total
+    - metric:drakkar_drain_timeout_hit_total
+    - metric:drakkar_delivery_stalled_offsets_total
+
+- key: pending-budget
+  summary: One budget per worker limits the pending tasks and the pending bytes; a partition loop takes a new window only when the budget has room.
+  body: |-
+    The budget counts the tasks that are created and not settled (waiting for a slot, running, or in their hooks and delivery), and the bytes they hold: task stdin plus the output of results that hooks or deliveries still use. The limits are `executor.max_pending_tasks` and `executor.max_pending_bytes`.
+
+    A partition loop checks the room and reserves the estimate of its next window before it calls `arrange`. While the budget is full, loops wait in a first-in, first-out list; the wait is counted in `drakkar_window_admission_wait_seconds_total`. The HTTP source uses the same budget.
+
+    A full budget is the normal state of a busy worker. It is a problem only when the executor pool is not busy at the same time.
+  principles:
+    - The budget bounds the memory of the worker; raising it raises the memory the worker can use.
+    - A full budget with an idle executor pool means hooks or deliveries are slow, not the subprocesses.
+  related:
+    - concept:backpressure
+    - config:executor.max_pending_tasks
+    - config:executor.max_pending_bytes
+    - metric:drakkar_pending_tasks
+    - metric:drakkar_pending_bytes
+    - metric:drakkar_window_admission_wait_seconds_total
+    - rule:budget-saturated
+
+- key: backpressure
+  summary: When the partition queues hold sources.kafka.max_queued_messages messages, the worker pauses Kafka fetching until they fall to half.
+  body: |-
+    The Kafka source counts the messages that wait in the queues of live partition loops. At `sources.kafka.max_queued_messages` it pauses fetching for every assigned partition and sets `drakkar_backpressure_active` to 1. It resumes when the count is at or below half of the limit and no operator debug pause holds the source.
+
+    The poll call goes on while the source is paused, so the Kafka group does not evict the worker. Backpressure is the normal way a busy worker slows its input: a full pending budget fills the queues, and the full queues pause the fetch.
+  principles:
+    - Backpressure protects the memory of the worker; it is not an error.
+    - Lag grows while backpressure is on; add workers or make tasks faster to reduce it.
+  related:
+    - concept:pending-budget
+    - config:sources.kafka.max_queued_messages
+    - metric:drakkar_backpressure_active
+    - metric:drakkar_total_queued
+    - recipe:lag-growing
+
+- key: sinks-and-delivery
+  summary: Sinks write the results to Kafka, Postgres, Mongo, Redis, HTTP or files; each sink has a failure policy, retries and a circuit breaker.
+  body: |-
+    The result hooks return payloads for named sink instances. The worker delivers them per sink, in payload order. A failed delivery calls `on_delivery_error`, which may retry; the retries are bounded by `max_retries` of the sink. When the retries are spent the sink policy `on_failure` decides: `dlq` writes the source message to the DLQ, `skip` drops the payloads.
+
+    Each sink has a circuit breaker: after `breaker_failures` failed deliveries it opens for `breaker_cooldown`, and deliveries then follow `on_failure` at once. A sink can depend on other sinks (`depends_on`); it starts only after its dependencies delivered or skipped.
+
+    The defaults of every policy key are in `sinks.defaults`; an instance can set its own value.
+  principles:
+    - Delivery order equals payload order inside one sink.
+    - A failed batch is never sent again as a whole; only payloads that were not written are retried.
+    - An open circuit means the downstream system is down; fix it there, not in the worker.
+  related:
+    - concept:dlq
+    - config:sinks.defaults.*
+    - metric:drakkar_sink_deliver_errors_total
+    - metric:drakkar_sink_circuit_open
+    - event:sink_delivered
+    - event:sink_error
+    - rule:sink-breaker-open
+    - recipe:sink-failing
+
+- key: dlq
+  summary: The DLQ is a Kafka topic that receives a failed source message unchanged, with dk- headers that describe the failure.
+  body: |-
+    A DLQ record holds the key and value of the source message, its headers without the `dk-` ones, and 15 `dk-` headers: the stage (`parse`, `execute` or `sink`), the error text, the sink, the task, the attempts, the source coordinates, the worker and the time. One source message gets at most one record.
+
+    After a record is written, the message is done: no later delivery of it starts, and its offset is committed. When the record cannot be written, `dlq.on_send_failure` decides: `drop` loses the message and commits (`drakkar_dlq_dropped_payloads_total`), `stall` keeps the offset and pauses the partition.
+
+    The topic is `dlq.topic`, or `<source topic>_dlq` when empty. A replay tool reads the records and publishes them again.
+  principles:
+    - A growing DLQ is data that needs an operator; read the dk-stage and dk-error headers.
+    - With dlq.on_send_failure drop, a DLQ outage loses messages; with stall, it stops the partition.
+  related:
+    - concept:sinks-and-delivery
+    - config:dlq.on_send_failure
+    - config:dlq.topic
+    - metric:drakkar_sink_dlq_messages_total
+    - metric:drakkar_dlq_records_total
+    - event:message_dlq
+    - recipe:dlq-filling
+
+- key: own-folder
+  summary: Each worker keeps its own files in <storage.dir>/<cluster>/<worker>/ and holds a lock on .owner.lock there while it runs.
+  body: |-
+    The own folder holds the live recorder file, the cache file and the watchdog file of the worker. At start the worker takes an exclusive lock on `.owner.lock`; a second process with the same worker name cannot start.
+
+    `storage.dir` must be a local filesystem. With `storage.dir` empty the worker keeps no files: no recorder file, no cache file, no watchdog.
+
+    A folder of another worker whose lock is free and whose name is not online in the registry is an orphan: the worker seals its files into the history folder.
+  principles:
+    - Never share one storage.dir folder between hosts over a network filesystem.
+    - Two workers must never have the same name.
+  related:
+    - concept:worker-name
+    - concept:sealed-history
+    - config:storage.dir
+    - metric:drakkar_storage_free_bytes
+    - metric:drakkar_recorder_orphan_failures_total
+
+- key: worker-name
+  summary: The worker name identifies the worker in folders, files, registry cards and metrics; it must be unique in the fleet.
+  body: |-
+    The name is the value of the environment variable named by `worker.name_env` (default `WORKER_ID`) when it is set and not empty, else `worker.name`, else the host name made safe, else `drakkar-<8 hex>`. A configured name must be 1 to 128 letters, digits, `_` or `-`.
+
+    The cluster name comes from `cluster.name_env` or `cluster.name`. Workers with the same cluster name share the history folder, the cluster tasks and the cache exchange.
+
+    The registry counts other live instances that publish the same name (`drakkar_fleet_duplicate_worker_name_total`).
+  principles:
+    - A generated name changes at each start; set a stable name for workers that keep files.
+    - Workers of one cluster must use the same cluster name.
+  related:
+    - concept:own-folder
+    - config:worker.name
+    - config:worker.name_env
+    - config:cluster.name
+    - metric:drakkar_fleet_duplicate_worker_name_total
+
+- key: recorder
+  summary: The flight recorder writes one event row per pipeline step to a memory store, a local SQLite file or a Postgres table.
+  body: |-
+    The recorder keeps events such as `consumed`, `arranged`, `task_started`, `task_failed`, `sink_error` and `committed`. The operator UI and the agent routes read them to trace a message or a task.
+
+    `recorder.enabled` turns on durable recording; `recorder.provider` is `sqlite` (one file per rotation in the own folder) or `postgres` (one partitioned table). With the UI on, the recorder also keeps a memory store of the recent events.
+
+    The recorder never blocks the pipeline: when its queues are full it drops the oldest rows and counts them. A drop leaves a gap in the history, not in the processing.
+  principles:
+    - Recorder drops are a loss of history, not of messages.
+    - Recording task output costs memory and disk; recorder.capture limits what is kept.
+  related:
+    - concept:memory-store
+    - concept:sealed-history
+    - config:recorder.enabled
+    - config:recorder.provider
+    - metric:drakkar_recorder_dropped_events_total
+    - metric:drakkar_recorder_buffer_size
+    - recipe:recorder-dropping
+
+- key: memory-store
+  summary: The memory store keeps the recent recorder events in memory for the UI, bounded by a time window, a row cap and a size cap.
+  body: |-
+    The memory store exists only with `ui.enabled`. It holds the events of the last `recorder.memory.window`, at most `recorder.memory.rows_per_executor * executor.max_executors` rows and at most `recorder.memory.max_size` of data. The oldest rows are evicted first.
+
+    The UI reads recent events from it while it covers the asked range; older reads go to the recorder file or table. `drakkar_recorder_memory_oldest_age_seconds` shows how much time it covers.
+
+    With the recorder off and the UI on, the memory store is the only store.
+  principles:
+    - The memory store uses RAM; its allocated size can stay near its peak after a load.
+    - A short window means less RAM and less history in the live views.
+  related:
+    - concept:recorder
+    - config:recorder.memory.window
+    - config:recorder.memory.max_size
+    - metric:drakkar_recorder_memory_bytes
+    - metric:drakkar_recorder_memory_allocated_bytes
+    - metric:drakkar_recorder_memory_evicted_rows_total
+
+- key: sealed-history
+  summary: A closed recorder file is sealed and moved to the history folder, where every worker of the cluster can search it.
+  body: |-
+    With provider `sqlite` the recorder rotates its file every `recorder.sqlite.rotation_interval`. The closed file is sealed (made one self-contained file with a meta file next to it) and moved to the history folder: `<storage.shared_dir>/history/<cluster>/` when a shared folder is set, else `<storage.dir>/history/<cluster>/`.
+
+    The history search of the Trace page reads the sealed files of the cluster. Files that fail to seal stay in the own folder and are tried again (`drakkar_recorder_unsealed_files`).
+  principles:
+    - The history folder must be writable by every worker of the cluster.
+    - A sealed file is never changed; the archive merges and compresses old ones.
+  related:
+    - concept:archive
+    - concept:own-folder
+    - config:storage.shared_dir
+    - config:recorder.sqlite.rotation_interval
+    - metric:drakkar_recorder_unsealed_files
+    - metric:drakkar_recorder_seal_failures_total
+
+- key: archive
+  summary: The archive merges the sealed recorder files of one time window into one compressed file and deletes the sources.
+  body: |-
+    The archive runs as the system task `history.archive` at `recorder.archive.interval` or `recorder.archive.cron`. It takes the sealed files of each window of `recorder.archive.window` that is older than `recorder.archive.due_after`, merges them, compresses the result, publishes it and deletes the sources. Archives older than `recorder.archive.retention` are deleted.
+
+    With autodiscover and a shared folder the archive is a cluster task: one worker per slot archives the files of the whole cluster under a lease. Otherwise each worker archives only its own files.
+  principles:
+    - Archives are the only recorder files nothing else removes; set a retention that fits the volume.
+    - A pass that loses its lease stops before it changes more files.
+  related:
+    - concept:sealed-history
+    - concept:cluster-tasks
+    - config:recorder.archive.retention
+    - config:recorder.archive.window
+    - metric:drakkar_recorder_archive_bytes
+    - metric:drakkar_recorder_archive_failures_total
+    - recipe:disk-filling
+
+- key: autodiscover
+  summary: Autodiscover lets workers find each other through one provider (consul, filesystem, postgres or redis) that holds the registry cards and the election leases.
+  body: |-
+    With `autodiscover.enabled` each worker publishes a card every `autodiscover.heartbeat` with its name, cluster, URL, state and features, and reads the cards of its peers every `autodiscover.refresh`. A peer whose card is older than `autodiscover.offline_after` is offline.
+
+    The same provider runs the election of the cluster tasks. Calls to the provider are retried and guarded by a circuit breaker (`autodiscover.resilience`). A provider that is down skips slots and keeps the last peer list; it never stops the pipeline.
+
+    With autodiscover off the worker publishes no card, runs no cluster task and pulls no cache rows.
+  principles:
+    - The provider is a shared dependency of the cluster; watch its breaker.
+    - Every worker of one cluster must use the same provider and connection.
+  related:
+    - concept:cluster-tasks
+    - concept:cache-exchange
+    - config:autodiscover.enabled
+    - config:autodiscover.provider
+    - metric:drakkar_fleet_peers
+    - metric:drakkar_provider_breaker_open
+    - rule:peers-offline
+    - recipe:peer-missing
+
+- key: cluster-tasks
+  summary: A cluster task runs on one worker of the cluster per slot; the workers elect the runner through a lease of the autodiscover provider.
+  body: |-
+    A periodic task with scope `cluster` has slots computed the same way on every worker: an interval aligned to the epoch, or a UTC cron expression. At each slot every worker tries to take the lease of `<cluster>/<task>` within 10 seconds of the slot. The winner runs the task and holds the lease for the run and at least 20 seconds.
+
+    Each worker publishes a hash of its cluster task definitions in its card. Peers with another hash are counted in `drakkar_periodic_cluster_mismatch_peers`; during a rolling change the count is not zero for a while.
+  principles:
+    - Clocks of the workers must differ by less than 10 seconds.
+    - Every worker of a cluster must declare the same cluster tasks with the same schedule.
+    - A lease held at stop is not released early; it ends by itself.
+  related:
+    - concept:autodiscover
+    - metric:drakkar_periodic_cluster_slots_total
+    - metric:drakkar_periodic_cluster_mismatch_peers
+    - event:periodic_run
+    - rule:cluster-tasks-mismatch
+    - recipe:cluster-task-not-running
+
+- key: cache-exchange
+  summary: The cache exchange lets each worker pull the cluster and global cache rows that its peers wrote, over HTTP.
+  body: |-
+    The cache is a local store of keys and values with a time to live and a scope: `local` (this worker only), `cluster` or `global`. Every `cache.exchange.interval` each worker asks its online peers for the rows they wrote since its last cursor (`GET /api/v1/peer/cache/changes`). The last write wins.
+
+    The exchange needs autodiscover to find the peers. It gives no ordering or freshness guarantee: a row can arrive one or more intervals late.
+  principles:
+    - Use the cache for values that are safe to read late or not at all.
+    - A delete is local; it does not reach the peers.
+  related:
+    - concept:autodiscover
+    - config:cache.exchange.interval
+    - metric:drakkar_cache_sync_errors_total
+    - metric:drakkar_cache_peer_sync_timeouts_total
+    - route:GET /api/v1/peer/cache/changes
+
+- key: runtime-health
+  summary: The runtime health monitor measures how late the event loop runs, detects stalls and records the stacks that blocked it.
+  body: |-
+    A heartbeat runs every `runtime_health.tick` and measures how late it wakes: that delay is the loop lag. The state is `healthy`, `degraded` (lag at or above `runtime_health.warn_lag`) or `stalled` (no heartbeat for `runtime_health.stall`). During a stall a separate thread captures the stack of the loop and writes a `runtime_stall` event.
+
+    Each span out of `healthy` becomes a lag episode with a verdict: `blocked` (one call blocked the loop), `cpu_bound` (the loop computed all the time), `starved` (the host gave the process no CPU) or `inconclusive`.
+  principles:
+    - A stalled loop stops every partition, sink and probe of the worker.
+    - Read the verdict before you change code; a starved worker needs CPU, not a code change.
+  related:
+    - config:runtime_health.warn_lag
+    - config:runtime_health.stall
+    - metric:drakkar_runtime_health_state
+    - metric:drakkar_loop_lag_peak_seconds
+    - event:runtime_stall
+    - event:runtime_lag_episode
+    - rule:worker-stalled
+    - recipe:worker-stalled
+
+- key: http-source
+  summary: The HTTP source takes work as HTTP requests; each request runs through the arrange, execute and result steps and answers the result.
+  body: |-
+    With `sources.http.enabled` the worker listens on `sources.http.port`. Each request is checked (client token, rate limit, body size), turned into tasks by the handler's HTTP arrange hook, run in the executor pool and answered with the result. A request that takes longer than `sources.http.request_timeout` answers 504.
+
+    An HTTP request has no partition and no offset: its events use partition -1. The results go to the sinks only with `sources.http.deliver_to_sinks`. The HTTP source shares the executor pool and the pending budget with the Kafka source.
+  principles:
+    - The worker does not run a failed or timed-out request again; the client decides to send it again.
+    - At most sources.http.max_concurrent requests run at one time; others answer at once.
+  related:
+    - config:sources.http.enabled
+    - config:sources.http.request_timeout
+    - metric:drakkar_webapp_requests_total
+    - metric:drakkar_webapp_inflight
+    - event:webapp_request_received
+
+- key: databases-view
+  summary: The Databases page of the UI lists the recorder files, the history folder, the archives and the storage use, with downloads and slices.
+  body: |-
+    The page reads `GET /api/v1/debug/databases`. It shows the own files of the worker (the memory store, the live file, closed files), the sealed history of the cluster, the archives, the merge results, the storage and the recorder state.
+
+    From it an operator can download a sealed file, an archive, a snapshot of the live file or memory store, or a slice of the events of one time range, and merge files. Downloads are bounded so that they do not take the disk or the event loop.
+  principles:
+    - A download reads files off the event loop; many large downloads at once still use disk and network.
+  related:
+    - concept:sealed-history
+    - concept:archive
+    - route:GET /api/v1/debug/databases
+    - route:GET /api/v1/debug/slice
+
+- key: agent-surface
+  summary: The agent routes under /api/v1/agent explain a running worker to an AI agent; they are read-only and off by default.
+  body: |-
+    With `agent.enabled` the API server answers six routes: the index, the manual (this knowledge), the effective config, the metrics with their meaning, the live state and the rule-based findings. They need only `api.enabled`, so they work with the UI off.
+
+    Set `agent.auth_token`: the config and the state show the worker to anyone who can reach the API port. Secret values are masked. Task output text is sent only with `agent.include_payloads`.
+
+    Start at the index, then call the diagnose route, then read the manual topics it names.
+  principles:
+    - The agent routes never change the worker.
+    - Every answer is bounded in size; ask for parts to keep it small.
+  related:
+    - config:agent.enabled
+    - config:agent.auth_token
+    - config:agent.include_payloads
+    - rule:agent-unauthenticated

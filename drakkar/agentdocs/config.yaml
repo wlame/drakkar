@@ -1,0 +1,260 @@
+# Advice for config keys. The meaning of a key is its description in the config metadata;
+# an entry here adds when and why to change it. Keys use * for map names.
+
+- key: worker.name
+  summary: The literal name of the worker.
+  advice: Set a stable, unique name (or worker.name_env) for every worker that keeps files or joins a cluster; a generated name changes at each start and leaves orphan folders.
+  related:
+    - concept:worker-name
+
+- key: worker.name_env
+  summary: The environment variable that holds the worker name.
+  advice: In a container platform, point it at a variable that holds the pod or instance name, so each replica gets its own stable name.
+  related:
+    - concept:worker-name
+
+- key: cluster.name
+  summary: The name of the cluster this worker belongs to.
+  advice: Give every worker of one deployment the same cluster name; workers with another name do not share the history, the cluster tasks or the cache exchange.
+  related:
+    - concept:worker-name
+    - concept:cluster-tasks
+
+- key: sources.kafka.max_queued_messages
+  summary: The number of queued messages that pauses Kafka fetching.
+  advice: Keep it above executor.window_size times the partitions of the worker so windows can fill; raise it only with memory to spare, because queued messages stay in memory.
+  related:
+    - concept:backpressure
+
+- key: sources.kafka.max_poll_interval
+  summary: The longest time between two polls before Kafka evicts the consumer.
+  advice: Keep it larger than executor.drain_timeout, because a revoke waits for the drain inside the rebalance.
+  related:
+    - concept:at-least-once
+
+- key: sources.http.request_timeout
+  summary: The time limit of one HTTP request.
+  advice: Set it above the p99 of the whole request (all tasks and hooks); a request past it answers 504 and its result is dropped.
+  related:
+    - concept:http-source
+
+- key: sources.http.max_concurrent
+  summary: The most HTTP requests that run at one time.
+  advice: Keep it near the number of requests the executor pool can serve at once; extra requests only wait for slots.
+  related:
+    - concept:http-source
+
+- key: executor.max_executors
+  summary: The number of task subprocesses that run at one time.
+  advice: Start at the CPU count of the container for CPU-bound tasks; go higher only for tasks that wait on I/O. Above drakkar_host_effective_cpus the tasks share cores.
+  related:
+    - concept:task
+    - metric:drakkar_executor_pool_waiting
+    - metric:drakkar_host_effective_cpus
+
+- key: executor.task_timeout
+  summary: The wall-clock time limit of one task subprocess.
+  advice: Set it above the p99 task duration with room; a timeout kills the whole process group and counts as a failure.
+  related:
+    - concept:task
+    - metric:drakkar_executor_timeouts_total
+
+- key: executor.max_stdout
+  summary: The most standard output kept per task.
+  advice: Set a cap when tasks can write large output; the output is held in memory until the result hooks end, and 0 means no cap.
+  related:
+    - concept:pending-budget
+    - metric:drakkar_executor_output_truncated_total
+
+- key: executor.max_stderr
+  summary: The most standard error kept per task.
+  advice: Set a cap when tasks can write large error text; 0 means no cap.
+  related:
+    - metric:drakkar_executor_output_truncated_total
+
+- key: executor.window_size
+  summary: The most messages in one arrange window.
+  advice: Raise it when arrange gains from seeing many messages at once (batching, deduplication); it does not raise throughput by itself, because the pending budget sizes the windows.
+  related:
+    - concept:window
+
+- key: executor.max_retries
+  summary: The most retries of one failed task.
+  advice: Retries run at once with no backoff; keep it low for failures that a retry cannot fix.
+  related:
+    - concept:task
+    - metric:drakkar_task_retries_total
+
+- key: executor.on_failure
+  summary: What the default on_error does with a task that failed for good.
+  advice: Use dlq when a failed message must not be lost silently; skip drops the task and commits the message.
+  related:
+    - concept:dlq
+    - concept:task
+
+- key: executor.drain_timeout
+  summary: The longest wait for work in flight at a stop or a revoke.
+  advice: Set it above the p99 task duration so a revoke rarely cancels work, and below sources.kafka.max_poll_interval.
+  related:
+    - concept:at-least-once
+    - metric:drakkar_drain_timeout_hit_total
+
+- key: executor.max_pending_tasks
+  summary: The most tasks that are created and not settled before new windows wait.
+  advice: Raise it when the budget is full while the executor pool has free slots and memory allows; lower it to bound memory.
+  related:
+    - concept:pending-budget
+    - rule:budget-saturated
+
+- key: executor.max_pending_bytes
+  summary: The most bytes of task stdin and kept output before new windows wait.
+  advice: Set it from the memory of the container minus the other users; it is the main memory bound of the pipeline.
+  related:
+    - concept:pending-budget
+    - recipe:worker-memory-high
+
+- key: sinks.defaults.*
+  summary: The default failure policy of every sink instance.
+  advice: Set the policy once here and override it only for sinks that need another one; on_failure dlq keeps failed messages, skip drops them.
+  related:
+    - concept:sinks-and-delivery
+
+- key: sinks.defaults.breaker_failures
+  summary: The consecutive failures that open the circuit of a sink.
+  advice: Lower it to fail fast to the DLQ when the downstream is often down; raise it when single failures are common and short.
+  related:
+    - metric:drakkar_sink_circuit_open
+
+- key: dlq.topic
+  summary: The Kafka topic of the DLQ.
+  advice: Create the topic before the worker starts, with a retention long enough for an operator to read and replay the records.
+  related:
+    - concept:dlq
+
+- key: dlq.on_send_failure
+  summary: What happens when no DLQ record can be written.
+  advice: Use stall when no message may be lost, and drop when progress matters more; alert on drakkar_dlq_send_failures_total with either value.
+  related:
+    - concept:dlq
+    - metric:drakkar_dlq_dropped_payloads_total
+
+- key: storage.dir
+  summary: The local folder of the own folders of the workers.
+  advice: Use a local disk with room for the recorder files of a few rotations; never a network filesystem shared between hosts.
+  related:
+    - concept:own-folder
+    - recipe:disk-filling
+
+- key: storage.shared_dir
+  summary: The folder that every worker of the cluster sees.
+  advice: Set it to a volume mounted on every worker to share the history and archive the whole cluster at once.
+  related:
+    - concept:sealed-history
+    - concept:archive
+
+- key: recorder.enabled
+  summary: Durable recording of the pipeline events.
+  advice: Keep it on for post-incident traces; turn it off only when disk and CPU are scarce and the memory store of the UI is enough.
+  related:
+    - concept:recorder
+
+- key: recorder.provider
+  summary: Where durable recording goes, sqlite or postgres.
+  advice: Use postgres when workers have no persistent local disk or when the cluster needs one searchable history; sqlite needs storage.dir.
+  related:
+    - concept:recorder
+
+- key: recorder.max_buffer_rows
+  summary: The rows the recorder queues hold.
+  advice: Raise it when drakkar_recorder_dropped_events_total grows during short bursts; it costs memory.
+  related:
+    - recipe:recorder-dropping
+
+- key: recorder.memory.window
+  summary: How long the memory store keeps events.
+  advice: Raise it for longer live views, lower it to save memory; the row cap and the size cap can bind first.
+  related:
+    - concept:memory-store
+
+- key: recorder.memory.max_size
+  summary: The data budget of the memory store.
+  advice: Lower it on small containers; the allocated memory can stay near the peak after a burst.
+  related:
+    - concept:memory-store
+    - recipe:worker-memory-high
+
+- key: recorder.capture.output
+  summary: Whether task events keep the stdout and stderr text.
+  advice: Turn it off when task output is large or sensitive; the events then keep no stdout and stderr text.
+  related:
+    - concept:recorder
+    - recipe:disk-filling
+
+- key: recorder.archive.retention
+  summary: How long archives are kept.
+  advice: Set it to the history an incident needs; 0 keeps archives for ever and the disk fills.
+  related:
+    - concept:archive
+    - metric:drakkar_recorder_archive_bytes
+
+- key: cache.max_memory_entries
+  summary: The most cache entries kept in memory.
+  advice: Size it from the hot key set and the size of the values; 0 means no cap and can use all memory.
+  related:
+    - metric:drakkar_cache_evictions_total
+
+- key: cache.exchange.interval
+  summary: The time between two cache exchange cycles.
+  advice: Lower it for fresher peer rows at the cost of more requests; keep it above the time one cycle needs.
+  related:
+    - concept:cache-exchange
+
+- key: autodiscover.enabled
+  summary: Whether the worker joins the registry and the election.
+  advice: Turn it on for every worker of a cluster that uses cluster tasks, the cache exchange or the cluster views of the UI.
+  related:
+    - concept:autodiscover
+
+- key: autodiscover.provider
+  summary: The provider of the registry and the election.
+  advice: Use a service the cluster already depends on; filesystem needs storage.shared_dir on every worker.
+  related:
+    - concept:autodiscover
+
+- key: autodiscover.offline_after
+  summary: The card age after which a peer is offline.
+  advice: Keep it at least twice autodiscover.heartbeat so one late publish does not mark a peer offline.
+  related:
+    - rule:peers-offline
+
+- key: runtime_health.warn_lag
+  summary: The loop lag that marks the runtime degraded.
+  advice: Lower it to see smaller delays, raise it on workers whose hooks do expected short CPU bursts.
+  related:
+    - concept:runtime-health
+    - rule:loop-lag-high
+
+- key: runtime_health.stall
+  summary: The heartbeat age that marks the runtime stalled and captures stacks.
+  advice: Keep the default unless stalls shorter than it matter for the workload.
+  related:
+    - concept:runtime-health
+
+- key: agent.enabled
+  summary: Whether the agent routes answer.
+  advice: Turn it on where an agent helps operators; set agent.auth_token at the same time.
+  related:
+    - concept:agent-surface
+
+- key: agent.auth_token
+  summary: The bearer token of the agent routes.
+  advice: Set a long random value from a secret store; without it anyone who reaches the API port reads the config and the state.
+  related:
+    - concept:agent-surface
+    - rule:agent-unauthenticated
+
+- key: agent.include_payloads
+  summary: Whether the state answer may hold task output text.
+  advice: Keep it off when task output can hold personal or secret data; the agent then sees exit codes and error kinds only.
+  related:
+    - concept:agent-surface

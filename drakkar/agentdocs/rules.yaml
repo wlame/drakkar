@@ -1,0 +1,130 @@
+# The diagnose rules. The condition of each rule is code; this file holds its text.
+
+- key: worker-stalled
+  summary: The event loop of the worker does not run now.
+  severity: critical
+  title: The event loop is stalled
+  explain: concept:runtime-health
+  suggestion: Read the last runtime_stall event for the stack that blocks the loop, and move that call off the event loop.
+  inputs:
+    - health.state
+    - health.heartbeat_age_ms
+
+- key: loop-lag-high
+  summary: The event loop ran late by runtime_health.warn_lag or more in the last 60 seconds.
+  severity: warning
+  title: The event loop runs late
+  explain: concept:runtime-health
+  suggestion: Read the open lag episode and its verdict; offload CPU work for cpu_bound, find the blocking call for blocked, give the worker more CPU for starved.
+  inputs:
+    - health.window_peak_lag_ms
+    - health.state
+    - runtime_health.warn_lag
+
+- key: budget-saturated
+  summary: The pending tasks or the pending bytes reached their limit, so partition loops wait before they take new windows.
+  severity: warning
+  title: New windows wait for the pending budget
+  explain: concept:pending-budget
+  suggestion: When the executor pool is busy, add workers or make tasks faster; when it is idle, find the slow hook or sink delivery.
+  inputs:
+    - budget.tasks
+    - budget.max_tasks
+    - budget.bytes
+    - budget.max_bytes
+
+- key: pool-saturated
+  summary: Every executor slot is busy and tasks wait for a slot.
+  severity: info
+  title: The executor pool is full
+  explain: concept:task
+  suggestion: When the host has free CPU, raise executor.max_executors; otherwise add workers.
+  inputs:
+    - budget.pool_active
+    - budget.pool_max
+    - budget.pool_waiting
+
+- key: partition-dead
+  summary: A partition loop stopped after an unexpected error and was not restarted; the partition makes no progress.
+  severity: critical
+  title: A partition loop is dead
+  explain: concept:offsets
+  suggestion: Read the partition_processor_died log line for the error, fix the cause and restart the worker.
+  inputs:
+    - partitions[].dead
+    - partitions[].partition
+
+- key: partition-paused-by-debug
+  summary: An operator paused consuming from the UI; the partition takes no new messages until the pause ends.
+  severity: info
+  title: Consuming is paused by an operator
+  explain: concept:backpressure
+  suggestion: Resume consuming from the Live page or with POST /api/v1/debug/consume-resume when the pause is no longer needed.
+  inputs:
+    - partitions[].paused_by
+
+- key: sink-breaker-open
+  summary: The circuit breaker of a sink is open; its deliveries follow the on_failure policy without a call to the sink.
+  severity: critical
+  title: A sink circuit breaker is open
+  explain: concept:sinks-and-delivery
+  suggestion: Check the downstream system of the sink and its connection; the breaker closes by itself after a successful probe.
+  inputs:
+    - sinks[].breaker_open
+    - sinks[].type
+    - sinks[].name
+
+- key: lag-growing
+  summary: The sum of the broker lag of the partitions grew since a diagnose call at least 60 seconds earlier.
+  severity: warning
+  title: The consumer lag grows
+  explain: recipe:lag-growing
+  suggestion: Compare the input rate with the completed task rate, then follow the lag-growing recipe.
+  inputs:
+    - partitions[].lag
+
+- key: recorder-dropping
+  summary: The recorder dropped events or Postgres rows since the previous diagnose call; the event history has gaps.
+  severity: warning
+  title: The recorder drops events
+  explain: recipe:recorder-dropping
+  suggestion: Check the disk or the Postgres table of the recorder, and the recorder queue limits.
+  inputs:
+    - drakkar_recorder_dropped_events_total
+    - drakkar_recorder_postgres_dropped_rows_total
+
+- key: dlq-writing
+  summary: The worker wrote DLQ records since the previous diagnose call.
+  severity: info
+  title: Messages go to the DLQ
+  explain: concept:dlq
+  suggestion: Read the dk-stage and dk-error headers of the new DLQ records to find the failing stage.
+  inputs:
+    - drakkar_sink_dlq_messages_total
+
+- key: peers-offline
+  summary: Some peers in the registry did not publish their card in time and count as offline.
+  severity: warning
+  title: Peers of the cluster are offline
+  explain: recipe:peer-missing
+  suggestion: Check that the offline workers run; a worker that was removed leaves its card until autodiscover.prune_after.
+  inputs:
+    - autodiscover.peers_offline
+
+- key: cluster-tasks-mismatch
+  summary: Online peers of this cluster declare other cluster tasks or other schedules than this worker.
+  severity: warning
+  title: Cluster task definitions differ in the cluster
+  explain: concept:cluster-tasks
+  suggestion: Finish the rolling change, or deploy the same handler code and config on every worker of the cluster.
+  inputs:
+    - autodiscover.cluster_tasks_match
+
+- key: agent-unauthenticated
+  summary: The agent routes need no token; anyone who reaches the API port can read the config and the state.
+  severity: info
+  title: The agent routes have no token
+  explain: concept:agent-surface
+  suggestion: Set agent.auth_token, or keep the API port on a private network.
+  inputs:
+    - agent.auth_token

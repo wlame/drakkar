@@ -1,0 +1,4 @@
+# The agent knowledge registry and its contract fixture are read as raw bytes
+# (their hash is the registry version), so checkouts must not change line endings.
+drakkar/agentdocs/* -text
+tests/fixtures/agent_contract.json -text
