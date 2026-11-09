@@ -52,12 +52,14 @@ async def arrange(self, messages, pending):
     tasks = []
     for msg in messages:
         binary = '/usr/bin/fast-search' if msg.payload.priority == 'high' else '/usr/bin/deep-search'
-        tasks.append(ExecutorTask(
-            task_id=make_task_id('search'),
-            args=['--query', msg.payload.query],
-            source_offsets=[msg.offset],
-            binary_path=binary,
-        ))
+        tasks.append(
+            ExecutorTask(
+                task_id=make_task_id('search'),
+                args=['--query', msg.payload.query],
+                source_offsets=[msg.offset],
+                binary_path=binary,
+            )
+        )
     return tasks
 ```
 
@@ -235,6 +237,7 @@ The default `on_error` returns `executor.on_failure`, which is `SKIP` unless the
 ```python
 from drakkar import BaseDrakkarHandler, ErrorAction, ExecutorError, ExecutorTask
 
+
 class MyHandler(BaseDrakkarHandler):
     async def on_error(self, task, error):
         # Retry transient failures (simulated by exit code 75)
@@ -243,13 +246,15 @@ class MyHandler(BaseDrakkarHandler):
 
         # Timeout: try a lighter binary as fallback
         if error.kind == 'timeout':
-            return [ExecutorTask(
-                task_id=make_task_id('fallback'),
-                args=task.args + ['--fast-mode'],
-                source_offsets=task.source_offsets,
-                metadata=task.metadata,
-                binary_path='/usr/bin/lightweight-search',
-            )]
+            return [
+                ExecutorTask(
+                    task_id=make_task_id('fallback'),
+                    args=task.args + ['--fast-mode'],
+                    source_offsets=task.source_offsets,
+                    metadata=task.metadata,
+                    binary_path='/usr/bin/lightweight-search',
+                )
+            ]
 
         # Everything else: skip
         return ErrorAction.SKIP
@@ -366,6 +371,7 @@ This is useful for passing structured input (JSON, configuration) that would be 
 import json
 from drakkar import ExecutorTask, make_task_id
 
+
 async def arrange(self, messages, pending):
     tasks = []
     for msg in messages:
@@ -374,13 +380,15 @@ async def arrange(self, messages, pending):
             'filters': msg.payload.filters,
             'options': {'max_results': 100, 'timeout_ms': 5000},
         }
-        tasks.append(ExecutorTask(
-            task_id=make_task_id('search'),
-            args=['--mode', 'stdin'],
-            source_offsets=[msg.offset],
-            metadata={'request_id': msg.payload.request_id},
-            stdin=json.dumps(payload),
-        ))
+        tasks.append(
+            ExecutorTask(
+                task_id=make_task_id('search'),
+                args=['--mode', 'stdin'],
+                source_offsets=[msg.offset],
+                metadata={'request_id': msg.payload.request_id},
+                stdin=json.dumps(payload),
+            )
+        )
     return tasks
 ```
 
@@ -532,15 +540,17 @@ Set `env` on `ExecutorTask` in `arrange()` for task-specific values:
 async def arrange(self, messages, pending):
     tasks = []
     for msg in messages:
-        tasks.append(ExecutorTask(
-            task_id=make_task_id('proc'),
-            args=['--process'],
-            source_offsets=[msg.offset],
-            env={
-                'REQUEST_ID': msg.payload.request_id,
-                'PRIORITY': str(msg.payload.priority),
-            },
-        ))
+        tasks.append(
+            ExecutorTask(
+                task_id=make_task_id('proc'),
+                args=['--process'],
+                source_offsets=[msg.offset],
+                env={
+                    'REQUEST_ID': msg.payload.request_id,
+                    'PRIORITY': str(msg.payload.priority),
+                },
+            )
+        )
     return tasks
 ```
 

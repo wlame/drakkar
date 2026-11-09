@@ -183,24 +183,22 @@ class ScanProbeDetails(BaseModel):
 exercise the popup, not to carry real business data:
 
 ```python
-    async def on_task_complete(self, result):
-        # non-empty lines of stdout, e.g. ['line 12: TODO', 'line 40: TODO']
-        matches = [line for line in result.stdout.splitlines() if line.strip()]
-        probe.append(
-            'file_scans',
-            FileScanRow(
-                file_path=result.task.metadata['file_path'],
-                pattern=result.task.metadata['pattern'],
-                match_count=len(matches),
-                duration_ms=round(result.duration_seconds * 1000),
-                outcome='flagged' if matches else 'clean',
-                scan_meta={'encoding': 'utf-8', 'scanner_version': '3.2.1'},
-                sample_lines=[
-                    SampleLineRow(line_no=i + 1, text=line[:80]) for i, line in enumerate(matches[:3])
-                ],
-            ),
-        )
-        ...
+async def on_task_complete(self, result):
+    # non-empty lines of stdout, e.g. ['line 12: TODO', 'line 40: TODO']
+    matches = [line for line in result.stdout.splitlines() if line.strip()]
+    probe.append(
+        'file_scans',
+        FileScanRow(
+            file_path=result.task.metadata['file_path'],
+            pattern=result.task.metadata['pattern'],
+            match_count=len(matches),
+            duration_ms=round(result.duration_seconds * 1000),
+            outcome='flagged' if matches else 'clean',
+            scan_meta={'encoding': 'utf-8', 'scanner_version': '3.2.1'},
+            sample_lines=[SampleLineRow(line_no=i + 1, text=line[:80]) for i, line in enumerate(matches[:3])],
+        ),
+    )
+    ...
 ```
 
 The links element needs a second named base — add it beside the one from
@@ -331,15 +329,17 @@ would be named — `renderer` is exclusive with those three, but `hint` still
 composes:
 
 ```python
-        columns={
-            'file_path': Column(
-                link_template='{artifact_store}/files/{value}',
-                hint='Open {value} in the artifact store',
-            ),
-            'duration_ms': Column(format='duration_ms'),
-            'outcome': Column(badge_colors={'clean': 'green', 'flagged': 'red', '*': 'gray'}),
-            'match_count': Column(renderer='matchGauge', hint='{value} matches found'),
-        },
+columns = (
+    {
+        'file_path': Column(
+            link_template='{artifact_store}/files/{value}',
+            hint='Open {value} in the artifact store',
+        ),
+        'duration_ms': Column(format='duration_ms'),
+        'outcome': Column(badge_colors={'clean': 'green', 'flagged': 'red', '*': 'gray'}),
+        'match_count': Column(renderer='matchGauge', hint='{value} matches found'),
+    },
+)
 ```
 
 `match_count` now renders as a small proportional bar instead of a plain

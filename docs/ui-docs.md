@@ -175,7 +175,7 @@ links, declared page widgets, and [timeline event](ui-timeline-events.md)
 `link` templates alike:
 
 ```python
-link_template='{docs}/reference/labels/#module'
+link_template = '{docs}/reference/labels/#module'
 ```
 
 `{docs}` resolves to the mount path this worker serves. It is reserved:

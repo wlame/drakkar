@@ -134,6 +134,7 @@ The same reader serves the pages that peers pull from this worker.
 import drakkar as dk
 from drakkar import CacheScope
 
+
 class MyHandler(dk.BaseDrakkarHandler[MyInput, MyOutput]):
     async def arrange(self, messages, pending):
         tasks = []
@@ -149,23 +150,27 @@ class MyHandler(dk.BaseDrakkarHandler[MyInput, MyOutput]):
 
             if cached is not None:
                 # Skip the subprocess entirely — hand the result back directly
-                tasks.append(dk.ExecutorTask(
-                    task_id=dk.make_task_id('search'),
-                    source_offsets=[msg.offset],
-                    metadata={'request_id': req.request_id},
-                    labels={'source': 'cache'},
-                    precomputed=dk.PrecomputedResult(stdout=cached),
-                ))
+                tasks.append(
+                    dk.ExecutorTask(
+                        task_id=dk.make_task_id('search'),
+                        source_offsets=[msg.offset],
+                        metadata={'request_id': req.request_id},
+                        labels={'source': 'cache'},
+                        precomputed=dk.PrecomputedResult(stdout=cached),
+                    )
+                )
                 continue
 
             # Cache miss: run the subprocess
-            tasks.append(dk.ExecutorTask(
-                task_id=dk.make_task_id('search'),
-                args=[req.pattern, req.file_path],
-                source_offsets=[msg.offset],
-                metadata={'request_id': req.request_id},
-                labels={'source': 'subprocess'},
-            ))
+            tasks.append(
+                dk.ExecutorTask(
+                    task_id=dk.make_task_id('search'),
+                    args=[req.pattern, req.file_path],
+                    source_offsets=[msg.offset],
+                    metadata={'request_id': req.request_id},
+                    labels={'source': 'subprocess'},
+                )
+            )
         return tasks
 
     async def on_task_complete(self, result):
@@ -178,7 +183,7 @@ class MyHandler(dk.BaseDrakkarHandler[MyInput, MyOutput]):
             self.cache.set(
                 cache_key,
                 result.stdout,
-                ttl=3600,           # 1 hour TTL
+                ttl=3600,  # 1 hour TTL
                 scope=CacheScope.LOCAL,
             )
         # ... return CollectResult with sink payloads as usual
@@ -442,10 +447,10 @@ access). Does not consult the DB.
 
 ```python
 class CacheScope(StrEnum):
-    MEMORY = 'memory'     # this worker's memory only; never flushed to SQLite
-    LOCAL = 'local'       # this worker only; peers never pull
-    CLUSTER = 'cluster'   # same-cluster peers pull it through the exchange
-    GLOBAL = 'global'     # all peers (any cluster) pull it through the exchange
+    MEMORY = 'memory'  # this worker's memory only; never flushed to SQLite
+    LOCAL = 'local'  # this worker only; peers never pull
+    CLUSTER = 'cluster'  # same-cluster peers pull it through the exchange
+    GLOBAL = 'global'  # all peers (any cluster) pull it through the exchange
 ```
 
 The scopes form a reach ladder — each step widens where the entry can

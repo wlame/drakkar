@@ -70,7 +70,7 @@ from drakkar import KafkaPayload
 
 KafkaPayload(
     data=search_result,
-    key=b"request-abc",
+    key=b'request-abc',
 )
 ```
 
@@ -272,7 +272,7 @@ sinks:
 
 ```python
 # sink='' (default) routes to "results" automatically
-KafkaPayload(data=output, key=b"abc")
+KafkaPayload(data=output, key=b'abc')
 ```
 
 ### Multiple named sinks
@@ -290,10 +290,10 @@ sinks:
 
 ```python
 # Route to the "results" kafka sink
-KafkaPayload(sink='results', data=full_result, key=b"abc")
+KafkaPayload(sink='results', data=full_result, key=b'abc')
 
 # Route to the "alerts" kafka sink
-KafkaPayload(sink='alerts', data=alert_data, key=b"abc")
+KafkaPayload(sink='alerts', data=alert_data, key=b'abc')
 ```
 
 ### AmbiguousSinkError
@@ -452,12 +452,12 @@ after every failed attempt:
 
 ```python
 class DeliveryError(BaseModel):
-    sink_name: str            # e.g. "results"
-    sink_type: str            # e.g. "kafka", "postgres", "http"
-    error: str                # human-readable error message, URL credentials redacted
-    payloads: list[BaseModel] # the payloads that failed
-    attempt: int              # the failed attempt, from 1
-    retries_left: int         # retries left of the sink's max_retries
+    sink_name: str  # e.g. "results"
+    sink_type: str  # e.g. "kafka", "postgres", "http"
+    error: str  # human-readable error message, URL credentials redacted
+    payloads: list[BaseModel]  # the payloads that failed
+    attempt: int  # the failed attempt, from 1
+    retries_left: int  # retries left of the sink's max_retries
     declared_policy: DeliveryAction  # the sink's on_failure: DLQ or SKIP
 ```
 

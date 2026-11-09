@@ -56,6 +56,7 @@ class KafkaOut(BaseModel):
 
 class RankRequest(BaseModel):
     """Body of POST /process."""
+
     request_id: str
     query: str
     top_k: int = 10
@@ -63,6 +64,7 @@ class RankRequest(BaseModel):
 
 class RankResponse(BaseModel):
     """Body of the JSON response under the ``result`` key."""
+
     request_id: str
     items: list[str]
     score: float

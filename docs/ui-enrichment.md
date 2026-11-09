@@ -54,7 +54,7 @@ a clickable link. The grammar has three token kinds:
 | `{<base>}` | A named URL base from `ui.link_bases` | Anywhere |
 
 ```python
-link_template='{jenkins}/job/{row.job_name}/{value}'
+link_template = '{jenkins}/job/{row.job_name}/{value}'
 ```
 
 This resolves `{jenkins}` from config, `{row.job_name}` from the sibling
@@ -246,10 +246,10 @@ class Link(BaseModel):
 
 class Element(BaseModel):
     view: Literal['string', 'keyvalue', 'table', 'links', 'custom']
-    field: str | None = None      # required for every view except 'links'
+    field: str | None = None  # required for every view except 'links'
     label: str | None = None
     links: list[Link] | None = None  # required for view='links', forbidden otherwise
-    renderer: str | None = None      # required for and exclusive to view='custom'
+    renderer: str | None = None  # required for and exclusive to view='custom'
 
 
 class Detail(BaseModel):
@@ -382,12 +382,15 @@ A renderer name is a plain identifier: `^[a-zA-Z_][a-zA-Z0-9_]*$`.
 
 ```python
 render_payload: dict = probe_field(
-    section='Enrichment', view='custom', renderer='orderCard', default_factory=dict,
+    section='Enrichment',
+    view='custom',
+    renderer='orderCard',
+    default_factory=dict,
 )
 ```
 
 ```python
-columns={'build_id': Column(renderer='buildChip', hint='Open build {value}')}
+columns = {'build_id': Column(renderer='buildChip', hint='Open build {value}')}
 ```
 
 ```python

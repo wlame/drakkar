@@ -63,17 +63,24 @@ uv add py-drakkar
 # handler.py
 from pydantic import BaseModel
 from drakkar import (
-    BaseDrakkarHandler, CollectResult, ExecutorTask,
-    KafkaPayload, PostgresPayload, make_task_id,
+    BaseDrakkarHandler,
+    CollectResult,
+    ExecutorTask,
+    KafkaPayload,
+    PostgresPayload,
+    make_task_id,
 )
+
 
 class JobInput(BaseModel):
     job_id: str
     command: str
 
+
 class JobOutput(BaseModel):
     job_id: str
     result: str
+
 
 class MyHandler(BaseDrakkarHandler[JobInput, JobOutput]):
     async def arrange(self, messages, pending):

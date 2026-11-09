@@ -45,12 +45,11 @@ fourth opt the handler into the [HTTP source](sources.md) pipeline:
 
 ```python
 # Two-param form (Kafka only). HttpRequestT / HttpResponseT default to None.
-class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
-    ...
+class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]): ...
+
 
 # Four-param form (Kafka + HTTP). Required when sources.http.enabled=true.
-class MyHandler(BaseDrakkarHandler[KafkaIn, KafkaOut, HttpReq, HttpResp]):
-    ...
+class MyHandler(BaseDrakkarHandler[KafkaIn, KafkaOut, HttpReq, HttpResp]): ...
 ```
 
 The HTTP slots use [PEP 696 default `TypeVars`](https://peps.python.org/pep-0696/),
@@ -150,6 +149,7 @@ point where config can be changed at runtime.
 ```python
 import os
 
+
 async def on_startup(self, config: dk.DrakkarConfig) -> dk.DrakkarConfig:
     cpu_count = os.cpu_count() or 4
     config.executor.max_executors = cpu_count * 2
@@ -236,12 +236,14 @@ async def arrange(self, messages, pending):
         if task_id in pending.pending_task_ids:
             continue
 
-        tasks.append(dk.ExecutorTask(
-            task_id=task_id,
-            args=[req.pattern, req.file_path],
-            metadata={'request_id': req.request_id},
-            source_offsets=[msg.offset],
-        ))
+        tasks.append(
+            dk.ExecutorTask(
+                task_id=task_id,
+                args=[req.pattern, req.file_path],
+                metadata={'request_id': req.request_id},
+                source_offsets=[msg.offset],
+            )
+        )
     return tasks
 ```
 
@@ -262,18 +264,22 @@ async def arrange(self, messages, pending):
         cached = await self.cache.get(msg.payload.request_id)
         if cached is not None:
             # Short-circuit: handler supplies the outcome directly.
-            tasks.append(dk.ExecutorTask(
-                task_id=dk.make_task_id('direct'),
-                source_offsets=[msg.offset],
-                metadata={'request_id': msg.payload.request_id},
-                precomputed=dk.PrecomputedResult(stdout=cached),
-            ))
+            tasks.append(
+                dk.ExecutorTask(
+                    task_id=dk.make_task_id('direct'),
+                    source_offsets=[msg.offset],
+                    metadata={'request_id': msg.payload.request_id},
+                    precomputed=dk.PrecomputedResult(stdout=cached),
+                )
+            )
         else:
-            tasks.append(dk.ExecutorTask(
-                task_id=dk.make_task_id('run'),
-                args=['--process', msg.payload.request_id],
-                source_offsets=[msg.offset],
-            ))
+            tasks.append(
+                dk.ExecutorTask(
+                    task_id=dk.make_task_id('run'),
+                    args=['--process', msg.payload.request_id],
+                    source_offsets=[msg.offset],
+                )
+            )
     return tasks
 ```
 
@@ -403,10 +409,7 @@ async def on_message_complete(self, group: dk.MessageGroup) -> dk.CollectResult 
     if req is None or group.is_empty:
         return None
 
-    total_matches = sum(
-        sum(1 for line in r.stdout.split('\n') if line)
-        for r in group.results
-    )
+    total_matches = sum(sum(1 for line in r.stdout.split('\n') if line) for r in group.results)
 
     aggregate = RequestSummary(
         request_id=req.request_id,
@@ -479,21 +482,26 @@ async def arrange(self, messages, pending):
             cached = await self.cache.get(cache_key)
 
         if cached is not None:
-            tasks.append(dk.ExecutorTask(
-                task_id=dk.make_task_id('search'),
-                source_offsets=[msg.offset],
-                precomputed=dk.PrecomputedResult(stdout=cached),
-            ))
+            tasks.append(
+                dk.ExecutorTask(
+                    task_id=dk.make_task_id('search'),
+                    source_offsets=[msg.offset],
+                    precomputed=dk.PrecomputedResult(stdout=cached),
+                )
+            )
         else:
-            tasks.append(dk.ExecutorTask(
-                task_id=dk.make_task_id('search'),
-                args=[msg.payload.pattern],
-                source_offsets=[msg.offset],
-            ))
+            tasks.append(
+                dk.ExecutorTask(
+                    task_id=dk.make_task_id('search'),
+                    args=[msg.payload.pattern],
+                    source_offsets=[msg.offset],
+                )
+            )
     return tasks
 
+
 async def on_task_complete(self, result):
-    if result.pid is not None:   # skip precomputed — already cached
+    if result.pid is not None:  # skip precomputed — already cached
         cache_key = f'search|{result.task.args[0]}'
         self.cache.set(cache_key, result.stdout, ttl=3600)
     # ... return CollectResult as usual
@@ -677,7 +685,7 @@ count.
 async def on_delivery_error(self, error):
     if error.sink_type == 'redis':  # SETs are safe to re-apply
         return dk.DeliveryAction.RETRY
-    return error.declared_policy    # the sink's on_failure for everything else
+    return error.declared_policy  # the sink's on_failure for everything else
 ```
 
 ### on_assign
@@ -737,6 +745,7 @@ This drains older Kafka messages first, which keeps `MessageTracker` / `OffsetTr
 ```python
 class PartitionAwareHandler(BaseDrakkarHandler):
     """Keep partition fairness AND prefer older messages within each partition."""
+
     def task_priority(self, task):
         offset = min(task.source_offsets)
         # Group every 1000 offsets into one tier so partitions roughly take turns.
@@ -745,6 +754,7 @@ class PartitionAwareHandler(BaseDrakkarHandler):
 
 class TieredHandler(BaseDrakkarHandler):
     """Read a business-priority field stamped on the task by ``arrange()``."""
+
     def task_priority(self, task):
         # 0 = highest, 9 = lowest. Equal-tier tasks tiebreak by offset.
         tier = task.metadata.get('tier', 5)
@@ -893,15 +903,18 @@ as type parameters to `BaseDrakkarHandler`:
 ```python
 from pydantic import BaseModel
 
+
 class SearchRequest(BaseModel):
     request_id: str
     pattern: str
     file_path: str
 
+
 class SearchResult(BaseModel):
     request_id: str
     match_count: int
     duration_seconds: float
+
 
 class MyHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
     async def arrange(self, messages, pending):
@@ -917,8 +930,8 @@ raw bytes remain in `msg.value`.
 Access either form in your hooks:
 
 ```python
-req = msg.payload        # SearchRequest instance (or None on parse error)
-raw_bytes = msg.value    # always available
+req = msg.payload  # SearchRequest instance (or None on parse error)
+raw_bytes = msg.value  # always available
 ```
 
 ---
@@ -1048,8 +1061,8 @@ rule, the YAML overrides and the definition hash are on
 ```python
 from drakkar import periodic
 
-class MyHandler(dk.BaseDrakkarHandler[MyInput, MyOutput]):
 
+class MyHandler(dk.BaseDrakkarHandler[MyInput, MyOutput]):
     @periodic(60)
     async def reload_country_lookup_table(self):
         self.country_lookup = await fetch_country_lookup()
@@ -1092,6 +1105,7 @@ metrics page alongside built-in [Drakkar metrics](observability.md#prometheus-me
 
 ```python
 from prometheus_client import Counter, Gauge, Histogram
+
 
 class MyHandler(dk.BaseDrakkarHandler[MyInput, MyOutput]):
     items_processed = Counter(

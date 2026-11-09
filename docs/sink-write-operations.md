@@ -80,7 +80,7 @@ PostgresPayload(
     table='sessions',
     data=Session(id=1, created_at=t0, last_seen=t1),
     conflict=['id'],
-    update_columns=['last_seen'],   # created_at is preserved on conflict
+    update_columns=['last_seen'],  # created_at is preserved on conflict
 )
 ```
 
@@ -422,6 +422,7 @@ declares its fields:
 class Row(BaseModel):
     request_id: str
     answer: int
+
 
 PostgresPayload(table='results', data=Row(...))
 # INSERT INTO "results" ("answer", "request_id") VALUES ($1, $2)

@@ -17,7 +17,6 @@ from drakkar import BaseDrakkarHandler, periodic
 
 
 class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
-
     @periodic(60)
     async def reload_country_lookup_table(self):
         self.country_lookup = await load_country_lookup()

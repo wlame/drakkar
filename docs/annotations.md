@@ -17,11 +17,15 @@ async def arrange(self, messages, pending):
     for msg in messages:
         candidates = self.discover_inputs(msg)
         chosen = self.pick(candidates)
-        self.annotate(msg, 'input_selection', {
-            'candidates': candidates,
-            'chosen': chosen,
-            'reason': 'newest matching revision',
-        })
+        self.annotate(
+            msg,
+            'input_selection',
+            {
+                'candidates': candidates,
+                'chosen': chosen,
+                'reason': 'newest matching revision',
+            },
+        )
         tasks.append(self.build_task(msg, chosen))
     return tasks
 ```

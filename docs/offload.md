@@ -74,16 +74,17 @@ offloaded code:
 async def arrange(self, messages, pending):
     # 1. Warm DB-backed keys on the loop, where async get() works.
     for key in self._keys_for(messages):
-        await self.cache.get(key)          # memory-miss falls through to DB
+        await self.cache.get(key)  # memory-miss falls through to DB
 
     # 2. Crunch off-loop; peek() reads the warmed memory entries.
     plan = await self.offload(self._build_task_plan, messages)
     return [ExecutorTask(...) for item in plan]
 
+
 def _build_task_plan(self, messages):
     for msg in messages:
-        cached = self.cache.peek(self._key_of(msg))    # OK: thread-safe
-        self.cache.set(self._key_of(msg), ...)         # OK: thread-safe
+        cached = self.cache.peek(self._key_of(msg))  # OK: thread-safe
+        self.cache.set(self._key_of(msg), ...)  # OK: thread-safe
         ...
 ```
 

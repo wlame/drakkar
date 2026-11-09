@@ -291,12 +291,14 @@ messages into one task via stdin or args:
 async def arrange(self, messages, pending):
     # one task for the entire window
     batch = [msg.payload.model_dump() for msg in messages]
-    return [ExecutorTask(
-        task_id=make_task_id('batch'),
-        args=['--batch'],
-        stdin=json.dumps(batch),
-        source_offsets=[msg.offset for msg in messages],
-    )]
+    return [
+        ExecutorTask(
+            task_id=make_task_id('batch'),
+            args=['--batch'],
+            stdin=json.dumps(batch),
+            source_offsets=[msg.offset for msg in messages],
+        )
+    ]
 ```
 
 This trades latency for throughput: one process launch for 100 messages

@@ -140,19 +140,32 @@ config to express.
 
 ```python
 # table — every row, order_id linked, status badged per-column
-Widget(title='Recent orders', view='table', source=AnnotationsSource(kind_prefix='order.'),
-       columns={'order_id': Column(link_template='{shop_admin}/orders/{value}'),
-                'status': Column(badge_colors={'paid': 'green', '*': 'gray'})})
+Widget(
+    title='Recent orders',
+    view='table',
+    source=AnnotationsSource(kind_prefix='order.'),
+    columns={
+        'order_id': Column(link_template='{shop_admin}/orders/{value}'),
+        'status': Column(badge_colors={'paid': 'green', '*': 'gray'}),
+    },
+)
 
 # keyvalue — the newest row's own fields, flattened
 Widget(title='Latest order', view='keyvalue', source=AnnotationsSource(kind_prefix='order.', limit=1))
 
 # string — one field of the newest row
-Widget(title='Latest order id', view='string', field='order_id', source=AnnotationsSource(kind_prefix='order.', limit=1))
+Widget(
+    title='Latest order id', view='string', field='order_id', source=AnnotationsSource(kind_prefix='order.', limit=1)
+)
 
 # badge — one field of the newest row, colored
-Widget(title='Latest order status', view='badge', field='status',
-       badge_colors={'paid': 'green', '*': 'gray'}, source=AnnotationsSource(kind_prefix='order.', limit=1))
+Widget(
+    title='Latest order status',
+    view='badge',
+    field='status',
+    badge_colors={'paid': 'green', '*': 'gray'},
+    source=AnnotationsSource(kind_prefix='order.', limit=1),
+)
 
 # stat — a metric family, summed and formatted
 Widget(title='Orders processed', view='stat', source=MetricsSource(metric='orders_processed_total'), format='number')

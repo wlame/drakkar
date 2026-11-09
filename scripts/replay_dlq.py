@@ -57,8 +57,8 @@ import functools
 import signal
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import structlog

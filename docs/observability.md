@@ -537,6 +537,7 @@ You can declare Prometheus metrics as class attributes on your handler -- see [C
 from prometheus_client import Counter, Histogram
 from drakkar.handler import BaseDrakkarHandler
 
+
 class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
     # These are automatically discovered and shown in the operator UI
     items_parsed = Counter(
@@ -668,10 +669,11 @@ import structlog
 
 logger = structlog.get_logger()
 
+
 class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
     async def arrange(self, messages, pending):
         await logger.ainfo(
-            "Arranging batch",
+            'Arranging batch',
             category='handler',
             message_count=len(messages),
             pending_count=len(pending.pending_task_ids),
@@ -1530,6 +1532,7 @@ task makes visible.
 
 ```python
 from drakkar.periodic import periodic
+
 
 class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
     @periodic(60)

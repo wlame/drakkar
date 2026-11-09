@@ -38,8 +38,8 @@ class AppConfig(BaseModel):
 
 
 class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
-    app_config_model = AppConfig   # opt-in: the framework loads it at startup
-    app_env_prefix = 'MYAPP_'      # your env namespace (default: 'APP_')
+    app_config_model = AppConfig  # opt-in: the framework loads it at startup
+    app_env_prefix = 'MYAPP_'  # your env namespace (default: 'APP_')
 
     async def arrange(self, messages, pending):
         if self.app_config.priority_threshold > 0:

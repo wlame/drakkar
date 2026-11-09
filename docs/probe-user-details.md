@@ -159,10 +159,10 @@ which row fields form the grouping path (outermost first, at most 4 levels):
 
 ```python
 class MatchRow(BaseModel):
-    file: str          # level 1
-    section: str       # level 2
-    rule: str          # leaf column
-    score: float       # leaf column
+    file: str  # level 1
+    section: str  # level 2
+    rule: str  # leaf column
+    score: float  # leaf column
 
 
 class MyDetails(BaseModel):

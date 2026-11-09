@@ -150,9 +150,9 @@ correlates them with, dimming the rest — the same emphasis/dimming
 `TimelineMatch` names which tasks, setting **exactly one** of three fields:
 
 ```python
-dk.TimelineMatch(offsets=((partition, offset), ...))   # tasks from these (partition, offset) pairs
-dk.TimelineMatch(label=(key, value))                    # tasks whose label[key] == value
-dk.TimelineMatch(window_id=window_id)                   # accepted, but see below
+dk.TimelineMatch(offsets=((partition, offset), ...))  # tasks from these (partition, offset) pairs
+dk.TimelineMatch(label=(key, value))  # tasks whose label[key] == value
+dk.TimelineMatch(window_id=window_id)  # accepted, but see below
 ```
 
 Passing more than one field, or none, is a drop (`bad_shape`).

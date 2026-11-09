@@ -51,21 +51,21 @@ The two hooks are independent. You can use both, either, or neither.
 
 ```python
 class MessageGroup(BaseModel):
-    source_message: SourceMessage           # the original Kafka message
-    tasks: list[ExecutorTask]               # full history (see below)
-    results: list[ExecutorResult]           # terminal successes
-    errors: list[ExecutorError]             # terminal failures (SKIP / retries exhausted)
-    started_at: float                       # monotonic, when arrange() scheduled first task
-    finished_at: float                      # monotonic, when last task terminal'd
+    source_message: SourceMessage  # the original Kafka message
+    tasks: list[ExecutorTask]  # full history (see below)
+    results: list[ExecutorResult]  # terminal successes
+    errors: list[ExecutorError]  # terminal failures (SKIP / retries exhausted)
+    started_at: float  # monotonic, when arrange() scheduled first task
+    finished_at: float  # monotonic, when last task terminal'd
 
     # Convenience properties
-    succeeded: int      # len(results)
-    failed: int         # len(errors)
-    total: int          # len(tasks) — includes REPLACED tasks (see below)
-    replaced: int       # total - succeeded - failed
-    all_succeeded: bool # True iff total > 0 and failed == 0
-    any_failed: bool    # failed > 0
-    is_empty: bool      # total == 0 (arrange() returned nothing)
+    succeeded: int  # len(results)
+    failed: int  # len(errors)
+    total: int  # len(tasks) — includes REPLACED tasks (see below)
+    replaced: int  # total - succeeded - failed
+    all_succeeded: bool  # True iff total > 0 and failed == 0
+    any_failed: bool  # failed > 0
+    is_empty: bool  # total == 0 (arrange() returned nothing)
     duration_seconds: float
 ```
 
@@ -182,10 +182,7 @@ class MyHandler(dk.BaseDrakkarHandler[SearchRequest, PerTaskResult]):
         if req is None or group.is_empty:
             return None
 
-        total_matches = sum(
-            sum(1 for line in r.stdout.split('\n') if line)
-            for r in group.results
-        )
+        total_matches = sum(sum(1 for line in r.stdout.split('\n') if line) for r in group.results)
 
         summary = RequestSummary(
             request_id=req.request_id,
