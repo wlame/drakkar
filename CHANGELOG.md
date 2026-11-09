@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.2] - 2026-11-09
+
 ### Added
 
 - A new `agent` config section with `enabled`, `auth_token` and `include_payloads`. The summary line shows `agent=on` or `agent=off`. With `agent.enabled` and no token, the worker logs `agent_surface_unauthenticated`.
