@@ -7,6 +7,11 @@ CPU that work alone can hold a loop long enough to delay the worker's own
 pipeline. The main loop therefore only posts runs to the thread and waits for
 their results; it never builds a record or runs a COPY.
 
+The writer logs with the plain (synchronous) structlog calls, not the
+``a``-prefixed ones. Those exist to keep a log call off the main event loop;
+on this thread they would only hand each line to a pool thread that nobody
+joins, so a line could still be in flight after the stop returned.
+
 One run (:meth:`PostgresWriter.run_once`):
 
 1. start when not started yet: open the pool, then make the table available;
@@ -424,7 +429,7 @@ class PostgresWriter:
             return False
         self._started = True
         self._upkeep_requested = True
-        await logger.ainfo(
+        logger.info(
             'provider_started',
             category=LOG_CATEGORY,
             feature=RECORDER_FEATURE,
@@ -491,7 +496,7 @@ class PostgresWriter:
             recorder_postgres_partitions_dropped.labels(reason=PARTITION_DROP_REASON_SIZE).inc(
                 len(actions.drop_for_size)
             )
-            await logger.ainfo(
+            logger.info(
                 'recorder_postgres_partitions_changed',
                 category=LOG_CATEGORY,
                 table=self._settings.qualified_table,
@@ -593,7 +598,7 @@ class PostgresWriter:
         if self._retention_mismatch_logged or stored == configured:
             return
         self._retention_mismatch_logged = True
-        await logger.awarning(
+        logger.warning(
             'recorder_postgres_retention_mismatch',
             category=LOG_CATEGORY,
             table=self._settings.qualified_table,
@@ -785,7 +790,7 @@ class PostgresWriter:
         async def log_and_note(event: str, **fields: Any) -> None:
             nonlocal written
             written = True
-            await logger.awarning(event, **fields)
+            logger.warning(event, **fields)
 
         await self._drop_log.emit(
             reason,

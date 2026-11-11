@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The recorder's Postgres writer writes its log lines (`recorder_postgres_rows_dropped` and the others) on its own thread before it goes on. Before, it handed each line to a pool thread that the stop did not wait for, so a drop line could come after the stop ended, or be lost at exit.
 - Every log line now carries `worker_id`, `consumer_group` and `service_version`. Before, most lines lost them: the fields were bound in a context variable, and lines from librdkafka callback threads and the tasks they start ran in an empty context.
 - The warnings that the app logs while it is built (missing link bases, unknown docs anchors, `app_config_loaded`) are written after logging is set up, in the configured format. Before, they came out as console text before the first JSON line. A program that drives the app without `run()` calls `app.emit_startup_log()` after its own logging setup.
 - The docs and code comments no longer say that the `json` log format is ECS-compatible. Its keys (`timestamp`, `level`, `event`) are not ECS; use `ecs` for Elastic.
