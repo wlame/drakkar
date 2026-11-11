@@ -62,6 +62,7 @@ import asyncio
 import time
 import traceback
 from collections import Counter
+from contextlib import AbstractContextManager, nullcontext
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -224,16 +225,62 @@ class WebappRunner:
         budget = self._app._pending_budget
         account = BudgetAccount(budget) if budget is not None else None
         try:
-            return await self._run_body(ctx, account)
+            source_message = self._source_message(ctx)
+            identity = self._request_identity(ctx, source_message)
+            with self._identity_scope(identity):
+                return await self._run_body(ctx, source_message, identity, account)
         finally:
             if account is not None:
                 account.close()
             webapp_inflight.dec()
 
-    async def _run_body(self, ctx: WebRequestContext, account: BudgetAccount | None = None) -> WebReport:
-        """The actual pipeline-side work; wrapped by ``run`` for inflight."""
+    def _source_message(self, ctx: WebRequestContext) -> SourceMessage:
+        """The synthetic SourceMessage of one request, with the next request offset.
+
+        ``partition=-1`` keeps HTTP-origin messages cleanly distinct from any
+        real Kafka partition. The value field requires bytes; we serialise
+        the parsed Pydantic request body rather than re-reading the raw POST
+        body so the bytes match what arrange_http_request sees in
+        ``ctx.request``.
+        """
         self._request_seq += 1
-        offset = self._request_seq
+        return SourceMessage(
+            topic='__webapp__',
+            partition=-1,
+            offset=self._request_seq,
+            key=ctx.client_name.encode('utf-8'),
+            value=self._serialize_request_body(ctx.request),
+            timestamp=received_ms(ctx),
+            # Kafka-path invariant parity: deserialize_message sets payload
+            # to the parsed input model before hooks fire; the webapp path
+            # does the same with the already-parsed request so
+            # on_http_request_complete never needs to re-parse ``value``.
+            payload=ctx.request,
+        )
+
+    def _request_identity(self, ctx: WebRequestContext, source_message: SourceMessage) -> str | None:
+        """The request's message identity, read from its headers and the raw body; a request has no key."""
+        resolver = self._app._message_identity
+        if resolver is None:
+            return None
+        return resolver.of_http_request(source_message, ctx.headers, ctx.raw_body)
+
+    def _identity_scope(self, identity: str | None) -> AbstractContextManager[None]:
+        """Bind the request's identity for the whole request; nothing while the feature is off."""
+        resolver = self._app._message_identity
+        if resolver is None:
+            return nullcontext()
+        return resolver.scope([identity])
+
+    async def _run_body(
+        self,
+        ctx: WebRequestContext,
+        source_message: SourceMessage,
+        identity: str | None,
+        account: BudgetAccount | None = None,
+    ) -> WebReport:
+        """The actual pipeline-side work; wrapped by ``run`` for inflight."""
+        offset = source_message.offset
 
         # Recorder: mark this request entering the runner. The recorder is
         # present when ``ui.enabled`` or ``recorder.enabled`` is on. Helper
@@ -248,27 +295,6 @@ class WebappRunner:
         # remains as set by T2 (when the request landed on the webapp).
         timeline: list[StageTiming] = []
         run_started_monotonic = time.monotonic()
-
-        # Synthetic SourceMessage. ``partition=-1`` keeps HTTP-origin
-        # messages cleanly distinct from any real Kafka partition. The
-        # value field requires bytes; we serialise the parsed Pydantic
-        # request body rather than re-reading the raw POST body so the
-        # bytes match what arrange_http_request sees in ``ctx.request``.
-        request_body_bytes = self._serialize_request_body(ctx.request)
-        ts_ms = received_ms(ctx)
-        source_message = SourceMessage(
-            topic='__webapp__',
-            partition=-1,
-            offset=offset,
-            key=ctx.client_name.encode('utf-8'),
-            value=request_body_bytes,
-            timestamp=ts_ms,
-            # Kafka-path invariant parity: deserialize_message sets payload
-            # to the parsed input model before hooks fire; the webapp path
-            # does the same with the already-parsed request so
-            # on_http_request_complete never needs to re-parse ``value``.
-            payload=ctx.request,
-        )
 
         # ----- Stage: arrange_http_request -----
         arrange_started = time.monotonic()
@@ -318,10 +344,14 @@ class WebappRunner:
         # produce a fresh object the user no longer holds a reference
         # to, breaking ``arrange_http_request`` overrides that stash
         # task references in ``self`` for tracking.
+        resolver = self._app._message_identity
         for task in tasks:
             task.origin = 'http'
             task.client_name = ctx.client_name
             task.request_id = ctx.request_id
+            # The request's identity as a task label; a label the handler set wins.
+            if resolver is not None and identity is not None and resolver.name not in task.labels:
+                task.labels[resolver.name] = identity
 
         timeline.append(StageTiming(stage='arrange', duration_ms=(time.monotonic() - arrange_started) * 1000.0))
 

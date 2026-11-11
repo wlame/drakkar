@@ -231,6 +231,7 @@ async def test_the_webapp_runner_records_the_reported_run_time():
     recorder = MagicMock()
     app = MagicMock()
     app._handler = LastLineHandler()
+    app._message_identity = None
     runner = WebappRunner(app, MagicMock())
 
     for _ in range(2):

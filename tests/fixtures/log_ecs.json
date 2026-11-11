@@ -1,0 +1,108 @@
+{
+  "_comment": "One log event per case, and the exact ECS line logging.format ecs writes for it (no trailing newline). fields is the event as the renderer sees it; error is the ECS error of an exception, or null.",
+  "ecs_version": "8.11.0",
+  "own_fields_key": "drakkar",
+  "cases": [
+    {
+      "name": "minimal",
+      "fields": {
+        "timestamp": "2026-11-11T09:30:00.123456Z",
+        "level": "info",
+        "event": "worker_started",
+        "service_name": "drakkar"
+      },
+      "error": null,
+      "line": "{\"@timestamp\":\"2026-11-11T09:30:00.123456Z\",\"log.level\":\"info\",\"message\":\"worker_started\",\"ecs.version\":\"8.11.0\",\"service\":{\"name\":\"drakkar\"}}"
+    },
+    {
+      "name": "identity_and_module",
+      "fields": {
+        "timestamp": "2026-11-11T09:30:00.123456Z",
+        "level": "warning",
+        "event": "partition_paused",
+        "module": "partition",
+        "service_name": "drakkar",
+        "service_version": "2.5.0",
+        "worker_id": "worker-3",
+        "consumer_group": "drakkar-workers",
+        "category": "partition",
+        "partition": 7
+      },
+      "error": null,
+      "line": "{\"@timestamp\":\"2026-11-11T09:30:00.123456Z\",\"log.level\":\"warning\",\"message\":\"partition_paused\",\"ecs.version\":\"8.11.0\",\"log\":{\"logger\":\"partition\"},\"service\":{\"name\":\"drakkar\",\"version\":\"2.5.0\",\"node\":{\"name\":\"worker-3\"}},\"drakkar\":{\"category\":\"partition\",\"consumer_group\":\"drakkar-workers\",\"partition\":7}}"
+    },
+    {
+      "name": "fields_that_clash_with_ecs_go_under_drakkar",
+      "fields": {
+        "timestamp": "2026-11-11T09:30:00.123456Z",
+        "level": "error",
+        "event": "sink_delivery_failed",
+        "service_name": "drakkar",
+        "error": "connection refused",
+        "source": "kafka",
+        "url": "http://sink:8080/",
+        "host": "db-1",
+        "message": "raw text",
+        "file": "a.db",
+        "labels": "x",
+        "event.action": "dotted key stays a key"
+      },
+      "error": null,
+      "line": "{\"@timestamp\":\"2026-11-11T09:30:00.123456Z\",\"log.level\":\"error\",\"message\":\"sink_delivery_failed\",\"ecs.version\":\"8.11.0\",\"service\":{\"name\":\"drakkar\"},\"drakkar\":{\"error\":\"connection refused\",\"event.action\":\"dotted key stays a key\",\"file\":\"a.db\",\"host\":\"db-1\",\"labels\":\"x\",\"message\":\"raw text\",\"source\":\"kafka\",\"url\":\"http://sink:8080/\"}}"
+    },
+    {
+      "name": "own_fields_sorted_at_every_depth",
+      "fields": {
+        "timestamp": "2026-11-11T09:30:00.123456Z",
+        "level": "debug",
+        "event": "window_arranged",
+        "service_name": "drakkar",
+        "zeta": {
+          "b": 2,
+          "a": [
+            {
+              "y": 1,
+              "x": 2
+            },
+            3
+          ]
+        },
+        "alpha": true,
+        "mid": null,
+        "ratio": 0.25,
+        "count": -12
+      },
+      "error": null,
+      "line": "{\"@timestamp\":\"2026-11-11T09:30:00.123456Z\",\"log.level\":\"debug\",\"message\":\"window_arranged\",\"ecs.version\":\"8.11.0\",\"service\":{\"name\":\"drakkar\"},\"drakkar\":{\"alpha\":true,\"count\":-12,\"mid\":null,\"ratio\":0.25,\"zeta\":{\"a\":[{\"x\":2,\"y\":1},3],\"b\":2}}}"
+    },
+    {
+      "name": "text_escapes",
+      "fields": {
+        "timestamp": "2026-11-11T09:30:00.123456Z",
+        "level": "info",
+        "event": "line \"quoted\"\nnext\ttab\\",
+        "service_name": "drakkar",
+        "text": "café — 日本 <a&b>    \u0001"
+      },
+      "error": null,
+      "line": "{\"@timestamp\":\"2026-11-11T09:30:00.123456Z\",\"log.level\":\"info\",\"message\":\"line \\\"quoted\\\"\\nnext\\ttab\\\\\",\"ecs.version\":\"8.11.0\",\"service\":{\"name\":\"drakkar\"},\"drakkar\":{\"text\":\"café — 日本 <a&b>    \\u0001\"}}"
+    },
+    {
+      "name": "exception_fills_error",
+      "fields": {
+        "timestamp": "2026-11-11T09:30:00.123456Z",
+        "level": "error",
+        "event": "hook_failed",
+        "service_name": "drakkar",
+        "worker_id": "w1",
+        "hook": "arrange"
+      },
+      "error": {
+        "type": "ValueError",
+        "message": "bad input",
+        "stack_trace": "Traceback (most recent call last):\n  File \"h.py\", line 1, in arrange\nValueError: bad input\n"
+      },
+      "line": "{\"@timestamp\":\"2026-11-11T09:30:00.123456Z\",\"log.level\":\"error\",\"message\":\"hook_failed\",\"ecs.version\":\"8.11.0\",\"service\":{\"name\":\"drakkar\",\"node\":{\"name\":\"w1\"}},\"error\":{\"type\":\"ValueError\",\"message\":\"bad input\",\"stack_trace\":\"Traceback (most recent call last):\\n  File \\\"h.py\\\", line 1, in arrange\\nValueError: bad input\\n\"},\"drakkar\":{\"hook\":\"arrange\"}}"
+    }
+  ]
+}

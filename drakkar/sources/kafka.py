@@ -523,6 +523,7 @@ class KafkaSource:
                     execute_dlq=ctx.sink_manager.send_execute_dlq,
                     executor_on_failure=config.executor.on_failure,
                     budget=ctx.pending_budget,
+                    message_identity=ctx.message_identity,
                 )
                 self.processors[pid] = processor
                 processor.start()

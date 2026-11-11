@@ -353,6 +353,20 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         """
         return f'{msg.partition}:{msg.offset}'
 
+    def message_identity(self, msg: SourceMessage, configured: str | None) -> str | None:
+        """Return the identity of a message, written into every log line of its processing.
+
+        Called once per message (and once per HTTP request) when
+        ``logging.message_identity.enabled`` is true. ``configured`` is the
+        value read from the place that ``logging.message_identity.source``
+        names, or None. Override to compute the value in code, for example
+        from the parsed ``msg.payload``. Return None for no identity. Keep it
+        fast: it runs on the event loop for every message.
+
+        Default: ``configured``.
+        """
+        return configured
+
     def task_priority(self, task: ExecutorTask) -> Any:
         """Return a sortable priority key for ordering tasks waiting on the executor pool.
 

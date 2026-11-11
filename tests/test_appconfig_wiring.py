@@ -103,7 +103,9 @@ def test_handler_env_prefix_overrides_yaml_section(monkeypatch: pytest.MonkeyPat
 
 def test_loaded_log_line_reports_field_count_never_values():
     with capture_logs() as cap:
-        DrakkarApp(handler=DeclaringHandler(), config=make_config(app={'scoring_url': 'http://scoring-svc:9000'}))
+        DrakkarApp(
+            handler=DeclaringHandler(), config=make_config(app={'scoring_url': 'http://scoring-svc:9000'})
+        ).emit_startup_log()
     loaded = [entry for entry in cap if entry['event'] == 'app_config_loaded']
     assert len(loaded) == 1
     assert loaded[0]['model'] == 'DemoAppConfig'
@@ -129,7 +131,7 @@ def test_invalid_env_override_fails_startup(monkeypatch: pytest.MonkeyPatch):
 def test_undeclared_model_with_nonempty_section_warns():
     with capture_logs() as cap:
         handler = UndeclaredHandler()
-        DrakkarApp(handler=handler, config=make_config(app={'priority_threshold': 42}))
+        DrakkarApp(handler=handler, config=make_config(app={'priority_threshold': 42})).emit_startup_log()
     assert handler.app_config is None
     warnings = [entry for entry in cap if entry['event'] == 'app_config_ignored']
     assert len(warnings) == 1
@@ -140,7 +142,7 @@ def test_undeclared_model_with_nonempty_section_warns():
 def test_undeclared_model_with_empty_section_is_silent():
     with capture_logs() as cap:
         handler = UndeclaredHandler()
-        DrakkarApp(handler=handler, config=make_config())
+        DrakkarApp(handler=handler, config=make_config()).emit_startup_log()
     assert handler.app_config is None
     assert not [entry for entry in cap if entry['event'] == 'app_config_ignored']
 

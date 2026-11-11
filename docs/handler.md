@@ -19,6 +19,7 @@ right time during the message-processing pipeline. See [Configuration](configura
 | `on_assign(partitions)` | Kafka assigns partitions during rebalance | Once per rebalance event | `None` |
 | `on_revoke(partitions)` | Kafka revokes partitions during rebalance | Once per rebalance event | `None` |
 | `message_label(msg)` | Before logging each message in arrange | Once per message | `str` |
+| `message_identity(msg, configured)` | After the message is parsed, when `logging.message_identity.enabled` | Once per message and HTTP request | `str \| None` |
 | `task_priority(task)` | Before each task waits on the executor pool | Once per task (incl. retries) | sortable key (any `<`-comparable value) |
 | `task_run_seconds(result)` | Optional; right after a task's subprocess exits, before its `task_completed` / `task_failed` event | Once per task that ran a process, only when overridden | `float \| None` |
 | `agent_notes()` | Once after `on_startup`, when `agent.enabled` is true | Once per worker lifetime | [`AgentNotes`](#agent-notes) `\| None` |
@@ -950,6 +951,32 @@ def message_label(self, msg):
     if msg.payload:
         return f'{msg.partition}:{msg.offset} [{msg.payload.request_id[:8]}]'
     return f'{msg.partition}:{msg.offset}'
+```
+
+---
+
+## message_identity()
+
+```python
+def message_identity(self, msg: SourceMessage, configured: str | None) -> str | None
+```
+
+Called once per message (and once per HTTP request) when
+[`logging.message_identity.enabled`](observability.md#message-identity) is
+true. `configured` is the value read from the place that
+`logging.message_identity.source` names, or `None`. Return the identity to
+write into every log line of the message's processing, or `None` for none.
+The default returns `configured`. The hook runs after the message is parsed,
+so it can read `msg.payload`. It runs on the event loop for every message,
+so keep it fast. A hook that raises or returns something other than a string
+or `None` gives no identity and logs `message_identity_hook_failed` (at most
+one line per minute).
+
+```python
+def message_identity(self, msg, configured):
+    if msg.payload is not None:
+        return f'{msg.payload.tenant}/{msg.payload.order_id}'
+    return configured
 ```
 
 ---

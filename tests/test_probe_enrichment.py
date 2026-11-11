@@ -282,7 +282,7 @@ def _minimal_config(ui: UIConfig | None = None) -> DrakkarConfig:
 def test_startup_warns_about_missing_link_bases():
     """A template base absent from ui.link_bases logs one warning naming it."""
     with capture_logs() as cap:
-        DrakkarApp(handler=_MissingBaseHandler(), config=_minimal_config())
+        DrakkarApp(handler=_MissingBaseHandler(), config=_minimal_config()).emit_startup_log()
 
     warnings = [r for r in cap if r['log_level'] == 'warning' and r.get('event') == 'probe_details_link_bases_missing']
     assert len(warnings) == 1
@@ -295,7 +295,7 @@ def test_startup_silent_when_all_referenced_bases_are_configured():
     config = _minimal_config(ui=UIConfig(link_bases={'jira': 'https://jira.internal.example.com'}))
 
     with capture_logs() as cap:
-        DrakkarApp(handler=_MissingBaseHandler(), config=config)
+        DrakkarApp(handler=_MissingBaseHandler(), config=config).emit_startup_log()
 
     assert not [r for r in cap if r.get('event') == 'probe_details_link_bases_missing']
 
@@ -351,6 +351,6 @@ def test_startup_silent_when_ui_disabled_even_with_missing_link_bases():
     config = _minimal_config(ui=UIConfig(enabled=False))
 
     with capture_logs() as cap:
-        DrakkarApp(handler=_MissingBaseHandler(), config=config)
+        DrakkarApp(handler=_MissingBaseHandler(), config=config).emit_startup_log()
 
     assert not [r for r in cap if r.get('event') == 'probe_details_link_bases_missing']

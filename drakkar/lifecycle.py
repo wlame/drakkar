@@ -75,6 +75,7 @@ from drakkar.fleet.service import FleetRegistry
 from drakkar.hostinfo import effective_cpu_count
 from drakkar.kafka_security import describe_mixed_security
 from drakkar.logging import close_logging
+from drakkar.message_identity_runtime import MessageIdentityResolver
 from drakkar.metrics import (
     discover_handler_metrics,
     executor_pool_max,
@@ -1212,6 +1213,11 @@ class AppLifecycle:
         """
         app = self._app
         assert app._executor_pool is not None
+        # Built here, after on_startup, so a hook change of the config counts.
+        identity_config = app._config.logging.message_identity
+        app._message_identity = (
+            MessageIdentityResolver(identity_config, app._handler) if identity_config.enabled else None
+        )
         ctx = SourceContext(
             config=app._config,
             handler=app._handler,
@@ -1226,6 +1232,7 @@ class AppLifecycle:
             # composed across every source and flips during shutdown.
             is_worker_ready=lambda: app.is_ready,
             pending_budget=app._pending_budget,
+            message_identity=app._message_identity,
         )
         for source in app.sources:
             source.bind(ctx)

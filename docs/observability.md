@@ -603,11 +603,12 @@ Drakkar uses [structlog](https://www.structlog.org/) for structured, context-ric
 ```yaml
 logging:
   level: INFO       # DEBUG, INFO, WARNING, ERROR, CRITICAL
-  format: json      # json | console
+  format: json      # json | ecs | console
   output: stderr    # stderr | stdout | file path
 ```
 
-- **`json`** (default) -- produces one JSON object per line, suitable for ingestion by Elasticsearch, Loki, Datadog, or any log aggregator.
+- **`json`** (default) -- produces one JSON object per line with flat keys (`timestamp`, `level`, `event`), suitable for Loki, Datadog, or any log aggregator.
+- **`ecs`** -- produces one JSON object per line in the [Elastic Common Schema](https://www.elastic.co/guide/en/ecs/current/index.html), ready for Elasticsearch, Filebeat and Elastic Agent. See [ECS Output](#ecs-output).
 - **`console`** -- human-readable colored output for local development.
 
 ### Output Destination
@@ -653,6 +654,85 @@ Every log line includes these fields, bound once at startup:
 | `worker_id` | `worker.name_env` env var, else `worker.name` | `worker-3` |
 | `consumer_group` | `sources.kafka.consumer_group` config; **omitted entirely** when the Kafka source is disabled | `drakkar-workers` |
 | `module` | Python module name | `drakkar.partition` |
+
+These are the field names of the `json` and `console` formats. The `ecs` format writes the same values under ECS names (see below).
+
+### ECS Output
+
+With `logging.format: ecs`, every line is one JSON object in the Elastic Common Schema (ECS version `8.11.0`). The first four keys are always `@timestamp`, `log.level`, `message` and `ecs.version`, as the ecs-logging specification asks.
+
+```json
+{"@timestamp":"2026-11-11T09:30:00.123456Z","log.level":"warning","message":"partition_paused","ecs.version":"8.11.0","log":{"logger":"partition"},"service":{"name":"drakkar","version":"2.5.0","node":{"name":"worker-3"}},"drakkar":{"category":"partition","consumer_group":"drakkar-workers","partition":7}}
+```
+
+| ECS field | Value | `json` key |
+|-----------|-------|------------|
+| `@timestamp` | ISO 8601 time in UTC, with microseconds | `timestamp` |
+| `log.level` | `debug`, `info`, `warning`, `error` or `critical` | `level` |
+| `message` | The event name, for example `partition_paused` | `event` |
+| `ecs.version` | `8.11.0` | -- |
+| `log.logger` | The module that wrote the line | `module` |
+| `service.name` | `drakkar` | `service_name` |
+| `service.version` | The framework version | `service_version` |
+| `service.node.name` | The worker name | `worker_id` |
+| `error.type`, `error.message`, `error.stack_trace` | The exception of a line logged with `exc_info` (for example `logger.exception(...)`) | `exception` |
+| `drakkar.*` | Every other field of the line, keys sorted | the same key at the top level |
+
+Every field that is not an ECS field goes under `drakkar`: `drakkar.category`, `drakkar.consumer_group`, `drakkar.partition`, `drakkar.error`. Many framework fields have names that ECS uses for objects (`error`, `source`, `url`, `host`, `file`). Elasticsearch refuses a document where such a field is a text, so they cannot stay at the top level. Query them as `drakkar.partition: 7` or `drakkar.error: *refused*`.
+
+The `drakkar.error` text is the short error text that a log event carries. The ECS `error.*` fields are set only when the line was logged with an exception.
+
+### Message Identity
+
+`logging.message_identity` writes one value that identifies the incoming
+message into every log line written while that message is processed. In
+Elasticsearch or any log store, one filter then finds every line of one
+message: its arrange call, its tasks, its hooks, its sink deliveries and its
+DLQ record.
+
+```yaml
+logging:
+  message_identity:
+    enabled: true
+    name: order_id              # the log field and the task label
+    source: value:order.id      # key | header:<name> | value:<dotted.path>
+```
+
+| `source` | The value is |
+|----------|--------------|
+| `key` | The message key as UTF-8 text. An HTTP request has no key. |
+| `header:<name>` | The first header of that name, letter case ignored, as UTF-8 text. For an HTTP request, the request header. |
+| `value:<path>` | A field of the JSON value. Each dot-separated segment is an object key, or a number that picks a list item (`value:items.0.id`). A string is used as it is, a number as the text the message wrote (`1.0` stays `1.0`), `true` and `false` as text. For an HTTP request, the raw body as the client sent it. |
+
+A message with no value there (no key, no such header or field, a value that
+is not UTF-8 or not JSON, `null`, an object or a list) has no identity. A
+value is cut to 256 characters. The handler hook
+[`message_identity()`](handler.md#message_identity) can compute the value in
+code instead.
+
+Which lines carry which value:
+
+| Lines | The field holds |
+|-------|-----------------|
+| A parse failure (and its DLQ write), `on_message_complete` and its delivery | That message's value |
+| A task: its run, `on_task_complete`, `on_error`, the delivery of its results and their DLQ writes | The values of the task's source messages |
+| `arrange()` and `on_window_complete` with its delivery | The values of every message of the window |
+| An HTTP request, from start to response | The request's value |
+
+One value is written as a text, several as a list (each value once, at most
+`max_values`). Elasticsearch matches a list when any of its values equals the
+query, so `order_id: "o-17"` finds the window and task lines too.
+
+Each task also gets the value as a [task label](handler.md#task-labels)
+(several values joined with `,`), so the Trace page's search by label and the
+recorder find the message with no handler code. A label that the handler set
+itself is kept.
+
+The name must be a lower-case identifier of at most 64 characters, and it
+cannot be a field that the framework writes itself (`partition`, `offset`,
+`task_id`, `request_id`, `worker_id`, `event` and the others listed in the
+load message). In the `ecs` format the field is under `drakkar`, for example
+`drakkar.order_id`.
 
 ### Per-Context Binding
 

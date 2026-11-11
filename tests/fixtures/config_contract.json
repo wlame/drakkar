@@ -75,10 +75,10 @@
       "name": "non_ascii_key_counts_characters",
       "yaml": {
         "metrics": {
-          "pört": 9090
+          "p\u00f6rt": 9090
         }
       },
-      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  metrics.pört (did you mean 'port'?)"
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  metrics.p\u00f6rt (did you mean 'port'?)"
     },
     {
       "name": "long_key_no_suggestion_at_distance_3",
@@ -907,7 +907,7 @@
           }
         }
       },
-      "message": "cache.exchange.cycle_deadline (10s) must be strictly less than cache.exchange.interval (10s) — otherwise the deadline can never fire before the next cycle schedules."
+      "message": "cache.exchange.cycle_deadline (10s) must be strictly less than cache.exchange.interval (10s) \u2014 otherwise the deadline can never fire before the next cycle schedules."
     },
     {
       "name": "deadline_fractional_values",
@@ -919,7 +919,7 @@
           }
         }
       },
-      "message": "cache.exchange.cycle_deadline (3s500ms) must be strictly less than cache.exchange.interval (2s500ms) — otherwise the deadline can never fire before the next cycle schedules."
+      "message": "cache.exchange.cycle_deadline (3s500ms) must be strictly less than cache.exchange.interval (2s500ms) \u2014 otherwise the deadline can never fire before the next cycle schedules."
     },
     {
       "name": "page_size_over_limit",
@@ -2579,6 +2579,72 @@
         }
       },
       "message": "autodiscover.enabled needs api.enabled: peers reach a worker through its API"
+    },
+    {
+      "name": "message_identity_name_not_an_identifier",
+      "yaml": {
+        "logging": {
+          "message_identity": {
+            "name": "Request-Id"
+          }
+        }
+      },
+      "message": "logging.message_identity.name 'Request-Id' must be a lower-case identifier of at most 64 characters ([a-z_][a-z0-9_]*)"
+    },
+    {
+      "name": "message_identity_name_reserved",
+      "yaml": {
+        "logging": {
+          "message_identity": {
+            "name": "partition"
+          }
+        }
+      },
+      "message": "logging.message_identity.name 'partition' is a field the framework already writes; choose another name"
+    },
+    {
+      "name": "message_identity_source_unknown",
+      "yaml": {
+        "logging": {
+          "message_identity": {
+            "source": "body.id"
+          }
+        }
+      },
+      "message": "logging.message_identity.source must be key, header:<name> or value:<path>, got 'body.id'"
+    },
+    {
+      "name": "message_identity_source_empty_header",
+      "yaml": {
+        "logging": {
+          "message_identity": {
+            "source": "header:"
+          }
+        }
+      },
+      "message": "logging.message_identity.source must be key, header:<name> or value:<path>, got 'header:'"
+    },
+    {
+      "name": "message_identity_max_values_zero",
+      "yaml": {
+        "logging": {
+          "message_identity": {
+            "max_values": 0
+          }
+        }
+      },
+      "path": "logging.message_identity.max_values"
+    },
+    {
+      "name": "message_identity_max_values_over_limit",
+      "yaml": {
+        "logging": {
+          "message_identity": {
+            "max_values": 10001
+          }
+        }
+      },
+      "path": "logging.message_identity.max_values"
     }
   ],
   "load_values": [
@@ -3996,6 +4062,45 @@
       },
       "path": "agent.enabled",
       "value": true
+    },
+    {
+      "name": "message_identity_off_by_default",
+      "yaml": {},
+      "path": "logging.message_identity.enabled",
+      "value": false
+    },
+    {
+      "name": "message_identity_default_name",
+      "yaml": {},
+      "path": "logging.message_identity.name",
+      "value": "message_id"
+    },
+    {
+      "name": "message_identity_default_source",
+      "yaml": {},
+      "path": "logging.message_identity.source",
+      "value": "key"
+    },
+    {
+      "name": "message_identity_default_max_values",
+      "yaml": {},
+      "path": "logging.message_identity.max_values",
+      "value": 100
+    },
+    {
+      "name": "message_identity_source_by_env",
+      "yaml": {
+        "logging": {
+          "message_identity": {
+            "enabled": true
+          }
+        }
+      },
+      "env": {
+        "DK_LOGGING__MESSAGE_IDENTITY__SOURCE": "header:x-request-id"
+      },
+      "path": "logging.message_identity.source",
+      "value": "header:x-request-id"
     }
   ],
   "sink_policies": [

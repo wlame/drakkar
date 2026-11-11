@@ -147,7 +147,7 @@ def _startup_warnings(*, anchors=(), sinks=None, events=(), ui_pages=None, site_
         docs=UIDocsConfig.model_validate({'site_dir': site_dir, 'anchors': list(anchors)}),
     )
     with capture_logs() as cap:
-        DrakkarApp(handler=_Handler(), config=_minimal_config(ui=ui, sinks=sinks))
+        DrakkarApp(handler=_Handler(), config=_minimal_config(ui=ui, sinks=sinks)).emit_startup_log()
     return [record for record in cap if record['log_level'] == 'warning']
 
 

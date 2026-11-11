@@ -1,0 +1,562 @@
+{
+  "_comment": "The message identity (logging.message_identity): name and source rules with their load messages, the value read from a message (bytes: a JSON string is UTF-8 text, {\"base64\": ...} raw bytes), and the log field and task label of a scope that covers several messages.",
+  "max_identity_chars": 256,
+  "reserved_names": [
+    "category",
+    "consumer_group",
+    "drakkar",
+    "error",
+    "event",
+    "exc_info",
+    "exception",
+    "hook",
+    "level",
+    "message",
+    "module",
+    "offset",
+    "offsets",
+    "partition",
+    "request_id",
+    "service_name",
+    "service_version",
+    "sink_name",
+    "sink_type",
+    "stack",
+    "task_id",
+    "timestamp",
+    "window_id",
+    "worker_id"
+  ],
+  "name_cases": [
+    {
+      "name": "message_id",
+      "message": null
+    },
+    {
+      "name": "request_id_2",
+      "message": null
+    },
+    {
+      "name": "_x",
+      "message": null
+    },
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "message": null
+    },
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "message": "logging.message_identity.name 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' must be a lower-case identifier of at most 64 characters ([a-z_][a-z0-9_]*)"
+    },
+    {
+      "name": "Req",
+      "message": "logging.message_identity.name 'Req' must be a lower-case identifier of at most 64 characters ([a-z_][a-z0-9_]*)"
+    },
+    {
+      "name": "9lives",
+      "message": "logging.message_identity.name '9lives' must be a lower-case identifier of at most 64 characters ([a-z_][a-z0-9_]*)"
+    },
+    {
+      "name": "req-id",
+      "message": "logging.message_identity.name 'req-id' must be a lower-case identifier of at most 64 characters ([a-z_][a-z0-9_]*)"
+    },
+    {
+      "name": "",
+      "message": "logging.message_identity.name '' must be a lower-case identifier of at most 64 characters ([a-z_][a-z0-9_]*)"
+    },
+    {
+      "name": "event",
+      "message": "logging.message_identity.name 'event' is a field the framework already writes; choose another name"
+    },
+    {
+      "name": "offsets",
+      "message": "logging.message_identity.name 'offsets' is a field the framework already writes; choose another name"
+    },
+    {
+      "name": "worker_id",
+      "message": "logging.message_identity.name 'worker_id' is a field the framework already writes; choose another name"
+    },
+    {
+      "name": "drakkar",
+      "message": "logging.message_identity.name 'drakkar' is a field the framework already writes; choose another name"
+    }
+  ],
+  "source_cases": [
+    {
+      "source": "key",
+      "kind": "key",
+      "header": "",
+      "path": [],
+      "message": null
+    },
+    {
+      "source": "header:x-request-id",
+      "kind": "header",
+      "header": "x-request-id",
+      "path": [],
+      "message": null
+    },
+    {
+      "source": "header:X",
+      "kind": "header",
+      "header": "X",
+      "path": [],
+      "message": null
+    },
+    {
+      "source": "value:id",
+      "kind": "value",
+      "header": "",
+      "path": [
+        "id"
+      ],
+      "message": null
+    },
+    {
+      "source": "value:request.items.0.id",
+      "kind": "value",
+      "header": "",
+      "path": [
+        "request",
+        "items",
+        "0",
+        "id"
+      ],
+      "message": null
+    },
+    {
+      "source": "header:",
+      "message": "logging.message_identity.source must be key, header:<name> or value:<path>, got 'header:'"
+    },
+    {
+      "source": "value:",
+      "message": "logging.message_identity.source must be key, header:<name> or value:<path>, got 'value:'"
+    },
+    {
+      "source": "value:a..b",
+      "message": "logging.message_identity.source must be key, header:<name> or value:<path>, got 'value:a..b'"
+    },
+    {
+      "source": "value:.a",
+      "message": "logging.message_identity.source must be key, header:<name> or value:<path>, got 'value:.a'"
+    },
+    {
+      "source": "Key",
+      "message": "logging.message_identity.source must be key, header:<name> or value:<path>, got 'Key'"
+    },
+    {
+      "source": "body",
+      "message": "logging.message_identity.source must be key, header:<name> or value:<path>, got 'body'"
+    },
+    {
+      "source": "key ",
+      "message": "logging.message_identity.source must be key, header:<name> or value:<path>, got 'key '"
+    },
+    {
+      "source": "",
+      "message": "logging.message_identity.source must be key, header:<name> or value:<path>, got ''"
+    }
+  ],
+  "extract_cases": [
+    {
+      "name": "key_text",
+      "source": "key",
+      "key": "order-7",
+      "value": "{}",
+      "headers": [],
+      "identity": "order-7"
+    },
+    {
+      "name": "key_null",
+      "source": "key",
+      "key": null,
+      "value": "{}",
+      "headers": [],
+      "identity": null
+    },
+    {
+      "name": "key_empty",
+      "source": "key",
+      "key": "",
+      "value": "{}",
+      "headers": [],
+      "identity": null
+    },
+    {
+      "name": "key_not_utf8",
+      "source": "key",
+      "key": {
+        "base64": "//4="
+      },
+      "value": "{}",
+      "headers": [],
+      "identity": null
+    },
+    {
+      "name": "key_longer_than_the_cut",
+      "source": "key",
+      "key": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+      "value": "{}",
+      "headers": [],
+      "identity": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+    },
+    {
+      "name": "header_first_match_ignoring_case",
+      "source": "header:X-Request-Id",
+      "key": null,
+      "value": "{}",
+      "headers": [
+        [
+          "trace",
+          "t"
+        ],
+        [
+          "x-request-id",
+          "r-1"
+        ],
+        [
+          "X-REQUEST-ID",
+          "r-2"
+        ]
+      ],
+      "identity": "r-1"
+    },
+    {
+      "name": "header_missing",
+      "source": "header:x-request-id",
+      "key": null,
+      "value": "{}",
+      "headers": [
+        [
+          "trace",
+          "t"
+        ]
+      ],
+      "identity": null
+    },
+    {
+      "name": "header_null_value",
+      "source": "header:x-request-id",
+      "key": null,
+      "value": "{}",
+      "headers": [
+        [
+          "x-request-id",
+          null
+        ],
+        [
+          "x-request-id",
+          "second"
+        ]
+      ],
+      "identity": null
+    },
+    {
+      "name": "header_not_utf8",
+      "source": "header:h",
+      "key": null,
+      "value": "{}",
+      "headers": [
+        [
+          "h",
+          {
+            "base64": "ww=="
+          }
+        ]
+      ],
+      "identity": null
+    },
+    {
+      "name": "value_string",
+      "source": "value:id",
+      "key": null,
+      "value": "{\"id\": \"abc\"}",
+      "headers": [],
+      "identity": "abc"
+    },
+    {
+      "name": "value_nested_with_index",
+      "source": "value:request.items.1.id",
+      "key": null,
+      "value": "{\"request\": {\"items\": [{\"id\": \"a\"}, {\"id\": \"b\"}]}}",
+      "headers": [],
+      "identity": "b"
+    },
+    {
+      "name": "value_integer",
+      "source": "value:id",
+      "key": null,
+      "value": "{\"id\": 42}",
+      "headers": [],
+      "identity": "42"
+    },
+    {
+      "name": "value_negative_integer",
+      "source": "value:id",
+      "key": null,
+      "value": "{\"id\": -7}",
+      "headers": [],
+      "identity": "-7"
+    },
+    {
+      "name": "value_float",
+      "source": "value:n",
+      "key": null,
+      "value": "{\"n\": 0.5}",
+      "headers": [],
+      "identity": "0.5"
+    },
+    {
+      "name": "value_true",
+      "source": "value:ok",
+      "key": null,
+      "value": "{\"ok\": true}",
+      "headers": [],
+      "identity": "true"
+    },
+    {
+      "name": "value_null",
+      "source": "value:id",
+      "key": null,
+      "value": "{\"id\": null}",
+      "headers": [],
+      "identity": null
+    },
+    {
+      "name": "value_object",
+      "source": "value:id",
+      "key": null,
+      "value": "{\"id\": {\"a\": 1}}",
+      "headers": [],
+      "identity": null
+    },
+    {
+      "name": "value_list",
+      "source": "value:id",
+      "key": null,
+      "value": "{\"id\": [1]}",
+      "headers": [],
+      "identity": null
+    },
+    {
+      "name": "value_missing_key",
+      "source": "value:id",
+      "key": null,
+      "value": "{\"other\": 1}",
+      "headers": [],
+      "identity": null
+    },
+    {
+      "name": "value_index_out_of_range",
+      "source": "value:items.5",
+      "key": null,
+      "value": "{\"items\": [1]}",
+      "headers": [],
+      "identity": null
+    },
+    {
+      "name": "value_index_on_object",
+      "source": "value:items.0",
+      "key": null,
+      "value": "{\"items\": {\"0\": \"zero\"}}",
+      "headers": [],
+      "identity": "zero"
+    },
+    {
+      "name": "value_signed_index",
+      "source": "value:items.-1",
+      "key": null,
+      "value": "{\"items\": [1, 2]}",
+      "headers": [],
+      "identity": null
+    },
+    {
+      "name": "value_not_json",
+      "source": "value:id",
+      "key": null,
+      "value": "not json",
+      "headers": [],
+      "identity": null
+    },
+    {
+      "name": "value_nan_is_not_json",
+      "source": "value:id",
+      "key": null,
+      "value": "{\"id\": NaN}",
+      "headers": [],
+      "identity": null
+    },
+    {
+      "name": "value_empty_string",
+      "source": "value:id",
+      "key": null,
+      "value": "{\"id\": \"\"}",
+      "headers": [],
+      "identity": null
+    },
+    {
+      "name": "value_unicode",
+      "source": "value:id",
+      "key": null,
+      "value": "{\"id\": \"заказ-1\"}",
+      "headers": [],
+      "identity": "заказ-1"
+    },
+    {
+      "name": "value_top_level_scalar",
+      "source": "value:id",
+      "key": null,
+      "value": "\"text\"",
+      "headers": [],
+      "identity": null
+    },
+    {
+      "name": "value_number_keeps_its_text",
+      "source": "value:n",
+      "key": null,
+      "value": "{\"n\": 1.0}",
+      "headers": [],
+      "identity": "1.0"
+    },
+    {
+      "name": "value_number_with_exponent",
+      "source": "value:n",
+      "key": null,
+      "value": "{\"n\": -1E+3}",
+      "headers": [],
+      "identity": "-1E+3"
+    },
+    {
+      "name": "value_index_with_leading_zero",
+      "source": "value:items.01",
+      "key": null,
+      "value": "{\"items\": [\"a\", \"b\"]}",
+      "headers": [],
+      "identity": "b"
+    },
+    {
+      "name": "value_index_too_large",
+      "source": "value:items.99999999999999999999",
+      "key": null,
+      "value": "{\"items\": [\"a\"]}",
+      "headers": [],
+      "identity": null
+    },
+    {
+      "name": "value_not_utf8",
+      "source": "value:id",
+      "key": null,
+      "value": {
+        "base64": "eyJpZCI6ICL/In0="
+      },
+      "headers": [],
+      "identity": null
+    },
+    {
+      "name": "value_utf16_is_not_read",
+      "source": "value:id",
+      "key": null,
+      "value": {
+        "base64": "//57ACIAaQBkACIAOgAgACIAeAAiAH0A"
+      },
+      "headers": [],
+      "identity": null
+    },
+    {
+      "name": "value_byte_order_mark",
+      "source": "value:id",
+      "key": null,
+      "value": "﻿{\"id\": \"x\"}",
+      "headers": [],
+      "identity": null
+    },
+    {
+      "name": "value_duplicate_key_last_wins",
+      "source": "value:id",
+      "key": null,
+      "value": "{\"id\": \"first\", \"id\": \"last\"}",
+      "headers": [],
+      "identity": "last"
+    }
+  ],
+  "field_cases": [
+    {
+      "name": "none",
+      "values": [
+        null,
+        null
+      ],
+      "max_values": 100,
+      "field": null,
+      "label": null
+    },
+    {
+      "name": "one",
+      "values": [
+        "a"
+      ],
+      "max_values": 100,
+      "field": "a",
+      "label": "a"
+    },
+    {
+      "name": "one_repeated",
+      "values": [
+        "a",
+        null,
+        "a"
+      ],
+      "max_values": 100,
+      "field": "a",
+      "label": "a"
+    },
+    {
+      "name": "several_in_first_seen_order",
+      "values": [
+        "b",
+        "a",
+        "b",
+        "c"
+      ],
+      "max_values": 100,
+      "field": [
+        "b",
+        "a",
+        "c"
+      ],
+      "label": "b,a,c"
+    },
+    {
+      "name": "capped",
+      "values": [
+        "a",
+        "b",
+        "c",
+        "d"
+      ],
+      "max_values": 2,
+      "field": [
+        "a",
+        "b"
+      ],
+      "label": "a,b"
+    },
+    {
+      "name": "cap_of_one",
+      "values": [
+        "a",
+        "b"
+      ],
+      "max_values": 1,
+      "field": "a",
+      "label": "a"
+    },
+    {
+      "name": "empty",
+      "values": [],
+      "max_values": 100,
+      "field": null,
+      "label": null
+    }
+  ]
+}

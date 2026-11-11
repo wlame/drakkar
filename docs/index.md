@@ -110,7 +110,7 @@ Each partition runs an independent pipeline: **poll &rarr; arrange &rarr; execut
 - **[UI customization](ui-enrichment.md)** -- a handler-defined [Message Probe tab](probe-user-details.md), [links/badges/formats/detail panels](ui-enrichment.md) on any probe field or table column, and [declared dashboard pages](ui-pages.md) -- all opt-in, no client-side code
 - **[Timeline tuning](ui-timeline.md)** -- configurable history depth, first-match-wins bar color rules from task labels/fields, and label roles (tag, caption, highlight, filter, marker) for the Live timeline
 - **[Prometheus metrics](observability.md#prometheus-metrics)** -- pipeline, executor, and per-sink counters/histograms
-- **[Structured logging](observability.md#structured-logging)** -- JSON/ECS-compatible via structlog, ready for Elastic
+- **[Structured logging](observability.md#structured-logging)** -- JSON via structlog, or Elastic Common Schema (ECS) with `logging.format: ecs`
 - **[Periodic tasks](periodic-tasks.md)** -- `@periodic` decorator for recurring coroutines, on every worker or on one worker of the cluster per slot, by interval or UTC cron
 - **[Task labels](handler.md#task-labels)** -- custom [message_label()](handler.md#message_label) for human-readable log/UI identifiers
 - **[Runtime health](runtime-health.md)** -- event-loop lag watchdog with a live state badge, lag episodes with verdicts, and opt-in stack probes

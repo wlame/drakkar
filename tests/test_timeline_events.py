@@ -224,7 +224,7 @@ def test_startup_warns_on_timeline_event_link_missing_base():
         name='deploy', kind='marker', color='purple', action='link', link='https://{jira}/browse/{text}'
     )
     with capture_logs() as cap:
-        _app_with_timeline_events(deploy)
+        _app_with_timeline_events(deploy).emit_startup_log()
 
     warnings = [r for r in cap if r['log_level'] == 'warning' and r.get('event') == 'timeline_event_link_bases_missing']
     assert len(warnings) == 1
@@ -244,7 +244,7 @@ def test_startup_silent_when_timeline_event_link_bases_are_configured():
             return []
 
     with capture_logs() as cap:
-        DrakkarApp(handler=_Handler(), config=_minimal_config(ui=ui))
+        DrakkarApp(handler=_Handler(), config=_minimal_config(ui=ui)).emit_startup_log()
 
     assert not [r for r in cap if r.get('event') == 'timeline_event_link_bases_missing']
 

@@ -138,7 +138,9 @@ parametrize).
      also check the delivery report: a failed delivery arrives in
      `Message.error()`, it is not raised.
 6. Errors are explicit, never silently swallowed. Structured logging via
-   structlog, ECS-compatible.
+   structlog; `logging.format: ecs` renders the Elastic Common Schema
+   (`drakkar/logging.py`, pinned byte for byte by `tests/fixtures/log_ecs.json`),
+   with every non-ECS field under `drakkar` so no field clashes with an ECS object.
 7. Cluster periodic tasks (`drakkar/cluster_tasks.py`) need `autodiscover`, whose
    one provider serves the registry and the election: the acquire window
    (10 s) and the minimum hold (20 s) are constants, the same on every

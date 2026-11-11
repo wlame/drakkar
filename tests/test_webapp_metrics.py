@@ -132,6 +132,8 @@ def _make_app_stub(handler: BaseDrakkarHandler, *, is_ready: bool = True, pool: 
     app = MagicMock()
     # No pending budget: the runner counts nothing.
     app._pending_budget = None
+    # Message identity off: a MagicMock attribute would act as a resolver.
+    app._message_identity = None
     app._handler = handler
     app._executor_pool = pool
     app._recorder = None

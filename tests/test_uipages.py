@@ -244,7 +244,7 @@ def test_app_validates_ui_pages_at_startup(app_factory):
 def test_startup_warning_covers_page_template_bases(app_factory):
     """{shop_admin} from the declared page's column template is unconfigured."""
     with capture_logs() as cap:
-        app_factory(ui_pages=[_page()])
+        app_factory(ui_pages=[_page()]).emit_startup_log()
 
     warnings = [r for r in cap if r['log_level'] == 'warning' and r.get('event') == 'probe_details_link_bases_missing']
     assert len(warnings) == 1
@@ -255,6 +255,8 @@ def test_startup_warning_covers_page_template_bases(app_factory):
 def test_startup_silent_when_page_bases_are_configured(app_factory):
     """No warning once every referenced base is present in ui.link_bases."""
     with capture_logs() as cap:
-        app_factory(ui_pages=[_page()], ui=UIConfig(link_bases={'shop_admin': 'https://admin.example.com'}))
+        app_factory(
+            ui_pages=[_page()], ui=UIConfig(link_bases={'shop_admin': 'https://admin.example.com'})
+        ).emit_startup_log()
 
     assert not [r for r in cap if r.get('event') == 'probe_details_link_bases_missing']

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `logging.message_identity` writes one value that identifies the incoming message into every log line of its processing: arrange, its tasks, its hooks, its deliveries and its DLQ record. The value comes from the message key, a header or a field of the JSON value (`source`), or from the new handler hook `message_identity(msg, configured)`. A line that covers several messages carries a list. Each task also gets the value as a label, so the search by label finds the message. Off by default.
+- `logging.format: ecs` writes each log line as JSON in the Elastic Common Schema: `@timestamp`, `log.level`, `message`, `ecs.version`, `log.logger`, `service.*`, and `error.*` for a logged exception. Every other field goes under `drakkar`, so a field such as `error` or `source` never clashes with an ECS object. `json` keeps its keys.
+
+### Fixed
+
+- Every log line now carries `worker_id`, `consumer_group` and `service_version`. Before, most lines lost them: the fields were bound in a context variable, and lines from librdkafka callback threads and the tasks they start ran in an empty context.
+- The warnings that the app logs while it is built (missing link bases, unknown docs anchors, `app_config_loaded`) are written after logging is set up, in the configured format. Before, they came out as console text before the first JSON line. A program that drives the app without `run()` calls `app.emit_startup_log()` after its own logging setup.
+- The docs and code comments no longer say that the `json` log format is ECS-compatible. Its keys (`timestamp`, `level`, `event`) are not ECS; use `ecs` for Elastic.
+
 ## [3.0.2] - 2026-11-09
 
 ### Added

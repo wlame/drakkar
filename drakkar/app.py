@@ -40,7 +40,8 @@ from drakkar.executor import ExecutorPool
 from drakkar.fleet.card import WorkerIdentity
 from drakkar.fleet.service import FleetRegistry
 from drakkar.handler import BaseDrakkarHandler, check_task_run_seconds_hook
-from drakkar.logging import setup_logging
+from drakkar.logging import DeferredLog, setup_logging
+from drakkar.message_identity_runtime import MessageIdentityResolver
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError, ErrorAction
 from drakkar.partition import PartitionProcessor
 from drakkar.periodic_roster import PeriodicRoster
@@ -211,6 +212,9 @@ class DrakkarApp:
         config: DrakkarConfig | None = None,
         worker_id: str = '',
     ) -> None:
+        # Lines that the checks below log; written by emit_startup_log once
+        # logging is set up (see DeferredLog).
+        self._startup_log = DeferredLog()
         # Which keys the YAML document and the ``DK_`` variables gave, for the
         # agent config route. ``None`` for a config built in code: no file and
         # no variable were read for it.
@@ -277,7 +281,7 @@ class DrakkarApp:
             # is never something ui.link_bases has to configure.
             missing_bases = sorted(referenced - set(self._config.ui.link_bases) - BUILTIN_LINK_BASES)
             if missing_bases:
-                logger.warning(
+                self._startup_log.warning(
                     'probe_details_link_bases_missing',
                     category='probe',
                     missing_bases=missing_bases,
@@ -296,7 +300,7 @@ class DrakkarApp:
                     referenced_link_bases(event_type.link) - set(self._config.ui.link_bases) - BUILTIN_LINK_BASES
                 )
                 if missing_event_bases:
-                    logger.warning(
+                    self._startup_log.warning(
                         'timeline_event_link_bases_missing',
                         category='timeline',
                         event_type=event_type.name,
@@ -362,6 +366,8 @@ class DrakkarApp:
         self._executor_pool: ExecutorPool | None = None
         # Pending tasks and bytes of every source; built with the pool.
         self._pending_budget: PendingBudget | None = None
+        # The message identity reader; set when the sources are bound, None while the feature is off.
+        self._message_identity: MessageIdentityResolver | None = None
         self._sink_manager: SinkManager = SinkManager()
         # Each sink's policy, resolved once, here. The sinks are built later
         # (``_build_sinks``, after ``on_startup``); a change of a policy key in
@@ -621,7 +627,8 @@ class DrakkarApp:
         Constructs the lifecycle driver and hands control to it via
         :meth:`asyncio.run`. The lifecycle owns the event-loop-bound
         machinery so this method stays focused on logging setup and the
-        public entry point.
+        public entry point. The lines that the constructor's checks logged
+        are written right after the setup, in the configured format.
         """
         setup_logging(
             self._config.logging,
@@ -630,7 +637,17 @@ class DrakkarApp:
             version=__version__,
             cluster_name=self._cluster_name,
         )
+        self.emit_startup_log()
         asyncio.run(self._lifecycle._async_run())
+
+    def emit_startup_log(self) -> None:
+        """Write the lines that the constructor's checks logged, oldest first.
+
+        ``run`` calls it right after logging is set up; a program that drives
+        the app another way can call it the same way.
+        """
+        for method, event, fields in self._startup_log.drain():
+            getattr(logger, method)(event, **fields)
 
     def _warn_on_unresolved_docs_anchors(self) -> None:
         """Warn once per docs anchor whose sink/event/page selector names nothing.
@@ -671,7 +688,7 @@ class DrakkarApp:
                 target = getattr(anchor.match, selector)
                 if not target or target in declared_names:
                     continue
-                logger.warning(
+                self._startup_log.warning(
                     warning_event,
                     category='docs',
                     selector=selector,
@@ -707,7 +724,7 @@ class DrakkarApp:
         model = getattr(self._handler, 'app_config_model', None)
         if model is None:
             if self._config.app:
-                logger.warning(
+                self._startup_log.warning(
                     'app_config_ignored',
                     category='lifecycle',
                     keys=sorted(self._config.app),
@@ -725,7 +742,7 @@ class DrakkarApp:
         self._handler._app_config = app_config
         # Field COUNT only — values may include credentials and never
         # belong in a log line.
-        logger.info(
+        self._startup_log.info(
             'app_config_loaded',
             category='lifecycle',
             model=model.__name__,

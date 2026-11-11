@@ -4,6 +4,7 @@ import asyncio
 import math
 import time
 from collections.abc import Awaitable, Callable, Iterable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -15,6 +16,7 @@ from drakkar.budget import TASKS_LIMIT, BudgetAccount, MessageShape, PendingBudg
 from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler, overridden_completion_hooks, task_run_seconds_hook
 from drakkar.hookctx import bind_hook_context, clear_hook_context
+from drakkar.message_identity_runtime import MessageIdentityResolver, reset_identity
 from drakkar.metrics import (
     batch_duration,
     delivery_stalled_offsets,
@@ -195,6 +197,9 @@ class Window:
     # Bytes of the stdout and stderr in ``results``, charged to the pending
     # budget until on_window_complete has run.
     kept_bytes: int = 0
+    # The identities of ``source_messages`` (logging.message_identity), kept
+    # here because the message trackers can be gone by on_window_complete.
+    identities: list[str | None] = field(default_factory=list)
 
     @property
     def is_complete(self) -> bool:
@@ -231,6 +236,8 @@ class MessageTracker:
     """
 
     source_message: SourceMessage
+    # The message's identity (logging.message_identity); None when off or absent.
+    identity: str | None = None
     tasks: list[ExecutorTask] = field(default_factory=list)
     results: list[ExecutorResult] = field(default_factory=list)
     errors: list[ExecutorError] = field(default_factory=list)
@@ -288,8 +295,12 @@ class PartitionProcessor:
         execute_dlq: ExecuteDLQCallback | None = None,
         executor_on_failure: str = 'skip',
         budget: PendingBudget | None = None,
+        message_identity: MessageIdentityResolver | None = None,
     ) -> None:
         self._partition_id = partition_id
+        # Reads each message's identity and binds it into the log context of
+        # every scope; None while logging.message_identity is off.
+        self._identity = message_identity
         self._handler = handler
         self._executor_pool = executor_pool
         self._window_size = window_size
@@ -1049,12 +1060,17 @@ class PartitionProcessor:
         # Policy ('skip' keeps the message in the window with payload=None):
         arrange_started_at = time.monotonic()
         accepted: list[SourceMessage] = []
+        identities: dict[int, str | None] = {}
         for msg in messages:
             self._offset_tracker.register(msg.offset)
             self._handler.deserialize_message(msg)
+            # After the parse, so the handler hook can read msg.payload.
+            identity = self._identity.of_message(msg) if self._identity is not None else None
             if msg.parse_error is not None and self._on_parse_error != 'skip':
-                await self._handle_parse_failure(msg)
+                with self._identity_scope([identity]):
+                    await self._handle_parse_failure(msg)
                 continue
+            identities[msg.offset] = identity
             accepted.append(msg)
         messages = accepted
         if not messages:
@@ -1065,6 +1081,7 @@ class PartitionProcessor:
             window_id=self._window_counter,
             source_messages=messages,
             start_time=time.monotonic(),
+            identities=[identities.get(msg.offset) for msg in messages],
         )
 
         # Create a per-message tracker BEFORE arrange() so any outcome
@@ -1074,6 +1091,7 @@ class PartitionProcessor:
             self._message_trackers[msg.offset] = MessageTracker(
                 source_message=msg,
                 started_at=arrange_started_at,
+                identity=identities.get(msg.offset),
             )
 
         pending_ctx = PendingContext(
@@ -1088,6 +1106,7 @@ class PartitionProcessor:
             window_id=self._window_counter,
             offsets=offsets,
         )
+        identity_tokens = self._identity.bind(window.identities) if self._identity is not None else None
         hook_token = bind_hook_context(
             hook='arrange',
             partition=self._partition_id,
@@ -1104,6 +1123,8 @@ class PartitionProcessor:
             arrange_labels = self._arrange_labels
             self._arrange_labels = []
             unbind_contextvars('hook', 'window_id', 'offsets')
+            if identity_tokens is not None:
+                reset_identity(identity_tokens)
             clear_hook_context(hook_token)
         arrange_duration = time.monotonic() - self._arrange_start
         handler_duration.labels(hook='arrange').observe(arrange_duration)
@@ -1116,6 +1137,8 @@ class PartitionProcessor:
                 message_labels=arrange_labels,
                 window_id=window.window_id,
             )
+        if self._identity is not None:
+            self._label_tasks_with_identity(tasks, identities)
         window.task_ids = [task.task_id for task in tasks]
         window.total_tasks = len(tasks)
 
@@ -1418,6 +1441,9 @@ class PartitionProcessor:
         """
         # Bind partition context for this async task — inherited by all user hooks called within
         bind_contextvars(partition=self._partition_id, window_id=window.window_id)
+        if self._identity is not None:
+            # This coroutine's own context: no reset needed when it ends.
+            self._identity.bind(self._identities_of(task.source_offsets))
         log = logger.bind(
             category='executor',
             partition=self._partition_id,
@@ -1743,95 +1769,123 @@ class PartitionProcessor:
         window.completed_count += 1
 
         if window.is_complete:
-            duration = time.monotonic() - window.start_time
-            batch_duration.observe(duration)
+            with self._identity_scope(window.identities):
+                duration = time.monotonic() - window.start_time
+                batch_duration.observe(duration)
 
-            bind_contextvars(hook='on_window_complete', window_id=window.window_id)
-            hook_token = bind_hook_context(
-                hook='on_window_complete',
-                partition=self._partition_id,
-                window_id=window.window_id,
-                offsets=tuple(m.offset for m in window.source_messages),
-            )
-            wc_start = time.monotonic()
-            try:
-                on_complete_result = await self._handler.on_window_complete(window.results, window.source_messages)
-            except Exception as e:
-                # Log and move on — mirrors on_message_complete below. This
-                # runs inside a fire-and-forget task, so a raising hook would
-                # otherwise skip the window's recorder event, delivery, and
-                # the final _try_commit, surfacing only as an
-                # unretrieved-task-exception warning at GC time.
-                await logger.aerror(
-                    'on_window_complete_failed',
-                    category='handler',
+                bind_contextvars(hook='on_window_complete', window_id=window.window_id)
+                hook_token = bind_hook_context(
+                    hook='on_window_complete',
                     partition=self._partition_id,
                     window_id=window.window_id,
-                    error=str(e),
-                    exc_info=True,
+                    offsets=tuple(m.offset for m in window.source_messages),
                 )
-                on_complete_result = None
-            finally:
-                # Released together in the ``finally`` — see on_task_complete
-                # above for why unbinding after the ``try`` leaks.
-                unbind_contextvars('hook', 'window_id')
-                clear_hook_context(hook_token)
-            wc_duration = time.monotonic() - wc_start
-            handler_duration.labels(hook='on_window_complete').observe(wc_duration)
-            if self._recorder:
-                self._recorder.record_window_complete(
-                    partition=self._partition_id,
-                    window_id=window.window_id,
-                    duration=wc_duration,
-                    task_count=window.total_tasks,
-                    output_message_count=len(on_complete_result.kafka) if on_complete_result else 0,
-                )
-            if on_complete_result and self._on_collect and self._deliveries_suppressed:
-                self._note_suppressed_delivery('on_window_complete')
-            elif on_complete_result and self._on_collect:
+                wc_start = time.monotonic()
                 try:
-                    # The explicit window context: this result has no source
-                    # message left, so a ``dlq`` outcome acts as ``skip``.
-                    await self._on_collect(
-                        on_complete_result,
-                        self._partition_id,
-                        message_context=MessageContext.window(),
-                    )
-                except SinkDeliveryFailedError as e:
-                    # The window's per-message offsets were already completed
-                    # individually as each message finished, so there is
-                    # nothing left to stall — the aggregate payload is the
-                    # only loss. Loudest possible signal for the operator.
-                    await logger.acritical(
-                        'on_window_complete_delivery_failed',
-                        category='sink',
-                        partition=self._partition_id,
-                        window_id=window.window_id,
-                        error=str(e),
-                        action='ALERT: window aggregate payload lost — offsets already committed',
-                    )
+                    on_complete_result = await self._handler.on_window_complete(window.results, window.source_messages)
                 except Exception as e:
-                    # Previously this propagated out of the fire-and-forget
-                    # task and surfaced only as an unobserved-exception
-                    # warning at GC time. Log it properly instead.
+                    # Log and move on — mirrors on_message_complete below. This
+                    # runs inside a fire-and-forget task, so a raising hook would
+                    # otherwise skip the window's recorder event, delivery, and
+                    # the final _try_commit, surfacing only as an
+                    # unretrieved-task-exception warning at GC time.
                     await logger.aerror(
-                        'on_window_complete_sink_delivery_error',
-                        category='sink',
+                        'on_window_complete_failed',
+                        category='handler',
                         partition=self._partition_id,
                         window_id=window.window_id,
                         error=str(e),
                         exc_info=True,
                     )
-            self._release_kept_bytes(window)
+                    on_complete_result = None
+                finally:
+                    # Released together in the ``finally`` — see on_task_complete
+                    # above for why unbinding after the ``try`` leaks.
+                    unbind_contextvars('hook', 'window_id')
+                    clear_hook_context(hook_token)
+                wc_duration = time.monotonic() - wc_start
+                handler_duration.labels(hook='on_window_complete').observe(wc_duration)
+                if self._recorder:
+                    self._recorder.record_window_complete(
+                        partition=self._partition_id,
+                        window_id=window.window_id,
+                        duration=wc_duration,
+                        task_count=window.total_tasks,
+                        output_message_count=len(on_complete_result.kafka) if on_complete_result else 0,
+                    )
+                if on_complete_result and self._on_collect and self._deliveries_suppressed:
+                    self._note_suppressed_delivery('on_window_complete')
+                elif on_complete_result and self._on_collect:
+                    try:
+                        # The explicit window context: this result has no source
+                        # message left, so a ``dlq`` outcome acts as ``skip``.
+                        await self._on_collect(
+                            on_complete_result,
+                            self._partition_id,
+                            message_context=MessageContext.window(),
+                        )
+                    except SinkDeliveryFailedError as e:
+                        # The window's per-message offsets were already completed
+                        # individually as each message finished, so there is
+                        # nothing left to stall — the aggregate payload is the
+                        # only loss. Loudest possible signal for the operator.
+                        await logger.acritical(
+                            'on_window_complete_delivery_failed',
+                            category='sink',
+                            partition=self._partition_id,
+                            window_id=window.window_id,
+                            error=str(e),
+                            action='ALERT: window aggregate payload lost — offsets already committed',
+                        )
+                    except Exception as e:
+                        # Previously this propagated out of the fire-and-forget
+                        # task and surfaced only as an unobserved-exception
+                        # warning at GC time. Log it properly instead.
+                        await logger.aerror(
+                            'on_window_complete_sink_delivery_error',
+                            category='sink',
+                            partition=self._partition_id,
+                            window_id=window.window_id,
+                            error=str(e),
+                            exc_info=True,
+                        )
+                self._release_kept_bytes(window)
 
-            # Per-message offsets were already marked complete individually
-            # by _finalize_message_tracker as each message's tasks finished.
-            # Just make sure any outstanding commit attempt goes through in
-            # case the last commit was blocked.
-            offset_lag.labels(partition=str(self._partition_id)).set(self._offset_tracker.pending_count)
-            await self._note_commit_due()
+                # Per-message offsets were already marked complete individually
+                # by _finalize_message_tracker as each message's tasks finished.
+                # Just make sure any outstanding commit attempt goes through in
+                # case the last commit was blocked.
+                offset_lag.labels(partition=str(self._partition_id)).set(self._offset_tracker.pending_count)
+                await self._note_commit_due()
 
     async def _finalize_message_tracker(self, tracker: MessageTracker) -> None:
+        """Finish a message (see :meth:`_finish_message`) with its identity in the log context."""
+        with self._identity_scope([tracker.identity]):
+            await self._finish_message(tracker)
+
+    def _identity_scope(self, values: list[str | None]) -> AbstractContextManager[None]:
+        """Bind the message identity of ``values`` for a ``with`` block; nothing while the feature is off."""
+        if self._identity is None:
+            return nullcontext()
+        return self._identity.scope(values)
+
+    def _identities_of(self, offsets: list[int]) -> list[str | None]:
+        """The identities of the tracked messages at ``offsets``."""
+        trackers = self._message_trackers
+        return [trackers[offset].identity if offset in trackers else None for offset in offsets]
+
+    def _label_tasks_with_identity(self, tasks: list[ExecutorTask], identities: dict[int, str | None]) -> None:
+        """Give each task its messages' identity as a label; a label the handler set wins."""
+        assert self._identity is not None
+        name = self._identity.name
+        for task in tasks:
+            if name in task.labels:
+                continue
+            label = self._identity.label(identities.get(offset) for offset in task.source_offsets)
+            if label is not None:
+                task.labels[name] = label
+
+    async def _finish_message(self, tracker: MessageTracker) -> None:
         """Fire ``on_message_complete`` for a fully-terminal message and
         complete its offset on the watermark tracker.
 

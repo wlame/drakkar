@@ -1291,9 +1291,13 @@ Structured logging configuration via structlog.
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
 | `level` | `str` | `'INFO'` | | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. |
-| `format` | `str` | `'json'` | `json` or `console` | Output format. `json` produces machine-readable structured logs. `console` produces colorized human-readable output for local development. |
+| `format` | `str` | `'json'` | `json`, `ecs` or `console` | Output format. `json` produces machine-readable structured logs with flat keys. `ecs` produces JSON in the Elastic Common Schema, with the framework's own fields under `drakkar` (see [ECS Output](observability.md#ecs-output)). `console` produces colorized human-readable output for local development. |
 | `output` | `str` | `'stderr'` | | Log destination: `stderr`, `stdout`, or a file path. File paths support `{worker_id}` and `{cluster_name}` template variables. Parent directories are created automatically. |
 | `min_task_duration` | duration | `500ms` | >= 0 | Shortest task duration that emits a `slow_task_completed` or `slow_task_failed` log message. `0` logs all tasks. |
+| `message_identity.enabled` | `bool` | `false` | | Write the identity of the incoming message into every log line of its processing, and add it to each task as a label. See [Message Identity](observability.md#message-identity). |
+| `message_identity.name` | `str` | `'message_id'` | lower-case identifier, at most 64 characters, not a field the framework writes | The log field and task label name. |
+| `message_identity.source` | `str` | `'key'` | `key`, `header:<name>` or `value:<path>` | Where the value is read: the message key, a header (letter case ignored), or a field of the JSON value. |
+| `message_identity.max_values` | `int` | `100` | 1 to 10000 | The most values a line that covers several messages carries. |
 
 ```yaml
 logging:
