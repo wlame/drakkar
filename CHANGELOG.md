@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-11-11
+
 ### Breaking
 
 - `logging.message_identity` and the handler hook `message_identity()` are removed. Every message now has a request id instead (see Added); a config that still has `logging.message_identity` fails the load as an unknown key. See the upgrade notes.
