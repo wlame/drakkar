@@ -62,7 +62,6 @@ import asyncio
 import time
 import traceback
 from collections import Counter
-from contextlib import AbstractContextManager, nullcontext
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -88,6 +87,7 @@ from drakkar.models import (
     SourceMessage,
 )
 from drakkar.reported_run import RunSecondsHook, reported_run_seconds
+from drakkar.request_ids import REQUEST_ID_FIELD
 from drakkar.sinks.manager import (
     DeliveryErrorCallback,
     DeliveryOutcome,
@@ -97,6 +97,7 @@ from drakkar.sinks.manager import (
     sink_ref,
 )
 from drakkar.webapp.models import (
+    HTTP_SOURCE_TOPIC,
     CacheStats,
     SinkDeliverySummary,
     SinkResult,
@@ -226,9 +227,8 @@ class WebappRunner:
         account = BudgetAccount(budget) if budget is not None else None
         try:
             source_message = self._source_message(ctx)
-            identity = self._request_identity(ctx, source_message)
-            with self._identity_scope(identity):
-                return await self._run_body(ctx, source_message, identity, account)
+            with self._app._request_ids.scope([ctx.request_id]):
+                return await self._run_body(ctx, source_message, account)
         finally:
             if account is not None:
                 account.close()
@@ -245,7 +245,7 @@ class WebappRunner:
         """
         self._request_seq += 1
         return SourceMessage(
-            topic='__webapp__',
+            topic=HTTP_SOURCE_TOPIC,
             partition=-1,
             offset=self._request_seq,
             key=ctx.client_name.encode('utf-8'),
@@ -256,27 +256,13 @@ class WebappRunner:
             # does the same with the already-parsed request so
             # on_http_request_complete never needs to re-parse ``value``.
             payload=ctx.request,
+            request_id=ctx.request_id,
         )
-
-    def _request_identity(self, ctx: WebRequestContext, source_message: SourceMessage) -> str | None:
-        """The request's message identity, read from its headers and the raw body; a request has no key."""
-        resolver = self._app._message_identity
-        if resolver is None:
-            return None
-        return resolver.of_http_request(source_message, ctx.headers, ctx.raw_body)
-
-    def _identity_scope(self, identity: str | None) -> AbstractContextManager[None]:
-        """Bind the request's identity for the whole request; nothing while the feature is off."""
-        resolver = self._app._message_identity
-        if resolver is None:
-            return nullcontext()
-        return resolver.scope([identity])
 
     async def _run_body(
         self,
         ctx: WebRequestContext,
         source_message: SourceMessage,
-        identity: str | None,
         account: BudgetAccount | None = None,
     ) -> WebReport:
         """The actual pipeline-side work; wrapped by ``run`` for inflight."""
@@ -344,14 +330,12 @@ class WebappRunner:
         # produce a fresh object the user no longer holds a reference
         # to, breaking ``arrange_http_request`` overrides that stash
         # task references in ``self`` for tracking.
-        resolver = self._app._message_identity
         for task in tasks:
             task.origin = 'http'
             task.client_name = ctx.client_name
             task.request_id = ctx.request_id
-            # The request's identity as a task label; a label the handler set wins.
-            if resolver is not None and identity is not None and resolver.name not in task.labels:
-                task.labels[resolver.name] = identity
+            # The request id as a task label; a label the handler set wins.
+            task.labels.setdefault(REQUEST_ID_FIELD, ctx.request_id)
 
         timeline.append(StageTiming(stage='arrange', duration_ms=(time.monotonic() - arrange_started) * 1000.0))
 

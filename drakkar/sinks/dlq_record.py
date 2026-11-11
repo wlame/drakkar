@@ -85,7 +85,7 @@ class DLQRecord(BaseModel):
         default=None,
         description='The Kafka timestamp of the message in ms; for an HTTP request the time it was received.',
     )
-    request_id: str | None = Field(default=None, description='The request id; HTTP requests only.')
+    request_id: str | None = Field(default=None, description='The request id of the source message or HTTP request.')
     worker: str | None = Field(default=None, description='The worker name; set by the DLQ sink.')
     instance: str | None = Field(default=None, description='The worker instance id; set by the DLQ sink.')
     failed_at: datetime | None = Field(default=None, description='When the record was written; set by the DLQ sink.')

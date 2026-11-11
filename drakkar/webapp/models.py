@@ -47,6 +47,10 @@ UTCMicroDatetime = Annotated[
 # line of ``run()`` so the Event is created on T1).
 # ---------------------------------------------------------------------------
 
+# The topic of the synthetic SourceMessage of an HTTP request, which keeps it
+# apart from any real Kafka topic.
+HTTP_SOURCE_TOPIC = '__webapp__'
+
 
 @dataclass
 class WebRequestContext:
@@ -77,7 +81,7 @@ class WebRequestContext:
         ``WebReport.duration_ms`` and the response timeline.
     headers:
         Request headers as received by FastAPI. ``Mapping[str, str]``
-        because handler hooks (``http_request_id``) inspect them but
+        because handler hooks (``request_id``) inspect them but
         should never mutate them.
     raw_body:
         The request body bytes exactly as the client sent them. A request

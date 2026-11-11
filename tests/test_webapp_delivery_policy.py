@@ -15,6 +15,7 @@ from drakkar.config import WebAppConfig, WebClientConfig
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.metrics import dlq_unconfigured_drops, sink_deliveries_not_started, webapp_dropped_after_timeout
 from drakkar.models import CollectResult, DeliveryError, KafkaPayload, PostgresPayload
+from drakkar.request_ids import RequestIdResolver
 from drakkar.sinks.dlq_record import render_headers
 from drakkar.sinks.manager import SinkManager
 from drakkar.webapp.models import WebRequestContext
@@ -69,9 +70,9 @@ def make_runner(handler: BaseDrakkarHandler, manager: SinkManager, *, recorder: 
     app = MagicMock()
     # No pending budget: the runner counts nothing.
     app._pending_budget = None
-    # Message identity off: a MagicMock attribute would act as a resolver.
-    app._message_identity = None
     app._handler = handler
+    # A real resolver: a MagicMock attribute would answer a mock as the request id.
+    app._request_ids = RequestIdResolver(app._handler)
     app._executor_pool = MagicMock()
     app._recorder = recorder
     app._sink_manager = manager

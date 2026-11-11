@@ -19,11 +19,12 @@
 #      are exactly the two source headers that do not start with `dk-`, in
 #      their order, then the `dk-` headers of the `parse` case of
 #      dlq_contract.json, in its order (no `dk-attempts`, `dk-sink`,
-#      `dk-task-id`, `dk-delivered-sinks` or `dk-request-id`);
+#      `dk-task-id` or `dk-delivered-sinks`);
 #      `dk-record-version` is 1, `dk-stage` is parse, `dk-error` is not
 #      empty, `dk-source-topic` is the source topic, `dk-worker` is a worker
 #      of the main cluster, `dk-instance` is 16 hex characters and
 #      `dk-failed-at` is an RFC 3339 time in UTC with microseconds,
+#      `dk-request-id` is a request id (not empty, no whitespace),
 #   4. the source message at `dk-source-partition` and `dk-source-offset`
 #      (worker-1 /api/v1/debug/kafka/source/message) is the produced one:
 #      the same key, value and headers, and its timestamp is
@@ -149,6 +150,7 @@ PARSE_DK_HEADERS = [
     "dk-source-partition",
     "dk-source-offset",
     "dk-source-timestamp",
+    "dk-request-id",
     "dk-worker",
     "dk-instance",
     "dk-failed-at",
@@ -197,6 +199,7 @@ checks = [
     (dk["dk-source-offset"].isdigit(), "dk-source-offset is not a decimal number"),
     (dk["dk-source-timestamp"].isdigit(), "dk-source-timestamp is not a decimal number"),
     (dk["dk-worker"] in os.environ["WORKERS"].split(), "dk-worker is not a worker of the main cluster"),
+    (re.fullmatch(r"\S{1,64}", dk["dk-request-id"] or "") is not None, "dk-request-id is not a request id"),
     (re.fullmatch(r"[0-9a-f]{16}", dk["dk-instance"] or "") is not None, "dk-instance is not 16 hex characters"),
     (FAILED_AT.match(dk["dk-failed-at"] or "") is not None, "dk-failed-at is not an RFC 3339 time in UTC with microseconds"),
 ]

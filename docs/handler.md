@@ -19,13 +19,12 @@ right time during the message-processing pipeline. See [Configuration](configura
 | `on_assign(partitions)` | Kafka assigns partitions during rebalance | Once per rebalance event | `None` |
 | `on_revoke(partitions)` | Kafka revokes partitions during rebalance | Once per rebalance event | `None` |
 | `message_label(msg)` | Before logging each message in arrange | Once per message | `str` |
-| `message_identity(msg, configured)` | After the message is parsed, when `logging.message_identity.enabled` | Once per message and HTTP request | `str \| None` |
+| `request_id(msg)` | After the message is parsed; for HTTP, before the request is processed | Once per message and HTTP request | `str` |
 | `task_priority(task)` | Before each task waits on the executor pool | Once per task (incl. retries) | sortable key (any `<`-comparable value) |
 | `task_run_seconds(result)` | Optional; right after a task's subprocess exits, before its `task_completed` / `task_failed` event | Once per task that ran a process, only when overridden | `float \| None` |
 | `agent_notes()` | Once after `on_startup`, when `agent.enabled` is true | Once per worker lifetime | [`AgentNotes`](#agent-notes) `\| None` |
 | `arrange_http_request(req, pending)` | One HTTP request passed auth + rate-limit + body parsing | Once per HTTP request (webapp only) | `list[`[`ExecutorTask`](executor.md#executortask)`]` |
 | `on_http_request_complete(group)` | All tasks from one HTTP request reached a terminal state | Once per HTTP request (webapp only) | `HttpResponseT` (a Pydantic model) |
-| `http_request_id(req, headers)` | After body parsing, before task fan-out | Once per HTTP request (webapp only) | `str` (validated; ≤64 chars, ASCII, no whitespace) |
 | `http_request_label(req, request_id)` | Before logging each HTTP request | Once per HTTP request (webapp only) | `str` |
 
 **Which hooks are required follows the enabled [input sources](sources.md).** `arrange()` is required when `sources.kafka.enabled` is true; the four `*http*` hooks at the bottom are required when `sources.http.enabled` is true, together with concrete types in the `HttpRequestT` / `HttpResponseT` slots (see [Generic type parameters](#generic-type-parameters) below). A worker running both sources needs both sets. An HTTP-only worker implements only the HTTP hooks and may leave `arrange()` unimplemented; a Kafka-only worker is the mirror of that. Every other hook has a safe default.
@@ -955,29 +954,49 @@ def message_label(self, msg):
 
 ---
 
-## message_identity()
+## request_id()
 
 ```python
-def message_identity(self, msg: SourceMessage, configured: str | None) -> str | None
+def request_id(self, msg: SourceMessage) -> str
 ```
 
-Called once per message (and once per HTTP request) when
-[`logging.message_identity.enabled`](observability.md#message-identity) is
-true. `configured` is the value read from the place that
-`logging.message_identity.source` names, or `None`. Return the identity to
-write into every log line of the message's processing, or `None` for none.
-The default returns `configured`. The hook runs after the message is parsed,
-so it can read `msg.payload`. It runs on the event loop for every message,
-so keep it fast. A hook that raises or returns something other than a string
-or `None` gives no identity and logs `message_identity_hook_failed` (at most
-one line per minute).
+Every Kafka message and every HTTP request gets a request id. The framework
+asks this hook once per message, right after the message is parsed (so
+`msg.payload` is set), and once per HTTP request before the request is
+processed. The default returns a generated id,
+`req_<UTC time>_<8 random hex per process>_<counter>`, for example
+`req_20261111T093000_3f9a1c2e_0042`, which is unique across workers.
+
+The id is used everywhere the framework names a message:
+
+- `msg.request_id`, set right after the hook, so every later hook can read it;
+- every log line written while the message is processed (see
+  [Request ID](observability.md#request-id));
+- `task.request_id` and the [task label](#task-labels) `request_id` of its
+  tasks (a task built from several messages gets their ids joined with `,`);
+- its recorder rows, the `dk-request-id` header of its
+  [DLQ record](sinks.md#the-dlq-record), and the HTTP response.
+
+Override it to use an id the message already carries:
 
 ```python
-def message_identity(self, msg, configured):
-    if msg.payload is not None:
-        return f'{msg.payload.tenant}/{msg.payload.order_id}'
-    return configured
+def request_id(self, msg):
+    if msg.topic == '__webapp__':  # an HTTP request
+        upstream = dict((name.lower(), value) for name, value in msg.headers).get('x-request-id')
+        if upstream:
+            return upstream.decode()
+    elif msg.payload is not None:
+        return f'order-{msg.payload.order_id}'
+    return dk.make_request_id('req')
 ```
+
+For an HTTP request `msg` has the topic `__webapp__`, partition -1, offset 0,
+no key, the raw request body as `value`, the request headers as `headers`
+and the parsed request as `payload`. Keep the id unique: the framework does
+not check that. The answer must be at most 64 ASCII characters with no
+whitespace. A hook that raises or answers something else gets a generated
+id, and the worker logs `request_id_hook_failed` (at most one line per
+minute). The hook runs for every message, so keep it fast.
 
 ---
 

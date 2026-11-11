@@ -5,6 +5,7 @@ import datetime as _dt
 import itertools
 import math
 import re
+import secrets
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -53,17 +54,21 @@ def redact_url(url: str) -> str:
 _REQUEST_ID_COUNTER = itertools.count(start=1)
 _REQUEST_ID_LOCK = threading.Lock()
 _REQUEST_ID_MAX_LEN = 64
+# Random per process, so two workers that generate ids in the same second
+# never produce the same id: the counter alone restarts at 1 in every process.
+_REQUEST_ID_PROCESS_TOKEN = secrets.token_hex(4)
 
 
 def make_request_id(prefix: str = 'req') -> str:
-    """Generate a webapp request ID.
+    """Generate a request ID for a Kafka message or an HTTP request.
 
-    Format: ``<prefix>_<UTC-timestamp>_<monotone-counter>``
-    Example: ``req_20260506T184231_0042``
+    Format: ``<prefix>_<UTC-timestamp>_<process-token>_<monotone-counter>``
+    Example: ``req_20260506T184231_3f9a1c2e_0042``
 
     The timestamp uses UTC compact ISO-8601 form (``YYYYMMDDTHHMMSS``) so IDs
-    sort lexicographically by creation time within the same monotone-counter
-    epoch. The monotone counter is module-level — consecutive calls always
+    sort lexicographically by creation time. The process token is 8 random
+    hex characters chosen once per process, so ids of different workers never
+    collide. The monotone counter is module-level — consecutive calls always
     produce different IDs, even within the same second, even across threads.
 
     Mirrors the role of :func:`drakkar.models.make_task_id` but uses a
@@ -77,7 +82,7 @@ def make_request_id(prefix: str = 'req') -> str:
         now = _dt.datetime.now(_dt.UTC)
         ts = now.strftime('%Y%m%dT%H%M%S')
         seq = next(_REQUEST_ID_COUNTER)
-    return f'{prefix}_{ts}_{seq:04d}'
+    return f'{prefix}_{ts}_{_REQUEST_ID_PROCESS_TOKEN}_{seq:04d}'
 
 
 def validate_request_id(rid: str) -> None:
@@ -94,10 +99,11 @@ def validate_request_id(rid: str) -> None:
     Raises :class:`ValueError` with a message that names the offending input
     so operators can quickly find the bad handler override.
 
-    Used internally by the webapp framework when validating request IDs
-    returned from the optional ``http_request_id`` handler hook. Not part of
-    the public API surface.
+    Used internally when validating request IDs returned from the optional
+    ``request_id`` handler hook. Not part of the public API surface.
     """
+    if not rid:
+        raise ValueError('request_id must not be empty')
     if len(rid) > _REQUEST_ID_MAX_LEN:
         raise ValueError(f'request_id too long (max {_REQUEST_ID_MAX_LEN} chars, got {len(rid)}): {rid!r}')
     if not rid.isascii():

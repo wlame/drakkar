@@ -103,6 +103,15 @@ class SourceMessage(BaseModel):
             'sources.kafka.on_parse_error policy to messages with a non-None value.'
         ),
     )
+    request_id: str | None = Field(
+        default=None,
+        description=(
+            'The id of this message, set by the framework right after the message is parsed: '
+            'the answer of the handler hook request_id() (by default a generated id). It is in '
+            'every log line written while the message is processed, in its tasks, its recorder '
+            'rows and its DLQ record. None only before the framework sets it.'
+        ),
+    )
 
 
 class SinkDeliveryFailedError(Exception):

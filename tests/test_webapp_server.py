@@ -33,6 +33,7 @@ from structlog.testing import capture_logs
 
 from drakkar.config import WebAppConfig, WebClientConfig
 from drakkar.handler import BaseDrakkarHandler
+from drakkar.request_ids import RequestIdResolver
 from drakkar.webapp import ConfigurationError, WebApp
 
 
@@ -126,6 +127,8 @@ def _make_app_stub(handler: Any, *, is_ready: bool = False) -> Any:
     """
     app = MagicMock()
     app._handler = handler
+    # A real resolver: a MagicMock attribute would answer a mock as the request id.
+    app._request_ids = RequestIdResolver(app._handler)
     app.is_ready = is_ready
     return app
 
@@ -536,40 +539,51 @@ def test_signal_cancel_falls_back_to_direct_set_when_loop_closed():
 
 
 # ---------------------------------------------------------------------------
-# request_id resolution failure → flat 500
+# request_id: the handler hook, and its fallback
 # ---------------------------------------------------------------------------
 
 
-class _BadRequestIdHandler(_WebHandler):
-    """Handler whose http_request_id override raises — the route must
-    answer with the flat 500 envelope instead of propagating."""
+class _HeaderRequestIdHandler(_RaisingWebHandler):
+    """Takes the request id from the ``X-Request-ID`` header; arrange raises, so the reply is the 500 envelope."""
 
-    def http_request_id(self, req, headers):
+    def request_id(self, msg):
+        assert msg.topic == '__webapp__'
+        assert msg.payload is not None
+        return dict((name.lower(), value) for name, value in msg.headers)['x-request-id'].decode()
+
+
+class _BadRequestIdHandler(_RaisingWebHandler):
+    """Its request_id hook raises: the request goes on with a generated id."""
+
+    def request_id(self, msg):
         raise RuntimeError('id resolution exploded')
 
 
-def test_request_id_resolution_failure_returns_flat_500():
-    handler = _BadRequestIdHandler()
+def _post_and_read_request_id(handler, headers: dict[str, str]) -> tuple[str, list]:
     app = _make_app_stub(handler, is_ready=True)
     port = _free_port()
-    config = _make_config(port=port)
-    webapp = WebApp(app, config)
-
+    webapp = WebApp(app, _make_config(port=port))
     try:
         webapp.start_in_thread()
         webapp.wait_until_ready(timeout=5.0)
-
         with httpx.Client() as client, capture_logs() as cap:
-            response = client.post(f'http://127.0.0.1:{port}/process', json={})
-
-        assert response.status_code == 500
-        body = response.json()
-        assert body['status'] == 'error'
-        assert body['error'] == 'internal error'
-        assert 'request_id' in body
-        assert any(e['event'] == 'webapp_request_id_resolution_failed' for e in cap)
+            response = client.post(f'http://127.0.0.1:{port}/process', json={}, headers=headers)
+        return response.json()['request_id'], cap
     finally:
         webapp.stop(drain_timeout=2.0)
+
+
+def test_request_id_hook_can_take_the_id_from_a_header():
+    request_id, _ = _post_and_read_request_id(_HeaderRequestIdHandler(), {'X-Request-ID': 'upstream-77'})
+    assert request_id == 'upstream-77'
+
+
+def test_request_id_hook_that_raises_gives_a_generated_id_and_a_warning():
+    request_id, cap = _post_and_read_request_id(_BadRequestIdHandler(), {})
+    assert request_id.startswith('req_')
+    failures = [e for e in cap if e['event'] == 'request_id_hook_failed']
+    assert len(failures) == 1
+    assert failures[0]['error'] == 'RuntimeError: id resolution exploded'
 
 
 # ---------------------------------------------------------------------------

@@ -95,13 +95,14 @@ from drakkar.metrics import (
     webapp_requests,
     webapp_rpm_limit,
 )
-from drakkar.utils import make_request_id, validate_request_id
+from drakkar.models import SourceMessage
+from drakkar.utils import make_request_id
 from drakkar.webapp.dependencies import (
     WebappError,
     make_authenticate,
     make_rate_limit,
 )
-from drakkar.webapp.models import WebRequestContext
+from drakkar.webapp.models import HTTP_SOURCE_TOPIC, WebRequestContext
 from drakkar.webapp.runner import WebappHandlerError, WebappRunner
 from drakkar.webapp.validation import validate_webapp_handler
 
@@ -748,38 +749,30 @@ class WebApp:
                     },
                 )
 
-            # Resolve the framework request_id via the handler hook so
-            # users can promote an upstream tracing header (e.g.,
-            # ``X-Request-ID``) into the framework id. The hook's return
-            # value goes through ``validate_request_id`` so a buggy
-            # override fails loudly rather than producing log labels
-            # with whitespace / non-ASCII.
-            try:
-                request_id = self._app._handler.http_request_id(parsed, dict(request.headers))
-                validate_request_id(request_id)
-            except Exception as exc:
-                logger.warning(
-                    'webapp_request_id_resolution_failed',
-                    category='webapp',
-                    error_type=type(exc).__name__,
-                    error=str(exc),
+            # The request id comes from the handler hook ``request_id`` (by
+            # default a generated id), so a handler can promote an upstream
+            # tracing header (e.g. ``X-Request-ID``) into the id. The resolver
+            # checks the answer and falls back to a generated id when the hook
+            # raises or answers something that is not a valid id.
+            headers = dict(request.headers)
+            request_id = self._app._request_ids.resolve(
+                SourceMessage(
+                    topic=HTTP_SOURCE_TOPIC,
+                    partition=-1,
+                    offset=0,
+                    value=body_bytes,
+                    timestamp=int(time.time() * 1000),
+                    headers=[(name, value.encode('utf-8')) for name, value in headers.items()],
+                    payload=parsed,
                 )
-                self._observe_outcome(request=request, client=metric_client, status='error')
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        'status': 'error',
-                        'request_id': gate_request_id,
-                        'error': 'internal error',
-                    },
-                )
+            )
 
             ctx = WebRequestContext(
                 request_id=request_id,
                 client_name=client.name,
                 request=parsed,
                 started_at=datetime.now(UTC),
-                headers=dict(request.headers),
+                headers=headers,
                 raw_body=body_bytes,
             )
 

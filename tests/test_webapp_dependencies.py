@@ -27,6 +27,7 @@ from pydantic import BaseModel, ValidationError
 
 from drakkar.config import WebAppConfig, WebClientConfig
 from drakkar.handler import BaseDrakkarHandler
+from drakkar.request_ids import RequestIdResolver
 from drakkar.webapp import WebApp
 from drakkar.webapp.dependencies import (
     KAFKA_FALLBACK_HINT,
@@ -95,6 +96,8 @@ def _make_app_stub(*, is_ready: bool = True) -> Any:
     """
     app = MagicMock()
     app._handler = _WebHandler()
+    # A real resolver: a MagicMock attribute would answer a mock as the request id.
+    app._request_ids = RequestIdResolver(app._handler)
     app.is_ready = is_ready
     return app
 

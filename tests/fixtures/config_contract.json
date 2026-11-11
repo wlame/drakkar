@@ -2581,70 +2581,31 @@
       "message": "autodiscover.enabled needs api.enabled: peers reach a worker through its API"
     },
     {
-      "name": "message_identity_name_not_an_identifier",
+      "name": "ecs_namespace_not_an_identifier",
       "yaml": {
         "logging": {
-          "message_identity": {
-            "name": "Request-Id"
-          }
+          "ecs_namespace": "My-Product"
         }
       },
-      "message": "logging.message_identity.name 'Request-Id' must be a lower-case identifier of at most 64 characters ([a-z_][a-z0-9_]*)"
+      "message": "logging.ecs_namespace 'My-Product' must be a lower-case identifier of at most 64 characters ([a-z_][a-z0-9_]*)"
     },
     {
-      "name": "message_identity_name_reserved",
+      "name": "ecs_namespace_is_an_ecs_field",
       "yaml": {
         "logging": {
-          "message_identity": {
-            "name": "partition"
-          }
+          "ecs_namespace": "host"
         }
       },
-      "message": "logging.message_identity.name 'partition' is a field the framework already writes; choose another name"
+      "message": "logging.ecs_namespace 'host' is an ECS field name; choose another name, for example your product name"
     },
     {
-      "name": "message_identity_source_unknown",
+      "name": "ecs_namespace_is_the_root_request_id",
       "yaml": {
         "logging": {
-          "message_identity": {
-            "source": "body.id"
-          }
+          "ecs_namespace": "request_id"
         }
       },
-      "message": "logging.message_identity.source must be key, header:<name> or value:<path>, got 'body.id'"
-    },
-    {
-      "name": "message_identity_source_empty_header",
-      "yaml": {
-        "logging": {
-          "message_identity": {
-            "source": "header:"
-          }
-        }
-      },
-      "message": "logging.message_identity.source must be key, header:<name> or value:<path>, got 'header:'"
-    },
-    {
-      "name": "message_identity_max_values_zero",
-      "yaml": {
-        "logging": {
-          "message_identity": {
-            "max_values": 0
-          }
-        }
-      },
-      "path": "logging.message_identity.max_values"
-    },
-    {
-      "name": "message_identity_max_values_over_limit",
-      "yaml": {
-        "logging": {
-          "message_identity": {
-            "max_values": 10001
-          }
-        }
-      },
-      "path": "logging.message_identity.max_values"
+      "message": "logging.ecs_namespace 'request_id' is an ECS field name; choose another name, for example your product name"
     }
   ],
   "load_values": [
@@ -4064,43 +4025,25 @@
       "value": true
     },
     {
-      "name": "message_identity_off_by_default",
+      "name": "ecs_namespace_default",
       "yaml": {},
-      "path": "logging.message_identity.enabled",
+      "path": "logging.ecs_namespace",
+      "value": "drakkar"
+    },
+    {
+      "name": "ecs_request_id_at_root_default",
+      "yaml": {},
+      "path": "logging.ecs_request_id_at_root",
       "value": false
     },
     {
-      "name": "message_identity_default_name",
+      "name": "ecs_namespace_by_env",
       "yaml": {},
-      "path": "logging.message_identity.name",
-      "value": "message_id"
-    },
-    {
-      "name": "message_identity_default_source",
-      "yaml": {},
-      "path": "logging.message_identity.source",
-      "value": "key"
-    },
-    {
-      "name": "message_identity_default_max_values",
-      "yaml": {},
-      "path": "logging.message_identity.max_values",
-      "value": 100
-    },
-    {
-      "name": "message_identity_source_by_env",
-      "yaml": {
-        "logging": {
-          "message_identity": {
-            "enabled": true
-          }
-        }
-      },
       "env": {
-        "DK_LOGGING__MESSAGE_IDENTITY__SOURCE": "header:x-request-id"
+        "DK_LOGGING__ECS_NAMESPACE": "acme_search"
       },
-      "path": "logging.message_identity.source",
-      "value": "header:x-request-id"
+      "path": "logging.ecs_namespace",
+      "value": "acme_search"
     }
   ],
   "sink_policies": [

@@ -11,14 +11,15 @@ import structlog
 from pydantic import ValidationError
 
 from drakkar.config import LoggingConfig
+from drakkar.ecs import DEFAULT_ECS_NAMESPACE, ECS_RESERVED_NAMES, ECS_VERSION
 from drakkar.logging import (
-    ECS_VERSION,
     DeferredLog,
     EcsError,
+    EcsRenderer,
+    EcsSettings,
     IdentityFields,
     _resolve_output,
     close_logging,
-    ecs_renderer,
     render_ecs_line,
     setup_logging,
 )
@@ -240,12 +241,37 @@ ECS_FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'log_ecs.json').r
 @pytest.mark.parametrize('case', ECS_FIXTURE['cases'], ids=lambda case: case['name'])
 def test_render_ecs_line_matches_fixture(case):
     error = EcsError(**case['error']) if case['error'] else None
-    assert render_ecs_line(case['fields'], error) == case['line']
+    assert render_ecs_line(case['fields'], error, EcsSettings(**case['settings'])) == case['line']
 
 
 def test_ecs_fixture_pins_the_version_and_namespace():
     assert ECS_FIXTURE['ecs_version'] == ECS_VERSION
-    assert ECS_FIXTURE['own_fields_key'] == 'drakkar'
+    assert ECS_FIXTURE['default_namespace'] == DEFAULT_ECS_NAMESPACE
+    assert ECS_FIXTURE['ecs_reserved_names'] == sorted(ECS_RESERVED_NAMES)
+
+
+@pytest.mark.parametrize('name', ECS_FIXTURE['ecs_reserved_names'])
+def test_ecs_namespace_refuses_every_reserved_name(name):
+    with pytest.raises(ValidationError, match='is an ECS field name'):
+        LoggingConfig(ecs_namespace=name)
+
+
+def test_setup_logging_ecs_uses_the_configured_namespace_and_root_copy():
+    buf = io.StringIO()
+    structlog.contextvars.clear_contextvars()
+    setup_logging(LoggingConfig(format='ecs', ecs_namespace='acme', ecs_request_id_at_root=True))
+    structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=buf), cache_logger_on_first_use=False)
+    try:
+        structlog.get_logger().info('x', request_id='r-1', partition=2)
+        data = json.loads(buf.getvalue().strip())
+    finally:
+        structlog.configure(
+            logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+            cache_logger_on_first_use=True,
+        )
+    assert data['request_id'] == 'r-1'
+    assert data['acme'] == {'partition': 2, 'request_id': 'r-1'}
+    assert 'drakkar' not in data
 
 
 def _capture_ecs_line(worker_id: str, emit) -> dict:
@@ -299,13 +325,13 @@ def test_setup_logging_ecs_maps_an_exception_to_error_fields():
     ],
 )
 def test_ecs_renderer_accepts_exception_forms(exc_info, expected_type):
-    line = json.loads(ecs_renderer(None, 'error', {'event': 'x', 'level': 'error', 'exc_info': exc_info}))
+    line = json.loads(EcsRenderer()(None, 'error', {'event': 'x', 'level': 'error', 'exc_info': exc_info}))
     assert line['error']['type'] == expected_type
 
 
 @pytest.mark.parametrize('exc_info', [True, False, None, (None, None, None)])
 def test_ecs_renderer_without_an_exception_has_no_error(exc_info):
-    line = json.loads(ecs_renderer(None, 'info', {'event': 'x', 'level': 'info', 'exc_info': exc_info}))
+    line = json.loads(EcsRenderer()(None, 'info', {'event': 'x', 'level': 'info', 'exc_info': exc_info}))
     assert 'error' not in line
     assert 'drakkar' not in line
 

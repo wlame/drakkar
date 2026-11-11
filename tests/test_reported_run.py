@@ -14,6 +14,7 @@ from drakkar.metrics import handler_hook_errors
 from drakkar.models import ConfigurationError, ExecutorError, ExecutorResult, ExecutorTask, SourceMessage
 from drakkar.partition import PartitionProcessor
 from drakkar.providers.resilience import RateLimitedLog
+from drakkar.request_ids import RequestIdResolver
 from drakkar.webapp.runner import WebappRunner
 from tests.conftest import wait_for
 
@@ -231,7 +232,8 @@ async def test_the_webapp_runner_records_the_reported_run_time():
     recorder = MagicMock()
     app = MagicMock()
     app._handler = LastLineHandler()
-    app._message_identity = None
+    # A real resolver: a MagicMock attribute would answer a mock as the request id.
+    app._request_ids = RequestIdResolver(app._handler)
     runner = WebappRunner(app, MagicMock())
 
     for _ in range(2):

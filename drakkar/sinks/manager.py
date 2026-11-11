@@ -41,6 +41,7 @@ from drakkar.models import (
     SourceMessage,
 )
 from drakkar.providers.resilience import RateLimitedLog
+from drakkar.request_ids import joined_request_ids
 from drakkar.sinks.base import BaseSink
 from drakkar.sinks.dlq_record import DLQRecord, cut_error
 from drakkar.utils import redact_url
@@ -153,13 +154,14 @@ class MessageContext:
     makes ``on_failure: dlq`` act as ``skip``.
 
     The HTTP form (``for_request``) holds one message whose value is the raw
-    request body; ``request_id`` marks it, and its record carries no key,
-    no source headers and no topic, partition or offset.
+    request body; ``is_request`` marks it, and its record carries no key,
+    no source headers and no topic, partition or offset. Every message of
+    every form carries its own ``request_id``.
     """
 
     source_messages: Sequence[SourceMessage]
     states: Sequence[MessageDLQState]
-    request_id: str | None = None
+    is_request: bool = False
     is_window: bool = False
 
     def __post_init__(self) -> None:
@@ -180,13 +182,20 @@ class MessageContext:
     @classmethod
     def for_request(cls, *, body: bytes, request_id: str, received_ms: int) -> MessageContext:
         """The context of one HTTP request: its raw body, its id and the time it was received in ms."""
-        message = SourceMessage(topic='', partition=-1, offset=-1, value=body, timestamp=received_ms)
-        return cls(source_messages=[message], states=[MessageDLQState()], request_id=request_id)
+        message = SourceMessage(
+            topic='', partition=-1, offset=-1, value=body, timestamp=received_ms, request_id=request_id
+        )
+        return cls(source_messages=[message], states=[MessageDLQState()], is_request=True)
 
     @property
     def is_on_dlq(self) -> bool:
         """True once a source message of this result is on the DLQ: no delivery of the result starts."""
         return any(state.dlq_written for state in self.states)
+
+    @property
+    def request_id(self) -> str | None:
+        """The request ids of the source messages joined with ',' (one id for one message); None for a window."""
+        return joined_request_ids(message.request_id for message in self.source_messages)
 
     def pairs(self) -> Iterator[tuple[SourceMessage, MessageDLQState]]:
         """Each source message with its DLQ state."""
@@ -740,6 +749,7 @@ class SinkManager:
                 reason=reason.value,
                 partition=partition_id,
                 request_id=message_context.request_id if message_context is not None else None,
+                is_request=message_context is not None and message_context.is_request,
             )
 
     async def _deliver_with_transient_retry(
@@ -1196,7 +1206,7 @@ class SinkManager:
             partition_id=partition_id,
             build=lambda message, state: _message_record(
                 message,
-                request_id=message_context.request_id,
+                is_request=message_context.is_request,
                 stage='sink',
                 error=error_text,
                 attempts=attempts,
@@ -1266,7 +1276,7 @@ class SinkManager:
             partition_id=partition_id,
             build=lambda message, state: _message_record(
                 message,
-                request_id=message_context.request_id,
+                is_request=message_context.is_request,
                 stage='execute',
                 error=error_text,
                 attempts=attempts,
@@ -1351,6 +1361,7 @@ class SinkManager:
                 partition=record.source_partition,
                 offset=record.source_offset,
                 request_id=record.request_id,
+                is_request=record.source_partition is None,
                 stage=record.stage,
                 sink=record.sink,
                 error=error,
@@ -1417,7 +1428,7 @@ def execute_error_text(error: ExecutorError) -> str:
 def _message_record(
     message: SourceMessage,
     *,
-    request_id: str | None,
+    is_request: bool,
     stage: Literal['execute', 'sink'],
     error: str,
     attempts: int,
@@ -1425,8 +1436,7 @@ def _message_record(
     sink: str | None = None,
     task_id: str | None = None,
 ) -> DLQRecord:
-    """The record of one source message; an HTTP request (``request_id`` set) has no key or source."""
-    is_request = request_id is not None
+    """The record of one source message; an HTTP request (``is_request``) has no key or source."""
     return DLQRecord(
         key=None if is_request else message.key,
         value=message.value,
@@ -1441,5 +1451,5 @@ def _message_record(
         source_partition=None if is_request else message.partition,
         source_offset=None if is_request else message.offset,
         source_timestamp_ms=message.timestamp,
-        request_id=request_id,
+        request_id=message.request_id,
     )

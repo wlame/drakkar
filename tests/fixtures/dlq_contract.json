@@ -47,7 +47,7 @@
         "source_partition": 3,
         "source_offset": 1042,
         "source_timestamp_ms": 1793000000123,
-        "request_id": null,
+        "request_id": "req_20261105T101500_3f9a1c2e_0001",
         "worker": "worker-a",
         "instance": "0123456789abcdef",
         "failed_at": "2026-11-05T10:15:30.123456Z"
@@ -90,6 +90,10 @@
           "1793000000123"
         ],
         [
+          "dk-request-id",
+          "req_20261105T101500_3f9a1c2e_0001"
+        ],
+        [
           "dk-worker",
           "worker-a"
         ],
@@ -122,7 +126,7 @@
         "source_partition": 0,
         "source_offset": 0,
         "source_timestamp_ms": 1793000000456,
-        "request_id": null,
+        "request_id": "req_20261105T101510_3f9a1c2e_0002",
         "worker": "worker-a",
         "instance": "0123456789abcdef",
         "failed_at": "2026-11-05T10:15:30.123456Z"
@@ -169,6 +173,10 @@
           "1793000000456"
         ],
         [
+          "dk-request-id",
+          "req_20261105T101510_3f9a1c2e_0002"
+        ],
+        [
           "dk-worker",
           "worker-a"
         ],
@@ -207,7 +215,7 @@
         "source_partition": 1,
         "source_offset": 77,
         "source_timestamp_ms": 1793000000789,
-        "request_id": null,
+        "request_id": "req_20261105T101520_3f9a1c2e_0003",
         "worker": "worker-a",
         "instance": "0123456789abcdef",
         "failed_at": "2026-11-05T10:15:30.123456Z"
@@ -256,6 +264,10 @@
         [
           "dk-source-timestamp",
           "1793000000789"
+        ],
+        [
+          "dk-request-id",
+          "req_20261105T101520_3f9a1c2e_0003"
         ],
         [
           "dk-worker",

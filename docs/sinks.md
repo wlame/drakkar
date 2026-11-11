@@ -734,7 +734,7 @@ replayed message that fails again gets fresh facts, never two sets). Then the
 | `dk-source-partition` | The source partition, in decimal |
 | `dk-source-offset` | The source offset, in decimal |
 | `dk-source-timestamp` | The source message's Kafka timestamp in milliseconds |
-| `dk-request-id` | The request id; HTTP source only |
+| `dk-request-id` | The request id of the message or HTTP request (see [request_id()](handler.md#request_id)) |
 | `dk-worker` | The worker name |
 | `dk-instance` | The worker instance id |
 | `dk-failed-at` | The time of the write, RFC 3339 UTC with six fraction digits (`2026-11-05T10:15:30.123456Z`) |
@@ -768,6 +768,7 @@ headers:
   dk-source-partition  1
   dk-source-offset     77
   dk-source-timestamp  1793000000789
+  dk-request-id        req_20261105T101530_3f9a1c2e_0042
   dk-worker            worker-a
   dk-instance          0123456789abcdef
   dk-failed-at         2026-11-05T10:15:30.123456Z

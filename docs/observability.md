@@ -676,63 +676,53 @@ With `logging.format: ecs`, every line is one JSON object in the Elastic Common 
 | `service.version` | The framework version | `service_version` |
 | `service.node.name` | The worker name | `worker_id` |
 | `error.type`, `error.message`, `error.stack_trace` | The exception of a line logged with `exc_info` (for example `logger.exception(...)`) | `exception` |
-| `drakkar.*` | Every other field of the line, keys sorted | the same key at the top level |
+| `<ecs_namespace>.*` | Every other field of the line, keys sorted; `drakkar.*` by default | the same key at the top level |
+| `request_id` | The request id, at the root, only with `logging.ecs_request_id_at_root: true` (it is in the namespace object either way) | `request_id` |
 
-Every field that is not an ECS field goes under `drakkar`: `drakkar.category`, `drakkar.consumer_group`, `drakkar.partition`, `drakkar.error`. Many framework fields have names that ECS uses for objects (`error`, `source`, `url`, `host`, `file`). Elasticsearch refuses a document where such a field is a text, so they cannot stay at the top level. Query them as `drakkar.partition: 7` or `drakkar.error: *refused*`.
+Every field that is not an ECS field goes under one namespace object, `drakkar` by default: `drakkar.category`, `drakkar.consumer_group`, `drakkar.partition`, `drakkar.error`. Set `logging.ecs_namespace` to your product name to have `acme_search.partition` instead; the name must be a lower-case identifier and cannot be an ECS field name such as `host` or `event`. Many framework fields have names that ECS uses for objects (`error`, `source`, `url`, `host`, `file`). Elasticsearch refuses a document where such a field is a text, so they cannot stay at the top level. Query them as `drakkar.partition: 7` or `drakkar.error: *refused*`.
 
 The `drakkar.error` text is the short error text that a log event carries. The ECS `error.*` fields are set only when the line was logged with an exception.
 
-### Message Identity
+### Request ID
 
-`logging.message_identity` writes one value that identifies the incoming
-message into every log line written while that message is processed. In
-Elasticsearch or any log store, one filter then finds every line of one
-message: its arrange call, its tasks, its hooks, its sink deliveries and its
-DLQ record.
+Every Kafka message and every HTTP request has a `request_id`, and every log
+line written while it is processed carries it. In Elasticsearch or any log
+store, one filter finds every line of one message: its arrange call, its
+tasks, its hooks, its sink deliveries and its DLQ record.
 
-```yaml
-logging:
-  message_identity:
-    enabled: true
-    name: order_id              # the log field and the task label
-    source: value:order.id      # key | header:<name> | value:<dotted.path>
-```
-
-| `source` | The value is |
-|----------|--------------|
-| `key` | The message key as UTF-8 text. An HTTP request has no key. |
-| `header:<name>` | The first header of that name, letter case ignored, as UTF-8 text. For an HTTP request, the request header. |
-| `value:<path>` | A field of the JSON value. Each dot-separated segment is an object key, or a number that picks a list item (`value:items.0.id`). A string is used as it is, a number as the text the message wrote (`1.0` stays `1.0`), `true` and `false` as text. For an HTTP request, the raw body as the client sent it. |
-
-A message with no value there (no key, no such header or field, a value that
-is not UTF-8 or not JSON, `null`, an object or a list) has no identity. A
-value is cut to 256 characters. The handler hook
-[`message_identity()`](handler.md#message_identity) can compute the value in
-code instead.
+By default the id is generated, for example
+`req_20261111T093000_3f9a1c2e_0042` (UTC time, 8 random hex characters per
+process, a counter), and unique across workers. The handler hook
+[`request_id(msg)`](handler.md#request_id) can return an id the message
+already carries, such as an order id or an `X-Request-ID` header. The same
+id is in `task.request_id`, the task label `request_id` (so the Trace page's
+search by label finds the message), the recorder rows, the `dk-request-id`
+header of the DLQ record and the HTTP response.
 
 Which lines carry which value:
 
 | Lines | The field holds |
 |-------|-----------------|
-| A parse failure (and its DLQ write), `on_message_complete` and its delivery | That message's value |
-| A task: its run, `on_task_complete`, `on_error`, the delivery of its results and their DLQ writes | The values of the task's source messages |
-| `arrange()` and `on_window_complete` with its delivery | The values of every message of the window |
-| An HTTP request, from start to response | The request's value |
+| A parse failure (and its DLQ write), `on_message_complete` and its delivery | That message's id |
+| A task: its run, `on_task_complete`, `on_error`, the delivery of its results and their DLQ writes | The ids of the task's source messages |
+| `arrange()` and `on_window_complete` with its delivery | The ids of every message of the window |
+| An HTTP request, from start to response | The request's id |
 
-One value is written as a text, several as a list (each value once, at most
-`max_values`). Elasticsearch matches a list when any of its values equals the
-query, so `order_id: "o-17"` finds the window and task lines too.
+A log call that passes its own `request_id=` keeps its own value on that
+line. If your handler already logs an id of its own under that name (for
+example a `request_id` field of the payload), return the same id from the
+`request_id()` hook, so every line of the message names one id.
 
-Each task also gets the value as a [task label](handler.md#task-labels)
-(several values joined with `,`), so the Trace page's search by label and the
-recorder find the message with no handler code. A label that the handler set
-itself is kept.
+One id is written as a text, several as a list (each id once, at most 100).
+Elasticsearch matches a list when any of its values equals the query, so
+`request_id: "order-17"` also finds the window and task lines. A task built
+from several messages has their ids joined with `,` in `task.request_id`
+and in its label.
 
-The name must be a lower-case identifier of at most 64 characters, and it
-cannot be a field that the framework writes itself (`partition`, `offset`,
-`task_id`, `request_id`, `worker_id`, `event` and the others listed in the
-load message). In the `ecs` format the field is under `drakkar`, for example
-`drakkar.order_id`.
+In the `json` format the field is `request_id` at the top level. In the
+`ecs` format it is under the namespace object (`drakkar.request_id` by
+default); `logging.ecs_request_id_at_root: true` also writes it at the root,
+so the short query `request_id: "order-17"` works there too.
 
 ### Per-Context Binding
 

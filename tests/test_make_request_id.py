@@ -9,7 +9,7 @@ from drakkar.utils import make_request_id, validate_request_id
 # Format shape: <prefix>_<YYYYMMDDTHHMMSS>_<4+digit counter>
 # The counter is monotone module-level, so it grows beyond 4 digits over time;
 # the regex tolerates this with ``\d{4,}``.
-REQUEST_ID_PATTERN = re.compile(r'^[A-Za-z][A-Za-z0-9]*_\d{8}T\d{6}_\d{4,}$')
+REQUEST_ID_PATTERN = re.compile(r'^[A-Za-z][A-Za-z0-9]*_\d{8}T\d{6}_[0-9a-f]{8}_\d{4,}$')
 
 
 def test_make_request_id_format_shape_default_prefix():
@@ -22,7 +22,7 @@ def test_make_request_id_format_shape_default_prefix():
 def test_make_request_id_default_prefix_is_req():
     """Calling with no args yields a ``req``-prefixed ID."""
     rid = make_request_id()
-    prefix, _ts, _seq = rid.split('_')
+    prefix, _ts, _token, _seq = rid.split('_')
     assert prefix == 'req'
 
 
@@ -106,3 +106,15 @@ def test_validate_request_id_rejects_whitespace(bad: str):
         validate_request_id(bad)
     assert bad in str(excinfo.value) or repr(bad) in str(excinfo.value)
     assert 'whitespace' in str(excinfo.value)
+
+
+def test_make_request_id_carries_one_random_token_per_process():
+    """The token keeps ids of two workers apart; within one process it does not change."""
+    first, second = make_request_id(), make_request_id()
+    assert first.split('_')[2] == second.split('_')[2]
+    assert re.fullmatch(r'[0-9a-f]{8}', first.split('_')[2])
+
+
+def test_validate_request_id_rejects_an_empty_id():
+    with pytest.raises(ValueError, match='must not be empty'):
+        validate_request_id('')

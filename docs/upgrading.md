@@ -14,6 +14,35 @@ this release. Use the second first when you come from a release older than
   settings for files, archives, worker discovery and cache exchange into
   new sections.
 
+## Upgrading from 3.0.3 to this release {#from-3-0-3}
+
+Every message now has a request id, and one handler hook names it.
+
+1. **`logging.message_identity` is gone.** Delete the block. Each Kafka
+   message now has a `request_id`, which every log line of its processing
+   carries. To keep the value your `source` named, return it from the hook:
+   `source: header:x-request-id` becomes a `request_id(msg)` that reads that
+   header from `msg.headers`, and `source: value:order.id` one that reads
+   `msg.payload`. Log queries change from your `name` (for example
+   `order_id`) to `request_id`.
+2. **`message_identity(msg, configured)` and `http_request_id(req, headers)`
+   become `request_id(msg)`.** It is called for Kafka messages and HTTP
+   requests. For an HTTP request `msg.topic` is `__webapp__`, `msg.headers`
+   holds the request headers, `msg.value` the raw body and `msg.payload` the
+   parsed request. Return a text of at most 64 ASCII characters with no
+   whitespace. An invalid answer or a raise no longer answers 500; it gets a
+   generated id and logs `request_id_hook_failed`.
+3. **Generated ids have a new form**, `req_<UTC time>_<8 hex>_<counter>`.
+   Code that parses an id should not depend on its form.
+4. **Kafka rows and DLQ records now carry the id.** Recorder rows of Kafka
+   tasks and messages have the `request_id` column set, and the DLQ record of
+   a Kafka message has a `dk-request-id` header. A tool that read
+   "`request_id` is set" as "this is an HTTP request" must read `origin`
+   (`http`) instead.
+5. **With `logging.format: ecs`** you can rename the `drakkar` object with
+   `logging.ecs_namespace`, and copy `request_id` to the root with
+   `logging.ecs_request_id_at_root: true`.
+
 ## Upgrading from 2.4.0 to this release {#from-2-4-0}
 
 This release is not backward compatible. A config written for 2.4.0 **fails

@@ -140,7 +140,10 @@ parametrize).
 6. Errors are explicit, never silently swallowed. Structured logging via
    structlog; `logging.format: ecs` renders the Elastic Common Schema
    (`drakkar/logging.py`, pinned byte for byte by `tests/fixtures/log_ecs.json`),
-   with every non-ECS field under `drakkar` so no field clashes with an ECS object.
+   with every non-ECS field under `logging.ecs_namespace` (default `drakkar`) so
+   no field clashes with an ECS object. Every message has a request id
+   (`drakkar/request_ids.py`, handler hook `request_id`); `origin`, never a set
+   `request_id`, marks an HTTP request.
 7. Cluster periodic tasks (`drakkar/cluster_tasks.py`) need `autodiscover`, whose
    one provider serves the registry and the election: the acquire window
    (10 s) and the minimum hold (20 s) are constants, the same on every

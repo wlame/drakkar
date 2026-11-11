@@ -199,15 +199,14 @@ messages never trigger them.
 |------|-------------|-----------|---------|
 | `arrange_http_request(req, pending)` | One HTTP request passed auth, rate-limit, and body parsing; about to enter the executor pool | Once per HTTP request | `list[ExecutorTask]` |
 | `on_http_request_complete(group)` | All tasks from one HTTP request reached a terminal state | Once per HTTP request | `HttpResponseT` (a Pydantic model) |
-| `http_request_id(req, headers)` | After body parsing, before task fan-out | Once per HTTP request | `str` (validated to ASCII, no whitespace, ≤64 chars) |
 | `http_request_label(req, request_id)` | Before structured-log lines and UI rendering | Once per HTTP request | `str` |
 
 Required overrides: `arrange_http_request` and `on_http_request_complete`.
 The defaults raise `NotImplementedError` so a misconfigured deployment
 fails fast at the first request rather than silently misbehaving.
-`http_request_id` and `http_request_label` are optional -- the framework
-generates a fresh id from `make_request_id('req')` and labels the
-request with that id when not overridden.
+`http_request_label` is optional. The request id comes from the handler
+hook [`request_id(msg)`](handler.md#request_id), which serves Kafka messages
+and HTTP requests alike; by default it is a generated id.
 
 ### `arrange_http_request(req, pending) -> list[ExecutorTask]`
 
@@ -217,8 +216,8 @@ Receives the parsed request body (typed as `HttpRequestT`) and an empty
 sibling-message dedup work to do.
 
 The framework auto-stamps every returned task with `origin='http'`,
-`client_name=<matched client>`, and `request_id` (whatever
-`http_request_id` returned). Operators see those columns in the recorder
+`client_name=<matched client>`, and `request_id` (the request id, see
+[`request_id(msg)`](handler.md#request_id)), plus the task label `request_id`. Operators see those columns in the recorder
 and the operator UI -- no need to set them by hand.
 
 `source_offsets` is required on every `ExecutorTask`, and an HTTP request
@@ -284,25 +283,16 @@ When `sources.http.deliver_to_sinks=true`, the framework calls
 through the [SinkManager](sinks.md), and records per-sink outcomes into
 the response under `"sinks"`. See [Request / response examples](#request-response-examples).
 
-### `http_request_id(req, headers) -> str`
+### The request id
 
-Override to promote an upstream tracing header into the framework
-request id. The default returns a fresh framework-generated id from
-`make_request_id('req')`; overrides typically pull `X-Request-ID` or
-`X-Correlation-ID` from the headers so a single id flows from caller →
-worker → downstream services.
-
-```python
-def http_request_id(self, req: RankRequest, headers) -> str:
-    upstream = headers.get('x-request-id')
-    if upstream:
-        return upstream  # validated against the request_id contract before use
-    return dk.make_request_id('req')
-```
-
-The framework calls `validate_request_id(...)` on the return value (≤64
-chars, ASCII, no whitespace). A buggy override that returns a malformed
-id surfaces immediately as a 500 -- it never reaches downstream logs.
+Every request gets an id from the handler hook
+[`request_id(msg)`](handler.md#request_id), the same hook that names Kafka
+messages. For an HTTP request the hook sees the request headers and the
+raw body, so it can promote an upstream tracing header such as
+`X-Request-ID` into the id; the example in the hook's section shows it. A
+hook that raises or answers an invalid id (more than 64 characters,
+non-ASCII or whitespace) does not fail the request: it gets a generated id,
+and the worker logs `request_id_hook_failed`.
 
 ### `http_request_label(req, request_id) -> str`
 
@@ -376,7 +366,7 @@ Successful response body (HTTP 200):
 
 | Field | Meaning |
 |-------|---------|
-| `request_id` | The id resolved by `http_request_id(...)`. Same value stamped onto every executor task and recorder row for the request. |
+| `request_id` | The request id from the handler hook `request_id(msg)`. Same value stamped onto every executor task and recorder row for the request. |
 | `client` | The matched `WebClientConfig.name` from auth. Used as a metric label and recorder column. |
 | `started_at` / `finished_at` | UTC timestamps marking the request's wall-clock entry/exit at the route handler. |
 | `duration_ms` | Server-side wall clock between `started_at` and `finished_at`. Prefer this over external timers when comparing requests across clients. |
@@ -514,7 +504,7 @@ topic for higher throughput and worker-restart resilience.
 | 503 | `shutdown` | The worker is in the drain phase and refusing new requests | `{"status": "shutdown", "error": "webapp is shutting down; request rejected", "request_id": "req-...", "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
 | 503 | `not_ready` | The webapp accepted the connection but the main pipeline has not yet completed startup | `{"status": "not_ready", "error": "webapp is starting; main pipeline is not yet ready", "request_id": "req-...", "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
 | 504 | `timeout` | `request_timeout` elapsed while the runner was processing | `{"status": "timeout", "error": "request exceeded 30.0 seconds", "request_id": "req-...", "duration_ms": 30001.4, "hint": "route this workload through the Kafka source topic for higher throughput and worker-restart resilience"}` |
-| 500 | `error` | A user hook (`arrange_http_request`, `on_http_request_complete`, `http_request_id`, etc.) raised an unhandled exception | `{"status": "error", "request_id": "req-...", "error": "internal error"}` |
+| 500 | `error` | A user hook (`arrange_http_request`, `on_http_request_complete`, etc.) raised an unhandled exception | `{"status": "error", "request_id": "req-...", "error": "internal error"}` |
 
 The 422 response intentionally uses `error: invalid_request` rather than
 a `status` field -- it sits at the body-parse boundary, before the

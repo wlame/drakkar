@@ -100,6 +100,7 @@ class DrakkarHandler(Protocol[InputT, OutputT, HttpRequestT, HttpResponseT]):
     cache: CacheLike
 
     def message_label(self, msg: SourceMessage) -> str: ...
+    def request_id(self, msg: SourceMessage) -> str: ...
     def task_priority(self, task: ExecutorTask) -> Any: ...
     async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig: ...
     async def on_ready(self, config: DrakkarConfig, db_pool: object) -> None: ...
@@ -118,7 +119,6 @@ class DrakkarHandler(Protocol[InputT, OutputT, HttpRequestT, HttpResponseT]):
     # subclass declares concrete types in the HttpRequestT/HttpResponseT slots.
     async def arrange_http_request(self, req: HttpRequestT, pending: PendingContext) -> list[ExecutorTask]: ...
     async def on_http_request_complete(self, group: MessageGroup) -> HttpResponseT: ...
-    def http_request_id(self, req: HttpRequestT, headers: Mapping[str, str]) -> str: ...
     def http_request_label(self, req: HttpRequestT, request_id: str) -> str: ...
 
 
@@ -353,19 +353,29 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         """
         return f'{msg.partition}:{msg.offset}'
 
-    def message_identity(self, msg: SourceMessage, configured: str | None) -> str | None:
-        """Return the identity of a message, written into every log line of its processing.
+    def request_id(self, msg: SourceMessage) -> str:
+        """Return the id of a message or an HTTP request.
 
-        Called once per message (and once per HTTP request) when
-        ``logging.message_identity.enabled`` is true. ``configured`` is the
-        value read from the place that ``logging.message_identity.source``
-        names, or None. Override to compute the value in code, for example
-        from the parsed ``msg.payload``. Return None for no identity. Keep it
-        fast: it runs on the event loop for every message.
+        The framework calls it once per Kafka message, right after the message
+        is parsed (``msg.payload`` is set), and once per HTTP request before
+        the request is processed. For an HTTP request ``msg`` has the topic
+        ``__webapp__``, partition -1, offset 0, no key, the raw request body as
+        ``value``, the request headers as ``headers`` and the parsed request as
+        ``payload``.
 
-        Default: ``configured``.
+        The id is in every log line written while the message is processed,
+        in ``msg.request_id``, in ``task.request_id`` and the task label
+        ``request_id`` of its tasks, in its recorder rows, in the
+        ``dk-request-id`` header of its DLQ record and in the HTTP response.
+        Override to use an id the message already carries (an order id, an
+        ``X-Request-ID`` header). Keep it unique and fast: it runs for every
+        message. The answer must be at most 64 ASCII characters with no
+        whitespace; an answer that is not, or a hook that raises, gets a
+        generated id and logs ``request_id_hook_failed``.
+
+        Default: a generated id, ``req_<UTC time>_<process token>_<counter>``.
         """
-        return configured
+        return make_request_id('req')
 
     def task_priority(self, task: ExecutorTask) -> Any:
         """Return a sortable priority key for ordering tasks waiting on the executor pool.
@@ -822,28 +832,6 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         ``NotImplementedError``.
         """
         raise NotImplementedError('override on_http_request_complete when sources.http.enabled=True')
-
-    def http_request_id(
-        self,
-        req: HttpRequestT,
-        headers: Mapping[str, str],
-    ) -> str:
-        """Return the request_id used in logs, recorder rows, and the response.
-
-        Override to use an upstream-provided correlation header (common
-        examples: ``X-Request-ID``, ``X-Correlation-ID``) so a single
-        request_id flows from caller → worker → downstream services.
-        Whatever you return must satisfy
-        :func:`drakkar.utils.validate_request_id` (≤64 chars, ASCII, no
-        whitespace) — the framework calls ``validate_request_id`` on the
-        return value before using it.
-
-        Default: a fresh framework-generated id from
-        :func:`drakkar.utils.make_request_id` with prefix ``'req'``. The
-        default always passes ``validate_request_id`` (no need for callers
-        to validate the framework-generated id).
-        """
-        return make_request_id('req')
 
     def http_request_label(
         self,

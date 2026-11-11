@@ -41,7 +41,6 @@ from drakkar.fleet.card import WorkerIdentity
 from drakkar.fleet.service import FleetRegistry
 from drakkar.handler import BaseDrakkarHandler, check_task_run_seconds_hook
 from drakkar.logging import DeferredLog, setup_logging
-from drakkar.message_identity_runtime import MessageIdentityResolver
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError, ErrorAction
 from drakkar.partition import PartitionProcessor
 from drakkar.periodic_roster import PeriodicRoster
@@ -49,6 +48,7 @@ from drakkar.probe import build_layout, referenced_bases
 from drakkar.providers.connections import Connections
 from drakkar.recorder import EventRecorder
 from drakkar.recorder.helpers import detect_worker_ip
+from drakkar.request_ids import RequestIdResolver
 from drakkar.schedule import cluster_tasks_hash
 from drakkar.sinks.dlq import DLQSink
 from drakkar.sinks.filesystem import FileSink
@@ -366,8 +366,8 @@ class DrakkarApp:
         self._executor_pool: ExecutorPool | None = None
         # Pending tasks and bytes of every source; built with the pool.
         self._pending_budget: PendingBudget | None = None
-        # The message identity reader; set when the sources are bound, None while the feature is off.
-        self._message_identity: MessageIdentityResolver | None = None
+        # Gives every Kafka message and HTTP request its request id (handler hook ``request_id``).
+        self._request_ids = RequestIdResolver(handler)
         self._sink_manager: SinkManager = SinkManager()
         # Each sink's policy, resolved once, here. The sinks are built later
         # (``_build_sinks``, after ``on_startup``); a change of a policy key in

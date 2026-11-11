@@ -38,6 +38,7 @@ from pydantic import BaseModel
 from drakkar.config import WebAppConfig, WebClientConfig
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.models import ExecutorResult, ExecutorTask, make_task_id
+from drakkar.request_ids import RequestIdResolver
 from drakkar.webapp import WebApp
 from drakkar.webapp.models import WebRequestContext
 
@@ -102,9 +103,9 @@ def _make_stub_app(
     app = MagicMock()
     # No pending budget: the runner counts nothing.
     app._pending_budget = None
-    # Message identity off: a MagicMock attribute would act as a resolver.
-    app._message_identity = None
     app._handler = handler
+    # A real resolver: a MagicMock attribute would answer a mock as the request id.
+    app._request_ids = RequestIdResolver(app._handler)
     app._executor_pool = pool
     app._recorder = None
     app.is_ready = is_ready

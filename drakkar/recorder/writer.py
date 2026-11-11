@@ -829,21 +829,23 @@ class EventWriter:
         delivered_sinks: list[str],
         attempts: int | None,
         request_id: str | None = None,
+        is_request: bool = False,
     ) -> None:
         """One source message written to the DLQ.
 
-        An HTTP request (``request_id`` set) gets the HTTP row markers:
-        ``origin='http'``, the ``request_id`` column and the synthetic
-        partition -1, so a walk of one request's rows finds it.
+        Every row carries the message's ``request_id``. An HTTP request
+        (``is_request``) also gets the HTTP row markers: ``origin='http'`` and
+        the synthetic partition -1, so a walk of one request's rows finds it.
         """
         event: dict[str, Any] = {
             'ts': time.time(),
             'event': EventType.MESSAGE_DLQ,
             'partition': partition,
             'offset': offset,
+            'request_id': request_id,
         }
-        if request_id is not None:
-            event.update({'partition': -1, 'origin': 'http', 'request_id': request_id})
+        if is_request:
+            event.update({'partition': -1, 'origin': 'http'})
         self._record(
             {
                 **event,
@@ -866,20 +868,22 @@ class EventWriter:
         reason: str,
         partition: int | None,
         request_id: str | None = None,
+        is_request: bool = False,
     ) -> None:
         """A result's delivery to ``sink`` (``<type>/<name>``) that did not start, and why.
 
-        An HTTP request (``request_id`` set) gets the same row markers as its
-        ``message_dlq`` row: ``origin='http'``, the ``request_id`` column and
-        the synthetic partition -1.
+        Every row carries the result's request ids (joined with ','). An HTTP
+        request (``is_request``) also gets the same row markers as its
+        ``message_dlq`` row: ``origin='http'`` and the synthetic partition -1.
         """
         event: dict[str, Any] = {
             'ts': time.time(),
             'event': EventType.SINK_NOT_STARTED,
             'partition': partition,
+            'request_id': request_id,
         }
-        if request_id is not None:
-            event.update({'partition': -1, 'origin': 'http', 'request_id': request_id})
+        if is_request:
+            event.update({'partition': -1, 'origin': 'http'})
         self._record({**event, 'metadata': encode_json_str({'sink': sink, 'reason': reason})})
 
     def record_committed(self, partition: int, offset: int) -> None:

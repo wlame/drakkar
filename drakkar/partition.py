@@ -4,7 +4,6 @@ import asyncio
 import math
 import time
 from collections.abc import Awaitable, Callable, Iterable
-from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -16,7 +15,6 @@ from drakkar.budget import TASKS_LIMIT, BudgetAccount, MessageShape, PendingBudg
 from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler, overridden_completion_hooks, task_run_seconds_hook
 from drakkar.hookctx import bind_hook_context, clear_hook_context
-from drakkar.message_identity_runtime import MessageIdentityResolver, reset_identity
 from drakkar.metrics import (
     batch_duration,
     delivery_stalled_offsets,
@@ -53,6 +51,7 @@ from drakkar.models import (
 from drakkar.offsets import OffsetTracker
 from drakkar.recorder import EventRecorder
 from drakkar.reported_run import reported_run_seconds
+from drakkar.request_ids import RequestIdResolver, reset_request_id
 from drakkar.sinks.dlq_record import DLQRecord
 from drakkar.sinks.manager import CollectCallback, MessageContext, MessageDLQState
 
@@ -197,9 +196,6 @@ class Window:
     # Bytes of the stdout and stderr in ``results``, charged to the pending
     # budget until on_window_complete has run.
     kept_bytes: int = 0
-    # The identities of ``source_messages`` (logging.message_identity), kept
-    # here because the message trackers can be gone by on_window_complete.
-    identities: list[str | None] = field(default_factory=list)
 
     @property
     def is_complete(self) -> bool:
@@ -236,8 +232,6 @@ class MessageTracker:
     """
 
     source_message: SourceMessage
-    # The message's identity (logging.message_identity); None when off or absent.
-    identity: str | None = None
     tasks: list[ExecutorTask] = field(default_factory=list)
     results: list[ExecutorResult] = field(default_factory=list)
     errors: list[ExecutorError] = field(default_factory=list)
@@ -295,12 +289,12 @@ class PartitionProcessor:
         execute_dlq: ExecuteDLQCallback | None = None,
         executor_on_failure: str = 'skip',
         budget: PendingBudget | None = None,
-        message_identity: MessageIdentityResolver | None = None,
+        request_ids: RequestIdResolver | None = None,
     ) -> None:
         self._partition_id = partition_id
-        # Reads each message's identity and binds it into the log context of
-        # every scope; None while logging.message_identity is off.
-        self._identity = message_identity
+        # Gives each message its request id and binds ids into the log
+        # context of every scope.
+        self._request_ids = request_ids if request_ids is not None else RequestIdResolver(handler)
         self._handler = handler
         self._executor_pool = executor_pool
         self._window_size = window_size
@@ -1060,17 +1054,15 @@ class PartitionProcessor:
         # Policy ('skip' keeps the message in the window with payload=None):
         arrange_started_at = time.monotonic()
         accepted: list[SourceMessage] = []
-        identities: dict[int, str | None] = {}
         for msg in messages:
             self._offset_tracker.register(msg.offset)
             self._handler.deserialize_message(msg)
             # After the parse, so the handler hook can read msg.payload.
-            identity = self._identity.of_message(msg) if self._identity is not None else None
+            self._request_ids.assign(msg)
             if msg.parse_error is not None and self._on_parse_error != 'skip':
-                with self._identity_scope([identity]):
+                with self._request_ids.scope([msg.request_id]):
                     await self._handle_parse_failure(msg)
                 continue
-            identities[msg.offset] = identity
             accepted.append(msg)
         messages = accepted
         if not messages:
@@ -1081,7 +1073,6 @@ class PartitionProcessor:
             window_id=self._window_counter,
             source_messages=messages,
             start_time=time.monotonic(),
-            identities=[identities.get(msg.offset) for msg in messages],
         )
 
         # Create a per-message tracker BEFORE arrange() so any outcome
@@ -1091,7 +1082,6 @@ class PartitionProcessor:
             self._message_trackers[msg.offset] = MessageTracker(
                 source_message=msg,
                 started_at=arrange_started_at,
-                identity=identities.get(msg.offset),
             )
 
         pending_ctx = PendingContext(
@@ -1106,7 +1096,7 @@ class PartitionProcessor:
             window_id=self._window_counter,
             offsets=offsets,
         )
-        identity_tokens = self._identity.bind(window.identities) if self._identity is not None else None
+        request_id_tokens = self._request_ids.bind(msg.request_id for msg in messages)
         hook_token = bind_hook_context(
             hook='arrange',
             partition=self._partition_id,
@@ -1123,8 +1113,7 @@ class PartitionProcessor:
             arrange_labels = self._arrange_labels
             self._arrange_labels = []
             unbind_contextvars('hook', 'window_id', 'offsets')
-            if identity_tokens is not None:
-                reset_identity(identity_tokens)
+            reset_request_id(request_id_tokens)
             clear_hook_context(hook_token)
         arrange_duration = time.monotonic() - self._arrange_start
         handler_duration.labels(hook='arrange').observe(arrange_duration)
@@ -1137,8 +1126,7 @@ class PartitionProcessor:
                 message_labels=arrange_labels,
                 window_id=window.window_id,
             )
-        if self._identity is not None:
-            self._label_tasks_with_identity(tasks, identities)
+        self._stamp_request_ids(tasks)
         window.task_ids = [task.task_id for task in tasks]
         window.total_tasks = len(tasks)
 
@@ -1401,6 +1389,7 @@ class PartitionProcessor:
             source_topic=msg.topic,
             source_partition=msg.partition,
             source_offset=msg.offset,
+            request_id=msg.request_id,
             source_timestamp_ms=msg.timestamp,
         )
         sent = False
@@ -1441,9 +1430,8 @@ class PartitionProcessor:
         """
         # Bind partition context for this async task — inherited by all user hooks called within
         bind_contextvars(partition=self._partition_id, window_id=window.window_id)
-        if self._identity is not None:
-            # This coroutine's own context: no reset needed when it ends.
-            self._identity.bind(self._identities_of(task.source_offsets))
+        # This coroutine's own context: no reset needed when it ends.
+        self._request_ids.bind(self._request_ids_of(task.source_offsets))
         log = logger.bind(
             category='executor',
             partition=self._partition_id,
@@ -1769,7 +1757,7 @@ class PartitionProcessor:
         window.completed_count += 1
 
         if window.is_complete:
-            with self._identity_scope(window.identities):
+            with self._request_ids.scope(msg.request_id for msg in window.source_messages):
                 duration = time.monotonic() - window.start_time
                 batch_duration.observe(duration)
 
@@ -1859,31 +1847,19 @@ class PartitionProcessor:
                 await self._note_commit_due()
 
     async def _finalize_message_tracker(self, tracker: MessageTracker) -> None:
-        """Finish a message (see :meth:`_finish_message`) with its identity in the log context."""
-        with self._identity_scope([tracker.identity]):
+        """Finish a message (see :meth:`_finish_message`) with its request id in the log context."""
+        with self._request_ids.scope([tracker.source_message.request_id]):
             await self._finish_message(tracker)
 
-    def _identity_scope(self, values: list[str | None]) -> AbstractContextManager[None]:
-        """Bind the message identity of ``values`` for a ``with`` block; nothing while the feature is off."""
-        if self._identity is None:
-            return nullcontext()
-        return self._identity.scope(values)
-
-    def _identities_of(self, offsets: list[int]) -> list[str | None]:
-        """The identities of the tracked messages at ``offsets``."""
+    def _request_ids_of(self, offsets: list[int]) -> list[str | None]:
+        """The request ids of the tracked messages at ``offsets``."""
         trackers = self._message_trackers
-        return [trackers[offset].identity if offset in trackers else None for offset in offsets]
+        return [trackers[offset].source_message.request_id if offset in trackers else None for offset in offsets]
 
-    def _label_tasks_with_identity(self, tasks: list[ExecutorTask], identities: dict[int, str | None]) -> None:
-        """Give each task its messages' identity as a label; a label the handler set wins."""
-        assert self._identity is not None
-        name = self._identity.name
+    def _stamp_request_ids(self, tasks: list[ExecutorTask]) -> None:
+        """Give each task the request ids of its source messages; a value the handler set is kept."""
         for task in tasks:
-            if name in task.labels:
-                continue
-            label = self._identity.label(identities.get(offset) for offset in task.source_offsets)
-            if label is not None:
-                task.labels[name] = label
+            RequestIdResolver.stamp_task(task, self._request_ids_of(task.source_offsets))
 
     async def _finish_message(self, tracker: MessageTracker) -> None:
         """Fire ``on_message_complete`` for a fully-terminal message and

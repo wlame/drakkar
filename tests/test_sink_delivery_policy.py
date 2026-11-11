@@ -888,6 +888,7 @@ def test_recorder_events_message_dlq_and_sink_not_started():
         delivered_sinks=[],
         attempts=1,
         request_id='req-7',
+        is_request=True,
     )
     recorder.record_sink_not_started(sink='redis/cache', reason='message_dlq', partition=3)
     recorder.record_sink_error(sink_type='kafka', sink_name='out', error='boom', attempt=3, action='dlq')
@@ -921,7 +922,9 @@ def test_recorder_events_message_dlq_and_sink_not_started():
 def test_sink_not_started_row_of_an_http_request_carries_the_http_markers():
     recorder = CollectingRecorder()
 
-    recorder.record_sink_not_started(sink='redis/cache', reason='message_dlq', partition=-1, request_id='req-7')
+    recorder.record_sink_not_started(
+        sink='redis/cache', reason='message_dlq', partition=-1, request_id='req-7', is_request=True
+    )
 
     [row] = recorder.rows
     assert (row['event'], row['partition'], row['origin'], row['request_id']) == (
@@ -987,3 +990,23 @@ async def test_a_parse_record_not_written_logs_no_message_dlq(dlq):
     assert sent is False
     assert [line for line in logs if line['event'] == 'message_dlq'] == []
     assert recorder.of('message_dlq') == []
+
+
+def test_a_kafka_row_carries_its_request_id_without_the_http_markers():
+    """A request id alone marks no row as HTTP: Kafka messages have one too."""
+    recorder = CollectingRecorder()
+    recorder.record_message_dlq(
+        partition=3,
+        offset=17,
+        stage='sink',
+        sink='kafka/out',
+        error='boom',
+        delivered_sinks=[],
+        attempts=1,
+        request_id='req-k',
+    )
+    recorder.record_sink_not_started(sink='redis/cache', reason='message_dlq', partition=3, request_id='req-k')
+    assert [(row['partition'], row.get('origin'), row['request_id']) for row in recorder.rows] == [
+        (3, None, 'req-k'),
+        (3, None, 'req-k'),
+    ]

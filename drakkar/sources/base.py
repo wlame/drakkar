@@ -20,8 +20,8 @@ if TYPE_CHECKING:
     from drakkar.config import DrakkarConfig
     from drakkar.executor import ExecutorPool
     from drakkar.handler import BaseDrakkarHandler
-    from drakkar.message_identity_runtime import MessageIdentityResolver
     from drakkar.recorder import EventRecorder
+    from drakkar.request_ids import RequestIdResolver
     from drakkar.sinks.dlq import DLQSink
     from drakkar.sinks.manager import CollectCallback, SinkManager
 
@@ -43,8 +43,8 @@ class SourceContext:
     is_worker_ready: Callable[[], bool]
     # The worker's budget of pending tasks and bytes; None leaves windows unbounded by it.
     pending_budget: PendingBudget | None = None
-    # Reads each message's identity for the log context; None while logging.message_identity is off.
-    message_identity: MessageIdentityResolver | None = None
+    # Gives each message its request id; None builds one from the handler.
+    request_ids: RequestIdResolver | None = None
 
 
 class Source(Protocol):

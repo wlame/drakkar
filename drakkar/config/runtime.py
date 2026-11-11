@@ -10,7 +10,7 @@ from pydantic import Field, field_validator, model_validator
 
 from drakkar.config.base import ConfigModel
 from drakkar.config.units import ByteSize, Duration, WholeSeconds
-from drakkar.message_identity import IdentitySource, name_error, parse_source
+from drakkar.ecs import ecs_namespace_error
 
 EXECUTOR_ON_FAILURE_CHOICES = ('skip', 'dlq')
 
@@ -377,59 +377,6 @@ class ThreadsConfig(ConfigModel):
         return value
 
 
-class MessageIdentityConfig(ConfigModel):
-    """The identity of an incoming message, written into every log line of its processing."""
-
-    enabled: bool = Field(
-        default=False,
-        description=(
-            'Write the identity of the message into every log line written while it is processed, '
-            'and add it to each task as a label.'
-        ),
-    )
-    name: str = Field(
-        default='message_id',
-        description=(
-            'The log field and task label name, a lower-case identifier. A line that covers several '
-            'messages (an arrange window, a task of several messages) carries the list of their values.'
-        ),
-    )
-    source: str = Field(
-        default='key',
-        description=(
-            "Where the value is read: 'key' (the message key as text), 'header:<name>' (the first "
-            "header of that name, letter case ignored) or 'value:<path>' (a field of the JSON value, "
-            "for example 'value:request.id'; a list item is a number, 'value:items.0.id'). An HTTP "
-            'request reads its headers and its raw body, and has no key. The handler hook '
-            'message_identity() can change the value.'
-        ),
-    )
-    max_values: int = Field(
-        default=100,
-        ge=1,
-        le=10000,
-        description='The most values a line that covers several messages carries.',
-    )
-
-    @field_validator('name')
-    @classmethod
-    def _check_name(cls, value: str) -> str:
-        error = name_error(value)
-        if error is not None:
-            raise ValueError(error)
-        return value
-
-    @field_validator('source')
-    @classmethod
-    def _check_source(cls, value: str) -> str:
-        parse_source(value)
-        return value
-
-    def identity_source(self) -> IdentitySource:
-        """The parsed ``source``."""
-        return parse_source(self.source)
-
-
 class LoggingConfig(ConfigModel):
     """Structured logging settings."""
 
@@ -460,7 +407,26 @@ class LoggingConfig(ConfigModel):
             'Shortest task duration that emits a slow_task_completed / slow_task_failed log line. 0 logs all tasks.'
         ),
     )
-    message_identity: MessageIdentityConfig = Field(
-        default_factory=MessageIdentityConfig,
-        description='The identity of an incoming message in every log line of its processing.',
+    ecs_namespace: str = Field(
+        default='drakkar',
+        description=(
+            "With format 'ecs': the object that holds every field that is not an ECS field, for "
+            'example your product name. A lower-case identifier of at most 64 characters, and not '
+            'an ECS field set (host, error, event, ...).'
+        ),
     )
+    ecs_request_id_at_root: bool = Field(
+        default=False,
+        description=(
+            "With format 'ecs': also write request_id at the root of each line, next to the copy "
+            'in the ecs_namespace object.'
+        ),
+    )
+
+    @field_validator('ecs_namespace')
+    @classmethod
+    def _check_ecs_namespace(cls, value: str) -> str:
+        error = ecs_namespace_error(value)
+        if error is not None:
+            raise ValueError(error)
+        return value

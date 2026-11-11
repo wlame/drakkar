@@ -17,21 +17,33 @@ from typing import Any, NamedTuple, TextIO
 import structlog
 
 from drakkar.config import LoggingConfig
+from drakkar.ecs import DEFAULT_ECS_NAMESPACE, ECS_VERSION
 
 _log_file_handle: TextIO | None = None
 
-ECS_VERSION = '8.11.0'
-ECS_OWN_FIELDS_KEY = 'drakkar'
-
 # Keys of the event dict that become ECS fields; every other key goes under
-# ``drakkar``. A framework field such as ``error`` (a string) or ``source``
-# would clash with an ECS object of the same name, and Elasticsearch rejects
-# a document whose field type differs from the mapping.
+# the namespace object (``logging.ecs_namespace``). A framework field such as
+# ``error`` (a string) or ``source`` would clash with an ECS object of the same
+# name, and Elasticsearch rejects a document whose field type differs from the
+# mapping.
 _ECS_CONSUMED_KEYS = frozenset(
     {'timestamp', 'level', 'event', 'module', 'service_name', 'service_version', 'worker_id', 'exc_info'},
 )
 
 type ExcInfo = tuple[type[BaseException], BaseException, TracebackType | None]
+
+
+REQUEST_ID_KEY = 'request_id'
+
+
+class EcsSettings(NamedTuple):
+    """The settings of the ``ecs`` format: ``logging.ecs_namespace`` and ``logging.ecs_request_id_at_root``."""
+
+    namespace: str = DEFAULT_ECS_NAMESPACE
+    request_id_at_root: bool = False
+
+
+DEFAULT_ECS_SETTINGS = EcsSettings()
 
 
 class EcsError(NamedTuple):
@@ -57,12 +69,18 @@ def _sorted_value(value: Any) -> Any:
     return value
 
 
-def build_ecs_record(fields: Mapping[str, Any], error: EcsError | None = None) -> dict[str, Any]:
+def build_ecs_record(
+    fields: Mapping[str, Any],
+    error: EcsError | None = None,
+    settings: EcsSettings = DEFAULT_ECS_SETTINGS,
+) -> dict[str, Any]:
     """Map one log event to an ECS document with a fixed key order.
 
     ``fields`` is the event dict as the renderer sees it: ``timestamp``,
     ``level``, ``event``, ``module`` and the identity keys, plus the
-    framework's own fields, which are placed sorted under ``drakkar``.
+    framework's own fields, which are placed sorted under the namespace
+    object. With ``request_id_at_root`` the ``request_id`` field is also
+    written at the root, after the ECS objects and before the namespace.
     """
     record: dict[str, Any] = {
         '@timestamp': fields.get('timestamp', ''),
@@ -83,16 +101,23 @@ def build_ecs_record(fields: Mapping[str, Any], error: EcsError | None = None) -
     if error is not None:
         record['error'] = {'type': error.type, 'message': error.message, 'stack_trace': error.stack_trace}
 
+    if settings.request_id_at_root and fields.get(REQUEST_ID_KEY) is not None:
+        record[REQUEST_ID_KEY] = _sorted_value(fields[REQUEST_ID_KEY])
+
     own = {key: value for key, value in fields.items() if key not in _ECS_CONSUMED_KEYS}
     if own:
-        record[ECS_OWN_FIELDS_KEY] = _sorted_value(own)
+        record[settings.namespace] = _sorted_value(own)
     return record
 
 
-def render_ecs_line(fields: Mapping[str, Any], error: EcsError | None = None) -> str:
+def render_ecs_line(
+    fields: Mapping[str, Any],
+    error: EcsError | None = None,
+    settings: EcsSettings = DEFAULT_ECS_SETTINGS,
+) -> str:
     """Render one log event as one compact ECS JSON line (no newline)."""
     return json.dumps(
-        build_ecs_record(fields, error),
+        build_ecs_record(fields, error, settings),
         ensure_ascii=False,
         separators=(',', ':'),
         default=str,
@@ -185,10 +210,15 @@ def identity_fields(worker_id: str = '', consumer_group: str = '', version: str 
     return fields
 
 
-def ecs_renderer(_logger: object, _method_name: str, event_dict: MutableMapping[str, Any]) -> str:
+class EcsRenderer:
     """structlog processor: render the event dict as one ECS JSON line."""
-    error = _ecs_error_of(event_dict.get('exc_info'))
-    return render_ecs_line(event_dict, error)
+
+    def __init__(self, settings: EcsSettings = DEFAULT_ECS_SETTINGS) -> None:
+        self._settings = settings
+
+    def __call__(self, _logger: object, _method_name: str, event_dict: MutableMapping[str, Any]) -> str:
+        error = _ecs_error_of(event_dict.get('exc_info'))
+        return render_ecs_line(event_dict, error, self._settings)
 
 
 def _resolve_output(
@@ -266,7 +296,9 @@ def setup_logging(
     if config.format == 'json':
         processors.append(structlog.processors.JSONRenderer())
     elif config.format == 'ecs':
-        processors.append(ecs_renderer)
+        processors.append(
+            EcsRenderer(EcsSettings(namespace=config.ecs_namespace, request_id_at_root=config.ecs_request_id_at_root))
+        )
     else:
         processors.append(structlog.dev.ConsoleRenderer())
 

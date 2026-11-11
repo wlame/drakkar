@@ -2363,42 +2363,22 @@
           "group": "logging"
         },
         {
-          "path": "logging.message_identity.enabled",
-          "env": "DK_LOGGING__MESSAGE_IDENTITY__ENABLED",
-          "description": "Write the identity of the message into every log line written while it is processed, and add it to each task as a label.",
-          "full_description": "Write the identity of the message into every log line written while it is processed, and add it to each task as a label.",
+          "path": "logging.ecs_namespace",
+          "env": "DK_LOGGING__ECS_NAMESPACE",
+          "description": "With format 'ecs': the object that holds every field that is not an ECS field, for example your product name.",
+          "full_description": "With format 'ecs': the object that holds every field that is not an ECS field, for example your product name. A lower-case identifier of at most 64 characters, and not an ECS field set (host, error, event, ...).",
+          "type": "string",
+          "default": "drakkar",
+          "secret": false,
+          "group": "logging"
+        },
+        {
+          "path": "logging.ecs_request_id_at_root",
+          "env": "DK_LOGGING__ECS_REQUEST_ID_AT_ROOT",
+          "description": "With format 'ecs': also write request_id at the root of each line, next to the copy in the ecs_namespace object.",
+          "full_description": "With format 'ecs': also write request_id at the root of each line, next to the copy in the ecs_namespace object.",
           "type": "boolean",
           "default": false,
-          "secret": false,
-          "group": "logging"
-        },
-        {
-          "path": "logging.message_identity.name",
-          "env": "DK_LOGGING__MESSAGE_IDENTITY__NAME",
-          "description": "The log field and task label name, a lower-case identifier.",
-          "full_description": "The log field and task label name, a lower-case identifier. A line that covers several messages (an arrange window, a task of several messages) carries the list of their values.",
-          "type": "string",
-          "default": "message_id",
-          "secret": false,
-          "group": "logging"
-        },
-        {
-          "path": "logging.message_identity.source",
-          "env": "DK_LOGGING__MESSAGE_IDENTITY__SOURCE",
-          "description": "Where the value is read: 'key' (the message key as text), 'header:<name>' (the first header of that name, letter case ignored) or 'value:<path>' (a field of the JSON value, for example 'value:request.id'; a list item is a number, 'value:items.0.id').",
-          "full_description": "Where the value is read: 'key' (the message key as text), 'header:<name>' (the first header of that name, letter case ignored) or 'value:<path>' (a field of the JSON value, for example 'value:request.id'; a list item is a number, 'value:items.0.id'). An HTTP request reads its headers and its raw body, and has no key. The handler hook message_identity() can change the value.",
-          "type": "string",
-          "default": "key",
-          "secret": false,
-          "group": "logging"
-        },
-        {
-          "path": "logging.message_identity.max_values",
-          "env": "DK_LOGGING__MESSAGE_IDENTITY__MAX_VALUES",
-          "description": "The most values a line that covers several messages carries.",
-          "full_description": "The most values a line that covers several messages carries.",
-          "type": "integer",
-          "default": 100,
           "secret": false,
           "group": "logging"
         }

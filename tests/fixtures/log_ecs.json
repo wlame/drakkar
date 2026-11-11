@@ -1,10 +1,75 @@
 {
-  "_comment": "One log event per case, and the exact ECS line logging.format ecs writes for it (no trailing newline). fields is the event as the renderer sees it; error is the ECS error of an exception, or null.",
+  "_comment": "One log event per case, and the exact ECS line logging.format ecs writes for it (no trailing newline). fields is the event as the renderer sees it; error is the ECS error of an exception, or null; settings are logging.ecs_namespace and logging.ecs_request_id_at_root. ecs_reserved_names are the names logging.ecs_namespace may not take.",
   "ecs_version": "8.11.0",
-  "own_fields_key": "drakkar",
+  "default_namespace": "drakkar",
+  "ecs_reserved_names": [
+    "agent",
+    "as",
+    "client",
+    "cloud",
+    "code_signature",
+    "container",
+    "data_stream",
+    "destination",
+    "device",
+    "dll",
+    "dns",
+    "ecs",
+    "elf",
+    "email",
+    "entity",
+    "error",
+    "event",
+    "faas",
+    "file",
+    "gen_ai",
+    "geo",
+    "group",
+    "hash",
+    "host",
+    "http",
+    "interface",
+    "labels",
+    "log",
+    "macho",
+    "message",
+    "network",
+    "observer",
+    "orchestrator",
+    "organization",
+    "os",
+    "package",
+    "pe",
+    "process",
+    "registry",
+    "related",
+    "request_id",
+    "risk",
+    "rule",
+    "server",
+    "service",
+    "source",
+    "span",
+    "tags",
+    "threat",
+    "tls",
+    "trace",
+    "transaction",
+    "url",
+    "user",
+    "user_agent",
+    "vlan",
+    "volume",
+    "vulnerability",
+    "x509"
+  ],
   "cases": [
     {
       "name": "minimal",
+      "settings": {
+        "namespace": "drakkar",
+        "request_id_at_root": false
+      },
       "fields": {
         "timestamp": "2026-11-11T09:30:00.123456Z",
         "level": "info",
@@ -16,6 +81,10 @@
     },
     {
       "name": "identity_and_module",
+      "settings": {
+        "namespace": "drakkar",
+        "request_id_at_root": false
+      },
       "fields": {
         "timestamp": "2026-11-11T09:30:00.123456Z",
         "level": "warning",
@@ -33,6 +102,10 @@
     },
     {
       "name": "fields_that_clash_with_ecs_go_under_drakkar",
+      "settings": {
+        "namespace": "drakkar",
+        "request_id_at_root": false
+      },
       "fields": {
         "timestamp": "2026-11-11T09:30:00.123456Z",
         "level": "error",
@@ -52,6 +125,10 @@
     },
     {
       "name": "own_fields_sorted_at_every_depth",
+      "settings": {
+        "namespace": "drakkar",
+        "request_id_at_root": false
+      },
       "fields": {
         "timestamp": "2026-11-11T09:30:00.123456Z",
         "level": "debug",
@@ -77,6 +154,10 @@
     },
     {
       "name": "text_escapes",
+      "settings": {
+        "namespace": "drakkar",
+        "request_id_at_root": false
+      },
       "fields": {
         "timestamp": "2026-11-11T09:30:00.123456Z",
         "level": "info",
@@ -89,6 +170,10 @@
     },
     {
       "name": "exception_fills_error",
+      "settings": {
+        "namespace": "drakkar",
+        "request_id_at_root": false
+      },
       "fields": {
         "timestamp": "2026-11-11T09:30:00.123456Z",
         "level": "error",
@@ -103,6 +188,75 @@
         "stack_trace": "Traceback (most recent call last):\n  File \"h.py\", line 1, in arrange\nValueError: bad input\n"
       },
       "line": "{\"@timestamp\":\"2026-11-11T09:30:00.123456Z\",\"log.level\":\"error\",\"message\":\"hook_failed\",\"ecs.version\":\"8.11.0\",\"service\":{\"name\":\"drakkar\",\"node\":{\"name\":\"w1\"}},\"error\":{\"type\":\"ValueError\",\"message\":\"bad input\",\"stack_trace\":\"Traceback (most recent call last):\\n  File \\\"h.py\\\", line 1, in arrange\\nValueError: bad input\\n\"},\"drakkar\":{\"hook\":\"arrange\"}}"
+    },
+    {
+      "name": "product_namespace",
+      "settings": {
+        "namespace": "acme_search",
+        "request_id_at_root": false
+      },
+      "fields": {
+        "timestamp": "2026-11-11T09:30:00.123456Z",
+        "level": "info",
+        "event": "task_completed",
+        "service_name": "drakkar",
+        "worker_id": "w1",
+        "request_id": "req_20261111T093000_3f9a1c2e_0007",
+        "partition": 3
+      },
+      "error": null,
+      "line": "{\"@timestamp\":\"2026-11-11T09:30:00.123456Z\",\"log.level\":\"info\",\"message\":\"task_completed\",\"ecs.version\":\"8.11.0\",\"service\":{\"name\":\"drakkar\",\"node\":{\"name\":\"w1\"}},\"acme_search\":{\"partition\":3,\"request_id\":\"req_20261111T093000_3f9a1c2e_0007\"}}"
+    },
+    {
+      "name": "request_id_copied_to_the_root",
+      "settings": {
+        "namespace": "drakkar",
+        "request_id_at_root": true
+      },
+      "fields": {
+        "timestamp": "2026-11-11T09:30:00.123456Z",
+        "level": "info",
+        "event": "task_completed",
+        "service_name": "drakkar",
+        "request_id": "order-17",
+        "task_id": "t-1"
+      },
+      "error": null,
+      "line": "{\"@timestamp\":\"2026-11-11T09:30:00.123456Z\",\"log.level\":\"info\",\"message\":\"task_completed\",\"ecs.version\":\"8.11.0\",\"service\":{\"name\":\"drakkar\"},\"request_id\":\"order-17\",\"drakkar\":{\"request_id\":\"order-17\",\"task_id\":\"t-1\"}}"
+    },
+    {
+      "name": "request_id_list_copied_to_the_root",
+      "settings": {
+        "namespace": "acme",
+        "request_id_at_root": true
+      },
+      "fields": {
+        "timestamp": "2026-11-11T09:30:00.123456Z",
+        "level": "info",
+        "event": "arrange",
+        "service_name": "drakkar",
+        "request_id": [
+          "order-17",
+          "order-18"
+        ]
+      },
+      "error": null,
+      "line": "{\"@timestamp\":\"2026-11-11T09:30:00.123456Z\",\"log.level\":\"info\",\"message\":\"arrange\",\"ecs.version\":\"8.11.0\",\"service\":{\"name\":\"drakkar\"},\"request_id\":[\"order-17\",\"order-18\"],\"acme\":{\"request_id\":[\"order-17\",\"order-18\"]}}"
+    },
+    {
+      "name": "root_copy_without_a_request_id",
+      "settings": {
+        "namespace": "drakkar",
+        "request_id_at_root": true
+      },
+      "fields": {
+        "timestamp": "2026-11-11T09:30:00.123456Z",
+        "level": "info",
+        "event": "worker_started",
+        "service_name": "drakkar"
+      },
+      "error": null,
+      "line": "{\"@timestamp\":\"2026-11-11T09:30:00.123456Z\",\"log.level\":\"info\",\"message\":\"worker_started\",\"ecs.version\":\"8.11.0\",\"service\":{\"name\":\"drakkar\"}}"
     }
   ]
 }

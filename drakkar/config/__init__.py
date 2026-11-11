@@ -48,7 +48,6 @@ from drakkar.config.root import (
 from drakkar.config.runtime import (
     ExecutorConfig,
     LoggingConfig,
-    MessageIdentityConfig,
     MetricsConfig,
     RuntimeHealthConfig,
     ThreadsConfig,
@@ -135,7 +134,6 @@ __all__ = [
     'KafkaSinkConfig',
     'KafkaSourceConfig',
     'LoggingConfig',
-    'MessageIdentityConfig',
     'MetricsConfig',
     'MongoConnectionConfig',
     'MongoSinkConfig',

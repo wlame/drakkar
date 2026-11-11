@@ -37,10 +37,9 @@ from pydantic import BaseModel
 from structlog.contextvars import merge_contextvars
 from structlog.testing import capture_logs
 
-from drakkar.config import MessageIdentityConfig, WebAppConfig, WebClientConfig
+from drakkar.config import WebAppConfig, WebClientConfig
 from drakkar.executor import ExecutorTaskError
 from drakkar.handler import BaseDrakkarHandler
-from drakkar.message_identity_runtime import MessageIdentityResolver
 from drakkar.models import (
     CollectResult,
     ExecutorError,
@@ -50,6 +49,7 @@ from drakkar.models import (
     PrecomputedResult,
     make_task_id,
 )
+from drakkar.request_ids import RequestIdResolver
 from drakkar.sinks.manager import SinkManager
 from drakkar.webapp import WebApp
 from drakkar.webapp.models import WebRequestContext
@@ -137,12 +137,12 @@ def _make_stub_app(
     """
     app = MagicMock()
     app._handler = handler
+    # A real resolver: a MagicMock attribute would answer a mock as the request id.
+    app._request_ids = RequestIdResolver(app._handler)
     app._executor_pool = pool
     app._recorder = recorder
     # No pending budget: the runner counts nothing (tests/test_backpressure.py covers the budget).
     app._pending_budget = None
-    # Message identity off: a MagicMock attribute would act as a resolver.
-    app._message_identity = None
     app.is_ready = is_ready
     # ``main_loop`` is read by the server's route handler, not the runner.
     # The runner-only tests await ``run()`` directly so the loop attr is
@@ -312,11 +312,11 @@ async def test_runner_stamps_origin_client_request_id_on_tasks():
     assert task.request_id == 'req_test_0002'
 
 
-async def test_runner_puts_the_request_identity_in_its_log_lines_and_task_labels():
-    """logging.message_identity reads the request's header; every line of the request and each task carry it."""
+async def test_runner_puts_the_request_id_in_its_log_lines_and_task_labels():
+    """Every line of the request and each task carry the request id; a label the handler set is kept."""
     handler = _RecordingHandler()
     task = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1])
-    labelled = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1], labels={'correlation_id': 'mine'})
+    labelled = ExecutorTask(task_id=make_task_id('t'), source_offsets=[1], labels={'request_id': 'mine'})
 
     async def arrange_impl(req, pending):
         structlog.get_logger().info('in_arrange_http_request')
@@ -325,22 +325,18 @@ async def test_runner_puts_the_request_identity_in_its_log_lines_and_task_labels
     handler.arrange_http_request_impl = arrange_impl
     pool = _make_pool_returning([_make_canned_result(task), _make_canned_result(labelled)])
     app = _make_stub_app(handler, pool=pool)
-    app._message_identity = MessageIdentityResolver(
-        MessageIdentityConfig(enabled=True, name='correlation_id', source='header:x-correlation-id'), handler
-    )
     runner = WebappRunner(app, _make_config())
-    ctx = _make_ctx()
-    ctx.headers = {'x-correlation-id': 'corr-7'}
+    ctx = _make_ctx(request_id='req_test_0042')
 
     with capture_logs(processors=[merge_contextvars]) as cap:
         await runner.run(ctx)
         structlog.get_logger().info('after_the_request')
 
-    by_event = {line['event']: line.get('correlation_id') for line in cap}
-    assert by_event['in_arrange_http_request'] == 'corr-7'
+    by_event = {line['event']: line.get('request_id') for line in cap}
+    assert by_event['in_arrange_http_request'] == 'req_test_0042'
     assert by_event['after_the_request'] is None
-    assert task.labels == {'correlation_id': 'corr-7'}
-    assert labelled.labels == {'correlation_id': 'mine'}
+    assert task.labels == {'request_id': 'req_test_0042'}
+    assert labelled.labels == {'request_id': 'mine'}
 
 
 @pytest.mark.asyncio
@@ -851,6 +847,8 @@ def _make_stub_app_with_sinks(
     """Build a stub ``DrakkarApp`` that exposes ``_sink_manager``."""
     app = MagicMock()
     app._handler = handler
+    # A real resolver: a MagicMock attribute would answer a mock as the request id.
+    app._request_ids = RequestIdResolver(app._handler)
     app._executor_pool = pool
     app._recorder = None
     app._sink_manager = sink_manager

@@ -343,19 +343,22 @@ async def test_on_http_request_complete_default_raises_with_helpful_message(
         await handler.on_http_request_complete(group=None)
 
 
-def test_http_request_id_default_produces_valid_id(handler: BaseDrakkarHandler):
-    """Default http_request_id returns an id that round-trips through validate_request_id."""
-    rid = handler.http_request_id(req=None, headers={})
-    # Round-trip: the framework calls validate_request_id on whatever the
-    # user's http_request_id returned. The default must always pass.
+def _any_message() -> SourceMessage:
+    return SourceMessage(topic='t', partition=0, offset=0, value=b'{}', timestamp=0)
+
+
+def test_request_id_default_produces_valid_id(handler: BaseDrakkarHandler):
+    """The default request_id hook returns an id that passes validate_request_id."""
+    rid = handler.request_id(_any_message())
+    # The framework checks every answer of an overridden hook the same way.
     validate_request_id(rid)
     # Format invariant: starts with the 'req' prefix (mirrors the doc).
     assert rid.startswith('req_')
 
 
-def test_http_request_id_default_is_unique_across_calls(handler: BaseDrakkarHandler):
+def test_request_id_default_is_unique_across_calls(handler: BaseDrakkarHandler):
     """The monotone counter inside make_request_id ensures uniqueness."""
-    ids = {handler.http_request_id(req=None, headers={}) for _ in range(50)}
+    ids = {handler.request_id(_any_message()) for _ in range(50)}
     assert len(ids) == 50
 
 

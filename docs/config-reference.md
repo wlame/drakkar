@@ -412,12 +412,10 @@ logging:
                                    # e.g. /var/log/drakkar/{worker_id}.log
   min_task_duration: 500ms         # shortest task that logs slow_task_completed/failed; 0 logs all.
                                    # env: DK_LOGGING__MIN_TASK_DURATION
-  message_identity:                # the identity of the incoming message in every log line of its processing
-    enabled: false                 # env: DK_LOGGING__MESSAGE_IDENTITY__ENABLED
-    name: message_id               # log field and task label name. env: DK_LOGGING__MESSAGE_IDENTITY__NAME
-    source: key                    # key | header:<name> | value:<dotted.path>. env: DK_LOGGING__MESSAGE_IDENTITY__SOURCE
-    max_values: 100                # most values on a line that covers several messages (1 to 10000)
-                                   # env: DK_LOGGING__MESSAGE_IDENTITY__MAX_VALUES
+  ecs_namespace: drakkar           # with format ecs: the object of every non-ECS field, e.g. your product name.
+                                   # env: DK_LOGGING__ECS_NAMESPACE
+  ecs_request_id_at_root: false    # with format ecs: also write request_id at the root of each line.
+                                   # env: DK_LOGGING__ECS_REQUEST_ID_AT_ROOT
 ```
 
 ---
