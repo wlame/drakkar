@@ -1,6 +1,6 @@
 """Drakkar — Kafka subprocess orchestration framework."""
 
-__version__ = '3.0.2'
+__version__ = '3.0.3'
 
 from drakkar.agent.notes import (
     AgentFinding,

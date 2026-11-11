@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.3] - 2026-11-11
+
 ### Added
 
 - `logging.message_identity` writes one value that identifies the incoming message into every log line of its processing: arrange, its tasks, its hooks, its deliveries and its DLQ record. The value comes from the message key, a header or a field of the JSON value (`source`), or from the new handler hook `message_identity(msg, configured)`. A line that covers several messages carries a list. Each task also gets the value as a label, so the search by label finds the message. Off by default.
