@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - In the own archive scope, retention now also deletes the archives of other worker names of the cluster, and their sealed files, once their window is older than `recorder.archive.retention`. Before, the files of a name that stopped for good (an old pod name, or a dead worker's folder that the orphan pass sealed) stayed for ever. A deleted sealed file logs `recorder_sealed_expired`.
 
+- Internal: the task run, window, shutdown and probe layout code is split into smaller functions, and a test keeps the lower layers of the package from importing the upper ones. No behaviour, config, metric or log event changes.
+
 ### Fixed
 
 - A worker that restarts while another worker's orphan pass removes its old folder no longer holds its owner lock on a deleted file. The lock is taken again on the file that is at the path.

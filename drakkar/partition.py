@@ -38,6 +38,7 @@ from drakkar.metrics import (
     window_messages,
 )
 from drakkar.models import (
+    CollectResult,
     ErrorAction,
     ExecutorError,
     ExecutorResult,
@@ -1053,18 +1054,7 @@ class PartitionProcessor:
         # window while their offsets are already watermark-tracked.
         # Policy ('skip' keeps the message in the window with payload=None):
         arrange_started_at = time.monotonic()
-        accepted: list[SourceMessage] = []
-        for msg in messages:
-            self._offset_tracker.register(msg.offset)
-            self._handler.deserialize_message(msg)
-            # After the parse, so the handler hook can read msg.payload.
-            self._request_ids.assign(msg)
-            if msg.parse_error is not None and self._on_parse_error != 'skip':
-                with self._request_ids.scope([msg.request_id]):
-                    await self._handle_parse_failure(msg)
-                continue
-            accepted.append(msg)
-        messages = accepted
+        messages = await self._accept_messages(messages)
         if not messages:
             await self._note_commit_due()
             return
@@ -1084,6 +1074,43 @@ class PartitionProcessor:
                 started_at=arrange_started_at,
             )
 
+        tasks = await self._call_arrange(window, messages)
+        window.task_ids = [task.task_id for task in tasks]
+        window.total_tasks = len(tasks)
+
+        await self._register_tasks(tasks, messages)
+
+        if not tasks:
+            # A window with no tasks measures nothing: its messages leave the
+            # averages. Counted as zeros they would drive the estimate to 0,
+            # and a zero estimate reserves no room.
+            await self._note_commit_due()
+            return
+
+        window_stdin_bytes = await self._fan_out(window, tasks)
+        self._note_window_shape(len(messages), len(tasks), window_stdin_bytes)
+
+    async def _accept_messages(self, messages: list[SourceMessage]) -> list[SourceMessage]:
+        """Register, parse and name each message; return the ones the window keeps.
+
+        A message that fails to parse leaves the window unless the policy is
+        ``skip``, and its offset is already tracked when its failure is handled.
+        """
+        accepted: list[SourceMessage] = []
+        for msg in messages:
+            self._offset_tracker.register(msg.offset)
+            self._handler.deserialize_message(msg)
+            # After the parse, so the handler hook can read msg.payload.
+            self._request_ids.assign(msg)
+            if msg.parse_error is not None and self._on_parse_error != 'skip':
+                with self._request_ids.scope([msg.request_id]):
+                    await self._handle_parse_failure(msg)
+                continue
+            accepted.append(msg)
+        return accepted
+
+    async def _call_arrange(self, window: Window, messages: list[SourceMessage]) -> list[ExecutorTask]:
+        """Call ``arrange`` with its hook context, time it, record it and name the window's tasks."""
         pending_ctx = PendingContext(
             pending_tasks=list(self._pending_tasks.values()),
             pending_task_ids=set(self._pending_tasks.keys()),
@@ -1127,9 +1154,10 @@ class PartitionProcessor:
                 window_id=window.window_id,
             )
         self._stamp_request_ids(tasks)
-        window.task_ids = [task.task_id for task in tasks]
-        window.total_tasks = len(tasks)
+        return tasks
 
+    async def _register_tasks(self, tasks: list[ExecutorTask], messages: list[SourceMessage]) -> None:
+        """Count each task on the trackers of its messages, and finish the messages that got no task."""
         # Register each task with every message tracker it belongs to
         # (by source_offsets). A task with multiple source_offsets
         # participates in multiple groups — its terminal outcome is
@@ -1152,13 +1180,8 @@ class PartitionProcessor:
             if tracker is not None and tracker.remaining == 0:
                 await self._finalize_message_tracker(tracker)
 
-        if not tasks:
-            # A window with no tasks measures nothing: its messages leave the
-            # averages. Counted as zeros they would drive the estimate to 0,
-            # and a zero estimate reserves no room.
-            await self._note_commit_due()
-            return
-
+    async def _fan_out(self, window: Window, tasks: list[ExecutorTask]) -> int:
+        """Charge, hold and start every task of the window; return the bytes of stdin charged."""
         # Fan out in chunks, handing the loop back between them.
         #
         # Without a periodic yield here, asyncio runs every ready handle
@@ -1203,15 +1226,13 @@ class PartitionProcessor:
                 self._pending_tasks[task.task_id] = task
                 self._inflight_count += 1
                 self._hold_task(task, held)
-                t = asyncio.create_task(self._execute_and_track(task, window))
-                self._active_tasks.add(t)
-                t.add_done_callback(self._active_tasks.discard)
+                self._spawn_run(task, window)
             if self._account is not None:
                 self._account.charge_reserved(len(chunk), chunk_stdin_bytes)
             window_stdin_bytes += chunk_stdin_bytes
             if start + FANOUT_CHUNK_TASKS < len(tasks):
                 await asyncio.sleep(0)
-        self._note_window_shape(len(messages), len(tasks), window_stdin_bytes)
+        return window_stdin_bytes
 
     async def _signal_stall(self) -> None:
         """Notify the lifecycle (once) that this partition has stalled.
@@ -1461,99 +1482,9 @@ class PartitionProcessor:
         try:
             result = await self._executor_pool.execute(task, self._recorder, self._partition_id)
             charged_output = self._charge_output(result)
-            executor_tasks.labels(status='completed').inc()
-            executor_duration.observe(result.duration_seconds)
-            if result.spawn_seconds is not None:
-                executor_spawn_duration.observe(result.spawn_seconds)
-            observe_task_labels(task.labels)
-            if self._recorder:
-                self._recorder.record_task_completed(
-                    result,
-                    self._partition_id,
-                    pool_active=self._executor_pool.active_count,
-                    pool_waiting=self._executor_pool.waiting_count,
-                    reported_run_seconds=reported_run_seconds(self._task_run_seconds, result),
-                )
-
-            bind_contextvars(hook='on_task_complete', task_id=task.task_id)
-            hook_token = bind_hook_context(
-                hook='on_task_complete',
-                partition=self._partition_id,
-                window_id=window.window_id,
-                task_id=task.task_id,
-            )
-            collect_start = time.monotonic()
-            try:
-                collect_result = await self._handler.on_task_complete(result)
-            finally:
-                # Both releases belong in the ``finally``: this hook's
-                # exception propagates (the caller synthesizes a failure from
-                # it), so releasing after the ``try`` would leak ``hook`` and
-                # ``task_id`` into every later log line this coroutine emits.
-                unbind_contextvars('hook', 'task_id')
-                clear_hook_context(hook_token)
-            collect_duration = time.monotonic() - collect_start
-            handler_duration.labels(hook='on_task_complete').observe(collect_duration)
-            if self._recorder:
-                self._recorder.record_task_complete(
-                    task_id=task.task_id,
-                    partition=self._partition_id,
-                    duration=collect_duration,
-                    output_message_count=len(collect_result.kafka) if collect_result else 0,
-                )
-            if collect_result and self._on_collect and self._deliveries_suppressed:
-                self._note_suppressed_delivery('on_task_complete')
-            elif collect_result and self._on_collect:
-                try:
-                    await self._on_collect(
-                        collect_result,
-                        self._partition_id,
-                        message_context=self._message_context(task.source_offsets),
-                    )
-                except SinkDeliveryFailedError as e:
-                    # Delivery (including the DLQ fallback) could not be
-                    # confirmed. Mark every affected message tracker so
-                    # _finalize_message_tracker stalls the offset instead
-                    # of committing past undelivered data. The task itself
-                    # succeeded — group/window accounting proceeds normally.
-                    self._mark_offsets_delivery_failed(task.source_offsets)
-                    await log.aerror(
-                        'task_sink_delivery_failed',
-                        error=str(e),
-                        source_offsets=task.source_offsets,
-                        hint='affected offsets will not commit (redelivery on restart)',
-                    )
-                except Exception as e:
-                    # Unexpected error — delivery state is unknown, so the
-                    # dlq.on_send_failure strategy decides whether the
-                    # watermark may advance past a payload that may never
-                    # have been written: 'stall' treats unknown as
-                    # undelivered (replay on restart), 'drop' commits so a
-                    # deterministic handler bug cannot wedge the partition.
-                    # Mirrors _finalize_message_tracker and the window path,
-                    # which have always applied the strategy here.
-                    #
-                    # Reachable whenever validate_collect rejects a payload
-                    # (a sink name that is unconfigured or ambiguous) and
-                    # whenever a user's on_delivery_error re-raises. Before
-                    # this branch existed such payloads were discarded —
-                    # never delivered, never DLQ'd — while the offset
-                    # committed anyway, silently defeating 'stall'.
-                    #
-                    # Re-raised so the outer handler still synthesizes a
-                    # terminal task failure: that accounting is unchanged.
-                    # Only the offset decision is new.
-                    if self._on_dlq_failure == 'stall':
-                        self._mark_offsets_delivery_failed(task.source_offsets)
-                    await log.aerror(
-                        'task_sink_delivery_error',
-                        category='handler',
-                        error=str(e),
-                        error_type=type(e).__name__,
-                        source_offsets=task.source_offsets,
-                        offset_action='stall' if self._on_dlq_failure == 'stall' else 'commit',
-                    )
-                    raise
+            self._note_task_completed(task, result)
+            collect_result = await self._call_on_task_complete(task, window, result)
+            await self._deliver_task_collect(task, collect_result, log)
 
             if self._keep_window_results:
                 window.results.append(result)
@@ -1563,71 +1494,8 @@ class PartitionProcessor:
 
         except ExecutorTaskError as e:
             charged_output += self._charge_output(e.result)
-            executor_tasks.labels(status='failed').inc()
-            if e.error.kind == 'timeout':
-                executor_timeouts.inc()
-            if self._recorder:
-                self._recorder.record_task_failed(
-                    task,
-                    e.error,
-                    self._partition_id,
-                    pool_active=self._executor_pool.active_count,
-                    pool_waiting=self._executor_pool.waiting_count,
-                    duration_seconds=e.result.duration_seconds,
-                    result=e.result,
-                    reported_run_seconds=reported_run_seconds(self._task_run_seconds, e.result),
-                )
-            # Sync, not ``await log.awarning``: structlog's async variants
-            # copy the context and hop through the default thread pool, which
-            # measured ~8.5x the cost of the sync call (83us vs 10us) and adds
-            # a scheduling point. This line fires once per FAILED task, so the
-            # cost peaks exactly when the worker is already struggling — the
-            # same reasoning applies to the other per-task/per-batch log
-            # statements in the delivery path.
-            log.warning('executor_task_failed', error=str(e))
-
-            bind_contextvars(hook='on_error', task_id=task.task_id)
-            try:
-                call = await taskflow.call_on_error(
-                    self._handler,
-                    task,
-                    e.error,
-                    partition=self._partition_id,
-                    window_id=window.window_id,
-                )
-            finally:
-                # ``hook``/``task_id`` would otherwise leak into every later
-                # log line emitted by this coroutine. (``call_on_error``
-                # owns the hook context and the timing; these are structlog's
-                # separate store — see drakkar/hookctx.py on why both exist.)
-                unbind_contextvars('hook', 'task_id')
-            handler_duration.labels(hook='on_error').observe(call.duration_seconds)
-            if call.failed:
-                # A broken on_error must never wedge the partition. The hook
-                # is invoked from inside this ``except`` clause, so an
-                # escaping exception would skip the tracker-settling loop
-                # below, leaving the offset PENDING forever; because
-                # ``committable()`` stops at the first incomplete offset,
-                # that freezes the whole partition's commit watermark and
-                # every later message replays on restart. ``call_on_error``
-                # therefore returns the exception instead of raising it.
-                #
-                # Take executor.on_failure, as a raising on_delivery_error
-                # takes the sink's declared policy: the task settles as a
-                # terminal failure (with its record under dlq), the tracker
-                # completes, the watermark keeps advancing. The error line
-                # comes first, then the policy.
-                action: Any = self._executor_on_failure
-                handler_hook_errors.labels(hook='on_error').inc()
-                await log.aerror(
-                    'on_error_hook_failed',
-                    error=str(call.exception),
-                    error_type=type(call.exception).__name__,
-                    action=self._executor_on_failure.value,
-                    exc_info=call.exception,
-                )
-            else:
-                action = call.action
+            self._note_task_failed(task, e, log)
+            action = await self._ask_on_error(task, e.error, window, log)
             decision = taskflow.decide_after_on_error(
                 action,
                 retry_count=retry_count,
@@ -1635,32 +1503,7 @@ class PartitionProcessor:
                 on_failure=self._executor_on_failure,
             )
             if decision.outcome is taskflow.TaskOutcome.REPLACE:
-                # Replacement: the original task is "replaced" (not a
-                # terminal failure of the group). Decrement its contribution
-                # to every message tracker; add the replacements.
-                for new_task in taskflow.link_replacements(task, list(decision.replacements)):
-                    new_held = text_bytes(new_task.stdin)
-                    if self._account is not None:
-                        self._account.charge(1, new_held)
-                    self._hold_task(new_task, new_held)
-                    self._pending_tasks[new_task.task_id] = new_task
-                    window.task_ids.append(new_task.task_id)
-                    window.total_tasks += 1
-                    self._inflight_count += 1
-                    # Register the replacement with every message tracker
-                    # listed in its source_offsets (usually inherited from
-                    # the original failing task — it's the handler's
-                    # responsibility to set source_offsets on replacements).
-                    for offset in new_task.source_offsets:
-                        tracker = self._message_trackers.get(offset)
-                        if tracker is not None:
-                            if self._keep_message_details:
-                                tracker.tasks.append(new_task)
-                            tracker.scheduled_count += 1
-                            tracker.remaining += 1
-                    t = asyncio.create_task(self._execute_and_track(new_task, window))
-                    self._active_tasks.add(t)
-                    t.add_done_callback(self._active_tasks.discard)
+                self._schedule_replacements(task, window, decision.replacements)
             elif decision.outcome is taskflow.TaskOutcome.RETRY:
                 task_retries.inc()
                 # The retry coroutine reuses this invocation's inflight slot,
@@ -1668,9 +1511,7 @@ class PartitionProcessor:
                 # below must skip cleanup and the retry, not this coroutine,
                 # is what eventually updates the tracker(s).
                 handed_off_to_retry = True
-                t = asyncio.create_task(self._execute_and_track(task, window, retry_count + 1))
-                self._active_tasks.add(t)
-                t.add_done_callback(self._active_tasks.discard)
+                self._spawn_run(task, window, retry_count + 1)
                 return
             else:
                 if decision.retries_exhausted:
@@ -1728,6 +1569,228 @@ class PartitionProcessor:
             # message trackers and window.completed_count when it finishes.
             return
 
+        await self._settle_message_trackers(task, task_result, task_error)
+        window.completed_count += 1
+        if window.is_complete:
+            await self._complete_window(window)
+
+    def _spawn_run(self, task: ExecutorTask, window: Window, retry_count: int = 0) -> None:
+        """Start one run of ``task`` as a tracked background task."""
+        t = asyncio.create_task(self._execute_and_track(task, window, retry_count))
+        self._active_tasks.add(t)
+        t.add_done_callback(self._active_tasks.discard)
+
+    def _note_task_completed(self, task: ExecutorTask, result: ExecutorResult) -> None:
+        """Count and record a run that ended with exit code 0."""
+        executor_tasks.labels(status='completed').inc()
+        executor_duration.observe(result.duration_seconds)
+        if result.spawn_seconds is not None:
+            executor_spawn_duration.observe(result.spawn_seconds)
+        observe_task_labels(task.labels)
+        if self._recorder:
+            self._recorder.record_task_completed(
+                result,
+                self._partition_id,
+                pool_active=self._executor_pool.active_count,
+                pool_waiting=self._executor_pool.waiting_count,
+                reported_run_seconds=reported_run_seconds(self._task_run_seconds, result),
+            )
+
+    async def _call_on_task_complete(
+        self, task: ExecutorTask, window: Window, result: ExecutorResult
+    ) -> CollectResult | None:
+        """Call ``on_task_complete`` with its hook context, time it and record it.
+
+        An exception of the hook propagates: the caller makes a failure of it.
+        """
+        bind_contextvars(hook='on_task_complete', task_id=task.task_id)
+        hook_token = bind_hook_context(
+            hook='on_task_complete',
+            partition=self._partition_id,
+            window_id=window.window_id,
+            task_id=task.task_id,
+        )
+        collect_start = time.monotonic()
+        try:
+            collect_result = await self._handler.on_task_complete(result)
+        finally:
+            # Both releases belong in the ``finally``: this hook's
+            # exception propagates (the caller synthesizes a failure from
+            # it), so releasing after the ``try`` would leak ``hook`` and
+            # ``task_id`` into every later log line this coroutine emits.
+            unbind_contextvars('hook', 'task_id')
+            clear_hook_context(hook_token)
+        collect_duration = time.monotonic() - collect_start
+        handler_duration.labels(hook='on_task_complete').observe(collect_duration)
+        if self._recorder:
+            self._recorder.record_task_complete(
+                task_id=task.task_id,
+                partition=self._partition_id,
+                duration=collect_duration,
+                output_message_count=len(collect_result.kafka) if collect_result else 0,
+            )
+        return collect_result
+
+    async def _deliver_task_collect(self, task: ExecutorTask, collect_result: CollectResult | None, log: Any) -> None:
+        """Deliver what ``on_task_complete`` returned, and decide the offsets when delivery fails."""
+        if collect_result and self._on_collect and self._deliveries_suppressed:
+            self._note_suppressed_delivery('on_task_complete')
+        elif collect_result and self._on_collect:
+            try:
+                await self._on_collect(
+                    collect_result,
+                    self._partition_id,
+                    message_context=self._message_context(task.source_offsets),
+                )
+            except SinkDeliveryFailedError as e:
+                # Delivery (including the DLQ fallback) could not be
+                # confirmed. Mark every affected message tracker so
+                # _finalize_message_tracker stalls the offset instead
+                # of committing past undelivered data. The task itself
+                # succeeded — group/window accounting proceeds normally.
+                self._mark_offsets_delivery_failed(task.source_offsets)
+                await log.aerror(
+                    'task_sink_delivery_failed',
+                    error=str(e),
+                    source_offsets=task.source_offsets,
+                    hint='affected offsets will not commit (redelivery on restart)',
+                )
+            except Exception as e:
+                # Unexpected error — delivery state is unknown, so the
+                # dlq.on_send_failure strategy decides whether the
+                # watermark may advance past a payload that may never
+                # have been written: 'stall' treats unknown as
+                # undelivered (replay on restart), 'drop' commits so a
+                # deterministic handler bug cannot wedge the partition.
+                # Mirrors _finalize_message_tracker and the window path,
+                # which have always applied the strategy here.
+                #
+                # Reachable whenever validate_collect rejects a payload
+                # (a sink name that is unconfigured or ambiguous) and
+                # whenever a user's on_delivery_error re-raises. Before
+                # this branch existed such payloads were discarded —
+                # never delivered, never DLQ'd — while the offset
+                # committed anyway, silently defeating 'stall'.
+                #
+                # Re-raised so the outer handler still synthesizes a
+                # terminal task failure: that accounting is unchanged.
+                # Only the offset decision is new.
+                if self._on_dlq_failure == 'stall':
+                    self._mark_offsets_delivery_failed(task.source_offsets)
+                await log.aerror(
+                    'task_sink_delivery_error',
+                    category='handler',
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    source_offsets=task.source_offsets,
+                    offset_action='stall' if self._on_dlq_failure == 'stall' else 'commit',
+                )
+                raise
+
+    def _note_task_failed(self, task: ExecutorTask, e: ExecutorTaskError, log: Any) -> None:
+        """Count, record and log a run that ended in an executor failure."""
+        executor_tasks.labels(status='failed').inc()
+        if e.error.kind == 'timeout':
+            executor_timeouts.inc()
+        if self._recorder:
+            self._recorder.record_task_failed(
+                task,
+                e.error,
+                self._partition_id,
+                pool_active=self._executor_pool.active_count,
+                pool_waiting=self._executor_pool.waiting_count,
+                duration_seconds=e.result.duration_seconds,
+                result=e.result,
+                reported_run_seconds=reported_run_seconds(self._task_run_seconds, e.result),
+            )
+        # Sync, not ``await log.awarning``: structlog's async variants
+        # copy the context and hop through the default thread pool, which
+        # measured ~8.5x the cost of the sync call (83us vs 10us) and adds
+        # a scheduling point. This line fires once per FAILED task, so the
+        # cost peaks exactly when the worker is already struggling — the
+        # same reasoning applies to the other per-task/per-batch log
+        # statements in the delivery path.
+        log.warning('executor_task_failed', error=str(e))
+
+    async def _ask_on_error(self, task: ExecutorTask, error: ExecutorError, window: Window, log: Any) -> Any:
+        """Call ``on_error`` and return its action; a hook that fails gives ``executor.on_failure``."""
+        bind_contextvars(hook='on_error', task_id=task.task_id)
+        try:
+            call = await taskflow.call_on_error(
+                self._handler,
+                task,
+                error,
+                partition=self._partition_id,
+                window_id=window.window_id,
+            )
+        finally:
+            # ``hook``/``task_id`` would otherwise leak into every later
+            # log line emitted by this coroutine. (``call_on_error``
+            # owns the hook context and the timing; these are structlog's
+            # separate store — see drakkar/hookctx.py on why both exist.)
+            unbind_contextvars('hook', 'task_id')
+        handler_duration.labels(hook='on_error').observe(call.duration_seconds)
+        if call.failed:
+            # A broken on_error must never wedge the partition. The hook
+            # is invoked from inside this ``except`` clause, so an
+            # escaping exception would skip the tracker-settling loop
+            # below, leaving the offset PENDING forever; because
+            # ``committable()`` stops at the first incomplete offset,
+            # that freezes the whole partition's commit watermark and
+            # every later message replays on restart. ``call_on_error``
+            # therefore returns the exception instead of raising it.
+            #
+            # Take executor.on_failure, as a raising on_delivery_error
+            # takes the sink's declared policy: the task settles as a
+            # terminal failure (with its record under dlq), the tracker
+            # completes, the watermark keeps advancing. The error line
+            # comes first, then the policy.
+            action: Any = self._executor_on_failure
+            handler_hook_errors.labels(hook='on_error').inc()
+            await log.aerror(
+                'on_error_hook_failed',
+                error=str(call.exception),
+                error_type=type(call.exception).__name__,
+                action=self._executor_on_failure.value,
+                exc_info=call.exception,
+            )
+        else:
+            action = call.action
+        return action
+
+    def _schedule_replacements(self, task: ExecutorTask, window: Window, replacements: Any) -> None:
+        """Charge, register and start the tasks that ``on_error`` returned in place of ``task``.
+
+        The original task is replaced, not a terminal failure of its group:
+        its own tracker slot is settled by the caller, and each replacement
+        takes a slot of its own.
+        """
+        for new_task in taskflow.link_replacements(task, list(replacements)):
+            new_held = text_bytes(new_task.stdin)
+            if self._account is not None:
+                self._account.charge(1, new_held)
+            self._hold_task(new_task, new_held)
+            self._pending_tasks[new_task.task_id] = new_task
+            window.task_ids.append(new_task.task_id)
+            window.total_tasks += 1
+            self._inflight_count += 1
+            # Register the replacement with every message tracker
+            # listed in its source_offsets (usually inherited from
+            # the original failing task — it's the handler's
+            # responsibility to set source_offsets on replacements).
+            for offset in new_task.source_offsets:
+                tracker = self._message_trackers.get(offset)
+                if tracker is not None:
+                    if self._keep_message_details:
+                        tracker.tasks.append(new_task)
+                    tracker.scheduled_count += 1
+                    tracker.remaining += 1
+            self._spawn_run(new_task, window)
+
+    async def _settle_message_trackers(
+        self, task: ExecutorTask, task_result: ExecutorResult | None, task_error: ExecutorError | None
+    ) -> None:
+        """Give the last outcome of ``task`` to the tracker of each of its source messages."""
         # Update per-message trackers with the terminal outcome of THIS task.
         # task_result / task_error / replaced_by are mutually exclusive.
         for offset in task.source_offsets:
@@ -1754,97 +1817,96 @@ class PartitionProcessor:
             if tracker.remaining == 0 and not tracker.completion_fired:
                 await self._finalize_message_tracker(tracker)
 
-        window.completed_count += 1
+    async def _complete_window(self, window: Window) -> None:
+        """Call ``on_window_complete`` for a window whose tasks all ended, and deliver its result."""
+        with self._request_ids.scope(msg.request_id for msg in window.source_messages):
+            duration = time.monotonic() - window.start_time
+            batch_duration.observe(duration)
 
-        if window.is_complete:
-            with self._request_ids.scope(msg.request_id for msg in window.source_messages):
-                duration = time.monotonic() - window.start_time
-                batch_duration.observe(duration)
-
-                bind_contextvars(hook='on_window_complete', window_id=window.window_id)
-                hook_token = bind_hook_context(
-                    hook='on_window_complete',
+            bind_contextvars(hook='on_window_complete', window_id=window.window_id)
+            hook_token = bind_hook_context(
+                hook='on_window_complete',
+                partition=self._partition_id,
+                window_id=window.window_id,
+                offsets=tuple(m.offset for m in window.source_messages),
+            )
+            wc_start = time.monotonic()
+            try:
+                on_complete_result = await self._handler.on_window_complete(window.results, window.source_messages)
+            except Exception as e:
+                # Log and move on — mirrors on_message_complete below. This
+                # runs inside a fire-and-forget task, so a raising hook would
+                # otherwise skip the window's recorder event, delivery, and
+                # the final _try_commit, surfacing only as an
+                # unretrieved-task-exception warning at GC time.
+                await logger.aerror(
+                    'on_window_complete_failed',
+                    category='handler',
                     partition=self._partition_id,
                     window_id=window.window_id,
-                    offsets=tuple(m.offset for m in window.source_messages),
+                    error=str(e),
+                    exc_info=True,
                 )
-                wc_start = time.monotonic()
+                on_complete_result = None
+            finally:
+                # Released together in the ``finally`` — see on_task_complete
+                # above for why unbinding after the ``try`` leaks.
+                unbind_contextvars('hook', 'window_id')
+                clear_hook_context(hook_token)
+            wc_duration = time.monotonic() - wc_start
+            handler_duration.labels(hook='on_window_complete').observe(wc_duration)
+            if self._recorder:
+                self._recorder.record_window_complete(
+                    partition=self._partition_id,
+                    window_id=window.window_id,
+                    duration=wc_duration,
+                    task_count=window.total_tasks,
+                    output_message_count=len(on_complete_result.kafka) if on_complete_result else 0,
+                )
+            if on_complete_result and self._on_collect and self._deliveries_suppressed:
+                self._note_suppressed_delivery('on_window_complete')
+            elif on_complete_result and self._on_collect:
                 try:
-                    on_complete_result = await self._handler.on_window_complete(window.results, window.source_messages)
+                    # The explicit window context: this result has no source
+                    # message left, so a ``dlq`` outcome acts as ``skip``.
+                    await self._on_collect(
+                        on_complete_result,
+                        self._partition_id,
+                        message_context=MessageContext.window(),
+                    )
+                except SinkDeliveryFailedError as e:
+                    # The window's per-message offsets were already completed
+                    # individually as each message finished, so there is
+                    # nothing left to stall — the aggregate payload is the
+                    # only loss. Loudest possible signal for the operator.
+                    await logger.acritical(
+                        'on_window_complete_delivery_failed',
+                        category='sink',
+                        partition=self._partition_id,
+                        window_id=window.window_id,
+                        error=str(e),
+                        action='ALERT: window aggregate payload lost — offsets already committed',
+                    )
                 except Exception as e:
-                    # Log and move on — mirrors on_message_complete below. This
-                    # runs inside a fire-and-forget task, so a raising hook would
-                    # otherwise skip the window's recorder event, delivery, and
-                    # the final _try_commit, surfacing only as an
-                    # unretrieved-task-exception warning at GC time.
+                    # Previously this propagated out of the fire-and-forget
+                    # task and surfaced only as an unobserved-exception
+                    # warning at GC time. Log it properly instead.
                     await logger.aerror(
-                        'on_window_complete_failed',
-                        category='handler',
+                        'on_window_complete_sink_delivery_error',
+                        category='sink',
                         partition=self._partition_id,
                         window_id=window.window_id,
                         error=str(e),
                         exc_info=True,
                     )
-                    on_complete_result = None
-                finally:
-                    # Released together in the ``finally`` — see on_task_complete
-                    # above for why unbinding after the ``try`` leaks.
-                    unbind_contextvars('hook', 'window_id')
-                    clear_hook_context(hook_token)
-                wc_duration = time.monotonic() - wc_start
-                handler_duration.labels(hook='on_window_complete').observe(wc_duration)
-                if self._recorder:
-                    self._recorder.record_window_complete(
-                        partition=self._partition_id,
-                        window_id=window.window_id,
-                        duration=wc_duration,
-                        task_count=window.total_tasks,
-                        output_message_count=len(on_complete_result.kafka) if on_complete_result else 0,
-                    )
-                if on_complete_result and self._on_collect and self._deliveries_suppressed:
-                    self._note_suppressed_delivery('on_window_complete')
-                elif on_complete_result and self._on_collect:
-                    try:
-                        # The explicit window context: this result has no source
-                        # message left, so a ``dlq`` outcome acts as ``skip``.
-                        await self._on_collect(
-                            on_complete_result,
-                            self._partition_id,
-                            message_context=MessageContext.window(),
-                        )
-                    except SinkDeliveryFailedError as e:
-                        # The window's per-message offsets were already completed
-                        # individually as each message finished, so there is
-                        # nothing left to stall — the aggregate payload is the
-                        # only loss. Loudest possible signal for the operator.
-                        await logger.acritical(
-                            'on_window_complete_delivery_failed',
-                            category='sink',
-                            partition=self._partition_id,
-                            window_id=window.window_id,
-                            error=str(e),
-                            action='ALERT: window aggregate payload lost — offsets already committed',
-                        )
-                    except Exception as e:
-                        # Previously this propagated out of the fire-and-forget
-                        # task and surfaced only as an unobserved-exception
-                        # warning at GC time. Log it properly instead.
-                        await logger.aerror(
-                            'on_window_complete_sink_delivery_error',
-                            category='sink',
-                            partition=self._partition_id,
-                            window_id=window.window_id,
-                            error=str(e),
-                            exc_info=True,
-                        )
-                self._release_kept_bytes(window)
+            self._release_kept_bytes(window)
 
-                # Per-message offsets were already marked complete individually
-                # by _finalize_message_tracker as each message's tasks finished.
-                # Just make sure any outstanding commit attempt goes through in
-                # case the last commit was blocked.
-                offset_lag.labels(partition=str(self._partition_id)).set(self._offset_tracker.pending_count)
-                await self._note_commit_due()
+            # Per-message offsets were already marked complete individually
+            # by _finalize_message_tracker as each message's tasks finished.
+            # Just make sure any outstanding commit attempt goes through in
+            # case the last commit was blocked.
+            offset_lag.labels(partition=str(self._partition_id)).set(self._offset_tracker.pending_count)
+            await self._note_commit_due()
 
     async def _finalize_message_tracker(self, tracker: MessageTracker) -> None:
         """Finish a message (see :meth:`_finish_message`) with its request id in the log context."""

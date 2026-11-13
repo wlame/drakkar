@@ -155,52 +155,16 @@ class TimelineEventEmitter:
         if not decl.enabled:
             return  # deliberate config, not an error: no metric, no log
 
-        # datetime.timestamp() can raise OverflowError/OSError/ValueError for
-        # an extreme naive datetime (e.g. datetime.min: the platform C
-        # mktime() can't represent it) — that must not escape into user
-        # code, so treat it like any other malformed instance: a bad_shape
-        # drop, not a crash.
-        try:
-            ts_s = ts.timestamp() if isinstance(ts, datetime) else time.time()
-        except (OverflowError, OSError, ValueError):
-            self._drop(REASON_BAD_SHAPE, type_name, detail='ts out of range')
+        span = self._event_span(decl, type_name, ts, end_ts)
+        if span is None:
             return
-        try:
-            end_s = end_ts.timestamp() if isinstance(end_ts, datetime) else None
-        except (OverflowError, OSError, ValueError):
-            self._drop(REASON_BAD_SHAPE, type_name, detail='end_ts out of range')
-            return
-
-        if decl.kind == 'range' and end_s is None:
-            self._drop(REASON_BAD_SHAPE, type_name, detail='kind=range requires end_ts')
-            return
-        if decl.kind != 'range' and end_s is not None:
-            self._drop(REASON_BAD_SHAPE, type_name, detail=f'end_ts given for kind={decl.kind!r}, not range')
-            return
-        if end_s is not None and end_s < ts_s:
-            self._drop(REASON_BAD_SHAPE, type_name, detail='end_ts precedes ts')
-            return
-
+        ts_s, end_s = span
         if match is not None and match.field_count() != 1:
             self._drop(REASON_BAD_SHAPE, type_name, detail='match must set exactly one of window_id/offsets/label')
             return
-
         if match is None and decl.action in _MATCH_ACTIONS:
-            ctx = current_hook_context()
-            # Auto-fill from offsets, not window_id: the UI's task view has
-            # no window field to correlate against, so a window-id match
-            # would highlight nothing. Offsets are what the task view can
-            # actually resolve.
-            if ctx is not None and ctx.offsets:
-                match = TimelineMatch(offsets=tuple((ctx.partition, o) for o in ctx.offsets))
-            elif ctx is not None and ctx.offset is not None:
-                match = TimelineMatch(offsets=((ctx.partition, ctx.offset),))
-            else:
-                self._drop(
-                    REASON_BAD_SHAPE,
-                    type_name,
-                    detail=f'action={decl.action!r} requires a match and none could be auto-filled',
-                )
+            match = self._match_from_hook(decl, type_name)
+            if match is None:
                 return
 
         payload = {
@@ -212,6 +176,55 @@ class TimelineEventEmitter:
             'match': match.wire() if match is not None else None,
         }
         self._annotator.emit(None, TIMELINE_EVENT_KIND, payload)
+
+    def _event_span(
+        self, decl: Any, type_name: str, ts: datetime | None, end_ts: datetime | None
+    ) -> tuple[float, float | None] | None:
+        """The start and end of an instance in epoch seconds, or None after a drop for a bad shape."""
+        # datetime.timestamp() can raise OverflowError/OSError/ValueError for
+        # an extreme naive datetime (e.g. datetime.min: the platform C
+        # mktime() can't represent it) — that must not escape into user
+        # code, so treat it like any other malformed instance: a bad_shape
+        # drop, not a crash.
+        try:
+            ts_s = ts.timestamp() if isinstance(ts, datetime) else time.time()
+        except (OverflowError, OSError, ValueError):
+            self._drop(REASON_BAD_SHAPE, type_name, detail='ts out of range')
+            return None
+        try:
+            end_s = end_ts.timestamp() if isinstance(end_ts, datetime) else None
+        except (OverflowError, OSError, ValueError):
+            self._drop(REASON_BAD_SHAPE, type_name, detail='end_ts out of range')
+            return None
+
+        if decl.kind == 'range' and end_s is None:
+            self._drop(REASON_BAD_SHAPE, type_name, detail='kind=range requires end_ts')
+            return None
+        if decl.kind != 'range' and end_s is not None:
+            self._drop(REASON_BAD_SHAPE, type_name, detail=f'end_ts given for kind={decl.kind!r}, not range')
+            return None
+        if end_s is not None and end_s < ts_s:
+            self._drop(REASON_BAD_SHAPE, type_name, detail='end_ts precedes ts')
+            return None
+        return ts_s, end_s
+
+    def _match_from_hook(self, decl: Any, type_name: str) -> TimelineMatch | None:
+        """The match of the current hook's offsets, or None after a drop when the hook has none."""
+        ctx = current_hook_context()
+        # Auto-fill from offsets, not window_id: the UI's task view has
+        # no window field to correlate against, so a window-id match
+        # would highlight nothing. Offsets are what the task view can
+        # actually resolve.
+        if ctx is not None and ctx.offsets:
+            return TimelineMatch(offsets=tuple((ctx.partition, o) for o in ctx.offsets))
+        if ctx is not None and ctx.offset is not None:
+            return TimelineMatch(offsets=((ctx.partition, ctx.offset),))
+        self._drop(
+            REASON_BAD_SHAPE,
+            type_name,
+            detail=f'action={decl.action!r} requires a match and none could be auto-filled',
+        )
+        return None
 
     def _drop(self, reason: str, type_name: str, *, detail: str = '') -> None:
         """Account for a dropped event instance and log it.

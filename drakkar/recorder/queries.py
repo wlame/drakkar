@@ -946,17 +946,7 @@ def build_task_detail(task_id: str, events: Sequence[dict]) -> dict:
     # show it rather than nothing.
     args = _parse_json_value(started.get('args'), fallback=started.get('args')) if started else None
 
-    # ``origin`` is on every event row; HTTP-origin tasks carry the
-    # ``client_name`` / ``request_id`` columns too. The page uses these to
-    # swap the Partition/Offset header for Client/Request ID. Last non-empty
-    # value wins.
-    origin = 'kafka'
-    client_name = None
-    request_id = None
-    for event in events:
-        origin = event.get('origin') or origin
-        client_name = event.get('client_name') or client_name
-        request_id = event.get('request_id') or request_id
+    origin, client_name, request_id = _origin_fields(events)
 
     webapp_request_body, webapp_response_body = _webapp_bodies(events) if origin == 'http' else (None, None)
 
@@ -980,6 +970,22 @@ def build_task_detail(task_id: str, events: Sequence[dict]) -> dict:
         'webapp_request_body': webapp_request_body,
         'webapp_response_body': webapp_response_body,
     }
+
+
+def _origin_fields(events: Sequence[dict]) -> tuple[str, Any, Any]:
+    """The origin, client name and request id of a task; the last non-empty value of each wins."""
+    # ``origin`` is on every event row; HTTP-origin tasks carry the
+    # ``client_name`` / ``request_id`` columns too. The page uses these to
+    # swap the Partition/Offset header for Client/Request ID. Last non-empty
+    # value wins.
+    origin = 'kafka'
+    client_name = None
+    request_id = None
+    for event in events:
+        origin = event.get('origin') or origin
+        client_name = event.get('client_name') or client_name
+        request_id = event.get('request_id') or request_id
+    return origin, client_name, request_id
 
 
 def _webapp_bodies(events: Sequence[dict]) -> tuple[Any, Any]:

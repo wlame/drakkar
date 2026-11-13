@@ -2655,3 +2655,92 @@ def test_cluster_tasks_hash_before_the_roster_is_the_hash_of_no_tasks(test_confi
     app = DrakkarApp(handler=SimpleHandler(), config=test_config)
 
     assert app.cluster_tasks_hash == '4f53cda18c2baa0c'
+
+
+# --- Shutdown: the order of the subsystem stops ---
+
+STOP_ORDER = [
+    'offload_pool',
+    'runtime_health',
+    'cache_engine',
+    'recorder',
+    'cluster_election',
+    'fleet',
+    'connections',
+    'api_server',
+    'sink_manager',
+    'dlq_sink',
+]
+
+
+def _wire_recorded_stops(app: DrakkarApp, calls: list[str], failing: set[str]) -> None:
+    """Give ``app`` one stand-in per subsystem; each notes its stop in ``calls`` and may fail."""
+
+    def stopper(name: str):
+        async def stop(*args, **kwargs):
+            calls.append(name)
+            if name in failing:
+                raise RuntimeError(f'{name} broke')
+
+        return stop
+
+    def sync_stopper(name: str):
+        def stop(*args, **kwargs):
+            calls.append(name)
+            if name in failing:
+                raise RuntimeError(f'{name} broke')
+
+        return stop
+
+    app._offload_pool = MagicMock(shutdown=sync_stopper('offload_pool'))
+    app._runtime_health = MagicMock(stop=stopper('runtime_health'))
+    app._cache_engine = MagicMock(stop=stopper('cache_engine'))
+    app._recorder = MagicMock(stop=stopper('recorder'))
+    app._cluster_election = MagicMock(stop=stopper('cluster_election'))
+    app._fleet = MagicMock(stop=stopper('fleet'))
+    app._connections = MagicMock(close_all=stopper('connections'))
+    app._api_server = MagicMock(stop=stopper('api_server'))
+    app._sink_manager = MagicMock(close_all=stopper('sink_manager'))
+    app._dlq_sink = MagicMock(close=stopper('dlq_sink'))
+
+
+async def test_shutdown_stops_the_subsystems_in_the_documented_order(test_config):
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    calls: list[str] = []
+    _wire_recorded_stops(app, calls, failing=set())
+
+    await app._lifecycle._shutdown()
+
+    assert calls == STOP_ORDER
+    assert app._offload_pool is None
+    assert app._runtime_health is None
+    assert app._cache_engine is None
+
+
+async def test_shutdown_runs_every_stop_when_each_one_fails(test_config):
+    app = DrakkarApp(handler=SimpleHandler(), config=test_config)
+    calls: list[str] = []
+    _wire_recorded_stops(app, calls, failing=set(STOP_ORDER))
+
+    with capture_logs() as logs:
+        await app._lifecycle._shutdown()
+
+    assert calls == STOP_ORDER
+    failures = [entry['event'] for entry in logs if entry['event'].endswith('_failed')]
+    assert failures == [
+        'offload_pool_stop_failed',
+        'runtime_health_stop_failed',
+        'cache_engine_stop_failed',
+        'recorder_stop_failed',
+        'periodic_election_stop_failed',
+        'fleet_registry_stop_failed',
+        'connections_close_failed',
+        'debug_server_stop_failed',
+        'sink_manager_close_failed',
+        'dlq_sink_close_failed',
+    ]
+    categories = {entry['event']: entry['category'] for entry in logs if entry['event'] in failures}
+    assert categories['periodic_election_stop_failed'] == 'periodic'
+    assert categories['fleet_registry_stop_failed'] == 'fleet'
+    assert categories['connections_close_failed'] == 'fleet'
+    assert logs[-1]['event'] == 'drakkar_stopped'

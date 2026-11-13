@@ -40,7 +40,7 @@ import asyncio
 import base64
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import structlog
 from confluent_kafka import KafkaError, KafkaException, Message, TopicPartition
@@ -356,6 +356,51 @@ async def fetch_message(target: AliasTarget, partition: int, offset: int) -> Kaf
         await consumer.close()
 
 
+async def _resolve_stream_window(
+    consumer: Any, target: AliasTarget, from_ts_ms: int, partition: int | None
+) -> tuple[list[Any], dict[int, int]]:
+    """The start offset of each partition that has something to read, and the high watermark of each.
+
+    Raises:
+        KafkaReadNotFound: unknown topic/partition for this alias.
+        KafkaReadUnavailable: brokers unreachable while resolving offsets.
+    """
+    try:
+        metadata = await consumer.list_topics(topic=target.topic, timeout=METADATA_TIMEOUT_SECONDS)
+    except KafkaException as exc:
+        raise _watermarks_or_raise(exc) from exc
+    topic_meta = metadata.topics.get(target.topic)
+    if topic_meta is None or topic_meta.error is not None:
+        raise KafkaReadNotFound('Unknown topic for this alias')
+    partition_ids = sorted(topic_meta.partitions)
+    if partition is not None:
+        if partition not in topic_meta.partitions:
+            raise KafkaReadNotFound(f'Partition {partition} does not exist for this alias')
+        partition_ids = [partition]
+
+    # Broker-side timestamp -> offset resolution, then a high-watermark
+    # snapshot per partition. The snapshot is the finish line: messages
+    # produced after the request started are not part of this window.
+    try:
+        starts = await consumer.offsets_for_times(
+            [TopicPartition(target.topic, pid, from_ts_ms) for pid in partition_ids],
+            timeout=METADATA_TIMEOUT_SECONDS,
+        )
+        highs: dict[int, int] = {}
+        for pid in partition_ids:
+            _low, high = await consumer.get_watermark_offsets(
+                TopicPartition(target.topic, pid), timeout=METADATA_TIMEOUT_SECONDS
+            )
+            highs[pid] = high
+    except KafkaException as exc:
+        raise _watermarks_or_raise(exc) from exc
+
+    # offsets_for_times returns offset -1 (OFFSET_END) when every record
+    # in the partition is older than from_ts_ms — nothing to read there.
+    assignments = [tp for tp in starts if tp.offset >= 0 and tp.offset < highs[tp.partition]]
+    return assignments, highs
+
+
 async def stream_messages(
     target: AliasTarget,
     *,
@@ -383,39 +428,7 @@ async def stream_messages(
     remaining = min(limit or STREAM_LIMIT_MAX, STREAM_LIMIT_MAX)
     consumer = AIOConsumer(_reader_conf(target), max_workers=_READER_MAX_WORKERS)
     try:
-        try:
-            metadata = await consumer.list_topics(topic=target.topic, timeout=METADATA_TIMEOUT_SECONDS)
-        except KafkaException as exc:
-            raise _watermarks_or_raise(exc) from exc
-        topic_meta = metadata.topics.get(target.topic)
-        if topic_meta is None or topic_meta.error is not None:
-            raise KafkaReadNotFound('Unknown topic for this alias')
-        partition_ids = sorted(topic_meta.partitions)
-        if partition is not None:
-            if partition not in topic_meta.partitions:
-                raise KafkaReadNotFound(f'Partition {partition} does not exist for this alias')
-            partition_ids = [partition]
-
-        # Broker-side timestamp -> offset resolution, then a high-watermark
-        # snapshot per partition. The snapshot is the finish line: messages
-        # produced after the request started are not part of this window.
-        try:
-            starts = await consumer.offsets_for_times(
-                [TopicPartition(target.topic, pid, from_ts_ms) for pid in partition_ids],
-                timeout=METADATA_TIMEOUT_SECONDS,
-            )
-            highs: dict[int, int] = {}
-            for pid in partition_ids:
-                _low, high = await consumer.get_watermark_offsets(
-                    TopicPartition(target.topic, pid), timeout=METADATA_TIMEOUT_SECONDS
-                )
-                highs[pid] = high
-        except KafkaException as exc:
-            raise _watermarks_or_raise(exc) from exc
-
-        # offsets_for_times returns offset -1 (OFFSET_END) when every record
-        # in the partition is older than from_ts_ms — nothing to read there.
-        assignments = [tp for tp in starts if tp.offset >= 0 and tp.offset < highs[tp.partition]]
+        assignments, highs = await _resolve_stream_window(consumer, target, from_ts_ms, partition)
         if not assignments or remaining <= 0:
             return
         await consumer.assign(assignments)

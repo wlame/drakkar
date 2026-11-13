@@ -37,9 +37,9 @@ import os
 import signal
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
@@ -230,6 +230,17 @@ STORAGE_FOLDER_UNSAFE_HINT = (
     'what is in this folder; give storage.dir and the folders below it to the worker user only '
     '(for example /var/lib/drakkar)'
 )
+
+
+class StopStep(NamedTuple):
+    """One subsystem stop of the shutdown: what to await and how to report its failure."""
+
+    event: str
+    category: str
+    stop: Callable[[], Awaitable[Any]]
+    clear: str | None = None
+    exc_info: bool = True
+    describe: Callable[[BaseException], str] = str
 
 
 class AppLifecycle:
@@ -1433,171 +1444,163 @@ class AppLifecycle:
             if app._executor_pool is not None:
                 await asyncio.to_thread(app._executor_pool.stop_exit_watcher)
 
-            # Shut the offload pool down first among the observability-
-            # adjacent subsystems: hooks have finished draining by now, so
-            # anything still queued belongs to abandoned work — drop it
-            # (cancel_futures) rather than crunch through it. A running
-            # computation finishes in the background; shutdown(wait=False)
-            # never blocks worker stop behind it.
-            if app._offload_pool is not None:
-                try:
-                    app._offload_pool.shutdown()
-                except Exception as exc:
-                    await log.awarning(
-                        'offload_pool_stop_failed',
-                        category='lifecycle',
-                        error=str(exc),
-                    )
-                app._offload_pool = None
-
-            # Stop the runtime-health monitor before the recorder for the
-            # same reason as the cache engine below: its final transition
-            # or stall event still needs a live recorder to land in.
-            if app._runtime_health is not None:
-                try:
-                    await app._runtime_health.stop()
-                except Exception as exc:
-                    await log.awarning(
-                        'runtime_health_stop_failed',
-                        category='lifecycle',
-                        error=str(exc),
-                        exc_info=True,
-                    )
-                app._runtime_health = None
-
-            # Stop the cache engine BEFORE the recorder so the engine's
-            # final flush (``_flush_once`` called inside
-            # ``CacheEngine.stop()``) can still record its
-            # ``periodic_run`` event through the recorder. If we stopped
-            # the recorder first, that last event would be dropped —
-            # users lose observability on the most critical flush of the
-            # lifecycle (the one that persists whatever was in memory
-            # when shutdown signalled). Each subsystem stop is wrapped
-            # individually so a failure in one does not skip the others.
-            if app._cache_engine is not None:
-                try:
-                    await app._cache_engine.stop()
-                except Exception as exc:
-                    await log.awarning(
-                        'cache_engine_stop_failed',
-                        category='lifecycle',
-                        error=str(exc),
-                        exc_info=True,
-                    )
-                app._cache_engine = None
-
-            if app._recorder:
-                try:
-                    # The seal always runs; moving the file into the history
-                    # folder gets only the shutdown time that is left. The
-                    # wait for an archive pass in progress keeps the time of
-                    # one registry call for the card withdraw below.
-                    await app._recorder.stop(
-                        timeout=max(deadline - time.monotonic(), 0.0),
-                        reserve_seconds=self._registry_stop_reserve_seconds(),
-                    )
-                except Exception as exc:
-                    await log.awarning(
-                        'recorder_stop_failed',
-                        category='lifecycle',
-                        error=str(exc),
-                        exc_info=True,
-                    )
-
-            # The election stops once the cluster task loops are cancelled (at
-            # the top of the shutdown) and the archive pass that still checked
-            # its lease has ended or been left: one attempt in the time left.
-            # Its caller counts and logs a failed call; anything else it
-            # raises is logged here, so the card withdraw and the closes below still run.
-            if app._cluster_election is not None:
-                try:
-                    await app._cluster_election.stop(max(deadline - time.monotonic(), 0.0))
-                except Exception as exc:
-                    await log.awarning(
-                        'periodic_election_stop_failed',
-                        category='periodic',
-                        error=str(exc),
-                        exc_info=True,
-                    )
-
-            # Withdraw the registry card after the recorder's last write and
-            # before the API server goes: until the card is gone, peers may
-            # still reach this worker through it.
-            if app._fleet is not None:
-                try:
-                    await app._fleet.stop(deadline_seconds=max(deadline - time.monotonic(), 0.0))
-                except Exception as exc:
-                    await log.awarning(
-                        'fleet_registry_stop_failed',
-                        category='fleet',
-                        error=str(exc),
-                        exc_info=True,
-                    )
-
-            # The shared connections close once every provider that uses them
-            # has stopped, inside the shutdown time that is left. A closer
-            # still running when that runs out is cut off, and its client
-            # goes with the process. ``close_all`` logs a closer that raises;
-            # an error of its own is logged here, so the closers below still run.
-            if app._connections is not None:
-                close_seconds = max(deadline - time.monotonic(), 0.0)
-                try:
-                    async with asyncio.timeout(close_seconds):
-                        await app._connections.close_all()
-                except TimeoutError:
-                    await log.awarning(
-                        'connections_close_timed_out',
-                        category='fleet',
-                        timeout_seconds=round(close_seconds, 3),
-                    )
-                except Exception as exc:
-                    await log.awarning(
-                        'connections_close_failed',
-                        category='fleet',
-                        error=describe_error(exc),
-                        exc_info=True,
-                    )
-
-            if app._api_server:
-                try:
-                    await app._api_server.stop()
-                except Exception as exc:
-                    await log.awarning(
-                        'debug_server_stop_failed',
-                        category='lifecycle',
-                        error=str(exc),
-                        exc_info=True,
-                    )
-
-            # close all sinks and DLQ. ``close_all`` already swallows
-            # per-sink errors internally; only an unexpected framework
-            # bug in close_all itself can raise here, but we still wrap
-            # it so the consumer close on the next line still runs.
-            try:
-                await app._sink_manager.close_all()
-            except Exception as exc:
-                await log.awarning(
-                    'sink_manager_close_failed',
-                    category='lifecycle',
-                    error=str(exc),
-                    exc_info=True,
-                )
-            if app._dlq_sink:
-                try:
-                    await app._dlq_sink.close()
-                except Exception as exc:
-                    await log.awarning(
-                        'dlq_sink_close_failed',
-                        category='lifecycle',
-                        error=str(exc),
-                        exc_info=True,
-                    )
+            # Every other subsystem stops in the order of ``_stop_steps``. A step
+            # that fails is logged and the next one still runs.
+            for step in self._stop_steps(deadline):
+                await self._run_stop_step(step)
 
             # Last: the own folder stays locked until no file in it is written any more.
             await self._release_owner_lock()
 
             await log.ainfo('drakkar_stopped', category='lifecycle')
             close_logging()
+
+    def _stop_steps(self, deadline: float) -> list[StopStep]:
+        """The subsystems to stop after the sources, in order, each with the event that reports its failure.
+
+        The list holds only what started: a startup failure lands in the
+        shutdown too. A step reads the time left when it runs, not when the
+        list is built.
+        """
+        app = self._app
+        steps: list[StopStep] = []
+
+        def time_left() -> float:
+            return max(deadline - time.monotonic(), 0.0)
+
+        # Shut the offload pool down first among the observability-
+        # adjacent subsystems: hooks have finished draining by now, so
+        # anything still queued belongs to abandoned work — drop it
+        # (cancel_futures) rather than crunch through it. A running
+        # computation finishes in the background; shutdown(wait=False)
+        # never blocks worker stop behind it.
+        if app._offload_pool is not None:
+            steps.append(
+                StopStep(
+                    'offload_pool_stop_failed',
+                    'lifecycle',
+                    self._shut_offload_pool,
+                    clear='_offload_pool',
+                    exc_info=False,
+                )
+            )
+
+        # Stop the runtime-health monitor before the recorder for the
+        # same reason as the cache engine below: its final transition
+        # or stall event still needs a live recorder to land in.
+        if app._runtime_health is not None:
+            steps.append(
+                StopStep('runtime_health_stop_failed', 'lifecycle', app._runtime_health.stop, clear='_runtime_health')
+            )
+
+        # Stop the cache engine BEFORE the recorder so the engine's
+        # final flush (``_flush_once`` called inside
+        # ``CacheEngine.stop()``) can still record its
+        # ``periodic_run`` event through the recorder. If we stopped
+        # the recorder first, that last event would be dropped —
+        # users lose observability on the most critical flush of the
+        # lifecycle (the one that persists whatever was in memory
+        # when shutdown signalled). Each subsystem stop is wrapped
+        # individually so a failure in one does not skip the others.
+        if app._cache_engine is not None:
+            steps.append(
+                StopStep('cache_engine_stop_failed', 'lifecycle', app._cache_engine.stop, clear='_cache_engine')
+            )
+
+            # The seal always runs; moving the file into the history
+            # folder gets only the shutdown time that is left. The
+            # wait for an archive pass in progress keeps the time of
+            # one registry call for the card withdraw below.
+        if app._recorder:
+            recorder = app._recorder
+            steps.append(
+                StopStep(
+                    'recorder_stop_failed',
+                    'lifecycle',
+                    lambda: recorder.stop(
+                        timeout=time_left(),
+                        reserve_seconds=self._registry_stop_reserve_seconds(),
+                    ),
+                )
+            )
+
+        # The election stops once the cluster task loops are cancelled (at
+        # the top of the shutdown) and the archive pass that still checked
+        # its lease has ended or been left: one attempt in the time left.
+        # Its caller counts and logs a failed call; anything else it
+        # raises is logged here, so the card withdraw and the closes below still run.
+        if app._cluster_election is not None:
+            election = app._cluster_election
+            steps.append(StopStep('periodic_election_stop_failed', 'periodic', lambda: election.stop(time_left())))
+
+        # Withdraw the registry card after the recorder's last write and
+        # before the API server goes: until the card is gone, peers may
+        # still reach this worker through it.
+        if app._fleet is not None:
+            fleet = app._fleet
+            steps.append(
+                StopStep('fleet_registry_stop_failed', 'fleet', lambda: fleet.stop(deadline_seconds=time_left()))
+            )
+
+        # The shared connections close once every provider that uses them
+        # has stopped, inside the shutdown time that is left. A closer
+        # still running when that runs out is cut off, and its client
+        # goes with the process. ``close_all`` logs a closer that raises;
+        # an error of its own is logged here, so the closers below still run.
+        if app._connections is not None:
+            steps.append(
+                StopStep(
+                    'connections_close_failed',
+                    'fleet',
+                    lambda: self._close_connections(time_left()),
+                    describe=describe_error,
+                )
+            )
+
+        if app._api_server:
+            steps.append(StopStep('debug_server_stop_failed', 'lifecycle', app._api_server.stop))
+
+        # close all sinks and DLQ. ``close_all`` already swallows
+        # per-sink errors internally; only an unexpected framework
+        # bug in close_all itself can raise here, but we still wrap
+        # it so the consumer close on the next line still runs.
+        steps.append(StopStep('sink_manager_close_failed', 'lifecycle', app._sink_manager.close_all))
+        if app._dlq_sink:
+            steps.append(StopStep('dlq_sink_close_failed', 'lifecycle', app._dlq_sink.close))
+        return steps
+
+    async def _run_stop_step(self, step: StopStep) -> None:
+        """Run one stop step; log its failure under its own event so the later steps still run."""
+        try:
+            await step.stop()
+        except Exception as exc:
+            fields: dict[str, Any] = {'category': step.category, 'error': step.describe(exc)}
+            if step.exc_info:
+                fields['exc_info'] = True
+            await logger.bind(worker_id=self._app._worker_id).awarning(step.event, **fields)
+        if step.clear is not None:
+            setattr(self._app, step.clear, None)
+
+    async def _shut_offload_pool(self) -> None:
+        """Shut the offload pool down without waiting for a running computation."""
+        pool = self._app._offload_pool
+        if pool is not None:
+            pool.shutdown()
+
+    async def _close_connections(self, close_seconds: float) -> None:
+        """Close the shared connections inside ``close_seconds``; a closer still running then is cut off."""
+        connections = self._app._connections
+        if connections is None:
+            return
+        try:
+            async with asyncio.timeout(close_seconds):
+                await connections.close_all()
+        except TimeoutError:
+            await logger.bind(worker_id=self._app._worker_id).awarning(
+                'connections_close_timed_out',
+                category='fleet',
+                timeout_seconds=round(close_seconds, 3),
+            )
 
     def _registry_stop_reserve_seconds(self) -> float:
         """The stop time the recorder keeps for the registry: one call's time limit while a registry runs, else 0."""

@@ -31,6 +31,7 @@ from drakkar.utils import wait_for_aligned_startup
 
 if TYPE_CHECKING:
     from drakkar.consume_pause import ConsumePauseController
+    from drakkar.models import SourceMessage
     from drakkar.sources.base import SourceContext
 
 logger = structlog.get_logger()
@@ -197,6 +198,52 @@ class KafkaSource:
             return frozenset(self.processors)
         return frozenset(self.stalled_partitions | self.dead_partitions_paused) & frozenset(self.processors)
 
+    async def _apply_backpressure(self, consumer: Any, queued: int, low_watermark: int, high_watermark: int) -> None:
+        """Resume the fetch at the low watermark and pause it at the high one."""
+        # An active operator debug pause (ui.consume_pause) outranks the
+        # backpressure resume: queues draining below the low watermark
+        # must not restart fetching while the operator asked for quiet.
+        # The debug resume hands control back here — if backpressure is
+        # still holding, this branch resumes once queues drain.
+        if self.paused and queued <= low_watermark and not self._consume_pause.active:
+            # Never resume partitions paused by a delivery stall or a dead
+            # loop — they stay paused until restart/revoke regardless of
+            # backpressure.
+            partition_ids = [
+                p for p in self.processors if p not in self.stalled_partitions and p not in self.dead_partitions_paused
+            ]
+            if partition_ids:
+                await consumer.resume(partition_ids)
+                self.paused = False
+                backpressure_active.set(0)
+
+        if not self.paused and queued >= high_watermark:
+            partition_ids = list(self.processors.keys())
+            if partition_ids:
+                await consumer.pause(partition_ids)
+                self.paused = True
+                backpressure_active.set(1)
+
+    def _route_messages(self, messages: list[SourceMessage]) -> None:
+        """Hand each polled message to the loop of its partition; drop and count one with no loop."""
+        for msg in messages:
+            processor = self.processors.get(msg.partition)
+            if processor:
+                processor.enqueue(msg)
+            else:
+                # Revoke raced the poll: the processor was popped but
+                # the broker delivered a few more messages before
+                # acknowledging the revoke. The new partition owner
+                # redelivers from the last committed offset, so
+                # dropping here is safe — but it must be visible.
+                messages_unassigned_dropped.labels(partition=str(msg.partition)).inc()
+                logger.warning(
+                    'message_for_unassigned_partition_dropped',
+                    category='kafka',
+                    partition=msg.partition,
+                    offset=msg.offset,
+                )
+
     async def run(self) -> None:
         """Main polling loop with backpressure via Kafka pause/resume.
 
@@ -233,31 +280,7 @@ class KafkaSource:
                 if idle_slots > 0:
                     executor_idle_waste.inc(idle_slots * dt)
 
-            # An active operator debug pause (ui.consume_pause) outranks the
-            # backpressure resume: queues draining below the low watermark
-            # must not restart fetching while the operator asked for quiet.
-            # The debug resume hands control back here — if backpressure is
-            # still holding, this branch resumes once queues drain.
-            if self.paused and queued <= low_watermark and not self._consume_pause.active:
-                # Never resume partitions paused by a delivery stall or a dead
-                # loop — they stay paused until restart/revoke regardless of
-                # backpressure.
-                partition_ids = [
-                    p
-                    for p in self.processors
-                    if p not in self.stalled_partitions and p not in self.dead_partitions_paused
-                ]
-                if partition_ids:
-                    await consumer.resume(partition_ids)
-                    self.paused = False
-                    backpressure_active.set(0)
-
-            if not self.paused and queued >= high_watermark:
-                partition_ids = list(self.processors.keys())
-                if partition_ids:
-                    await consumer.pause(partition_ids)
-                    self.paused = True
-                    backpressure_active.set(1)
+            await self._apply_backpressure(consumer, queued, low_watermark, high_watermark)
 
             messages = await consumer.poll_batch()
             if self._stop_requested:
@@ -274,23 +297,7 @@ class KafkaSource:
                         partitions=sorted({msg.partition for msg in messages}),
                     )
                 break
-            for msg in messages:
-                processor = self.processors.get(msg.partition)
-                if processor:
-                    processor.enqueue(msg)
-                else:
-                    # Revoke raced the poll: the processor was popped but
-                    # the broker delivered a few more messages before
-                    # acknowledging the revoke. The new partition owner
-                    # redelivers from the last committed offset, so
-                    # dropping here is safe — but it must be visible.
-                    messages_unassigned_dropped.labels(partition=str(msg.partition)).inc()
-                    logger.warning(
-                        'message_for_unassigned_partition_dropped',
-                        category='kafka',
-                        partition=msg.partition,
-                        offset=msg.offset,
-                    )
+            self._route_messages(messages)
 
             # After the first poll completes successfully we consider this
             # source ready to serve traffic — the consumer is subscribed,

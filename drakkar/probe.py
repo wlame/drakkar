@@ -103,6 +103,99 @@ def _validate_column_renderer(col: ProbeDetailsColumn, *, where: str) -> None:
         raise ProbeDetailsConfigError(f'{where}: renderer is exclusive with link_template/badge_colors/format')
 
 
+def _check_group_by(view: str, group_by: tuple[str, ...] | list[str] | None) -> None:
+    """``group_by`` is required for, and only valid with, the ``tree`` view."""
+    if view == 'tree':
+        names = list(group_by or [])
+        if not names:
+            raise ProbeDetailsConfigError(
+                "probe_field: view 'tree' requires group_by=(...) naming 1-4 row-model fields"
+            )
+        if len(names) > TREE_MAX_DEPTH:
+            raise ProbeDetailsConfigError(f'probe_field: group_by allows at most {TREE_MAX_DEPTH} levels')
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ProbeDetailsConfigError('probe_field: group_by entries must be non-empty strings')
+        # dict.fromkeys, not set(): this module's `set` verb shadows the
+        # builtin (see the note above the logging-like API below).
+        if len(dict.fromkeys(names)) != len(names):
+            raise ProbeDetailsConfigError('probe_field: group_by entries must be unique')
+    elif group_by is not None:
+        raise ProbeDetailsConfigError("probe_field: group_by is only valid with view='tree'")
+
+
+def _check_badge(view: str, badge_colors: dict[str, str] | None, link_template: str | None) -> None:
+    """``badge_colors`` is required for, and only valid with, the ``badge`` view; every color must be known."""
+    if view == 'badge':
+        if not badge_colors:
+            raise ProbeDetailsConfigError("probe_field: view 'badge' requires badge_colors={value: color}")
+        if link_template is not None:
+            raise ProbeDetailsConfigError("probe_field: link_template is not valid with view 'badge'")
+    elif badge_colors is not None:
+        raise ProbeDetailsConfigError("probe_field: badge_colors requires view 'badge' (or a Column option)")
+    if badge_colors:
+        for value_name, color in badge_colors.items():
+            if color not in BADGE_COLOR_NAMES:
+                raise ProbeDetailsConfigError(
+                    f"probe_field: unknown color '{color}' for badge value '{value_name}' "
+                    f'(expected one of {BADGE_COLOR_NAMES})'
+                )
+
+
+def _check_string_options(view: str, format: str | None, link_template: str | None) -> None:
+    """``format`` and ``link_template`` are valid only with the ``string`` view."""
+    if format is not None and format not in FORMAT_KINDS:
+        raise ProbeDetailsConfigError(f"probe_field: unknown format '{format}' (expected one of {FORMAT_KINDS})")
+    if format is not None and view not in ('string',):
+        raise ProbeDetailsConfigError("probe_field: format is only valid with view 'string'")
+    if link_template is not None and view not in ('string',):
+        raise ProbeDetailsConfigError("probe_field: link_template is only valid with view 'string'")
+    if link_template is not None:
+        _validate_template(link_template, where='probe_field', row_fields=None)
+
+
+def _check_renderer(view: str, renderer: str | None) -> None:
+    """``renderer`` is required for, and only valid with, the ``custom`` view."""
+    if view == 'custom':
+        if not renderer:
+            raise ProbeDetailsConfigError("probe_field: view 'custom' requires renderer='name'")
+    elif renderer is not None:
+        raise ProbeDetailsConfigError("probe_field: renderer is only valid with view='custom'")
+    if renderer is not None:
+        _validate_renderer_name(renderer, where='probe_field')
+
+
+def _check_row_view_options(
+    view: str,
+    hint: str | None,
+    columns: list[str] | dict[str, Column] | None,
+    detail: Detail | None,
+    link_template: str | None,
+) -> None:
+    """``columns`` and ``detail`` belong to the row views; ``hint`` and ``link_template`` do not mix with them."""
+    if hint is not None and view in _ROW_VIEWS:
+        raise ProbeDetailsConfigError('probe_field: hint on row-bearing views belongs on a Column')
+    if columns is not None and view not in _ROW_VIEWS:
+        raise ProbeDetailsConfigError("probe_field: columns is only valid with views 'table', 'tables', 'tree'")
+    if detail is not None and view not in _ROW_VIEWS:
+        raise ProbeDetailsConfigError("probe_field: detail is only valid with views 'table', 'tables', 'tree'")
+    if link_template is not None and detail is not None:
+        raise ProbeDetailsConfigError('probe_field: link_template and detail are mutually exclusive')
+
+
+def _columns_option(columns: list[str] | dict[str, Column] | None) -> dict[str, Column] | None:
+    """The ``columns`` option as a mapping of column name to its options."""
+    columns_map: dict[str, Column] | None = None
+    if columns is not None:
+        # dict.fromkeys, not set(): this module's `set` verb shadows the
+        # builtin (see the note above the logging-like API below).
+        if not isinstance(columns, dict) and len(dict.fromkeys(columns)) != len(columns):
+            raise ProbeDetailsConfigError('probe_field: duplicate column name in columns')
+        columns_map = dict(columns) if isinstance(columns, dict) else {name: Column() for name in columns}
+        if not columns_map:
+            raise ProbeDetailsConfigError('probe_field: columns must not be empty')
+    return columns_map
+
+
 def probe_field(
     *,
     section: str,
@@ -133,68 +226,12 @@ def probe_field(
         raise ProbeDetailsConfigError(f"probe_field: unknown view '{view}' (expected one of {_VIEW_KINDS})")
     if not section:
         raise ProbeDetailsConfigError('probe_field: section must be a non-empty string')
-    if view == 'tree':
-        names = list(group_by or [])
-        if not names:
-            raise ProbeDetailsConfigError(
-                "probe_field: view 'tree' requires group_by=(...) naming 1-4 row-model fields"
-            )
-        if len(names) > TREE_MAX_DEPTH:
-            raise ProbeDetailsConfigError(f'probe_field: group_by allows at most {TREE_MAX_DEPTH} levels')
-        if any(not isinstance(name, str) or not name for name in names):
-            raise ProbeDetailsConfigError('probe_field: group_by entries must be non-empty strings')
-        # dict.fromkeys, not set(): this module's `set` verb shadows the
-        # builtin (see the note above the logging-like API below).
-        if len(dict.fromkeys(names)) != len(names):
-            raise ProbeDetailsConfigError('probe_field: group_by entries must be unique')
-    elif group_by is not None:
-        raise ProbeDetailsConfigError("probe_field: group_by is only valid with view='tree'")
-    if view == 'badge':
-        if not badge_colors:
-            raise ProbeDetailsConfigError("probe_field: view 'badge' requires badge_colors={value: color}")
-        if link_template is not None:
-            raise ProbeDetailsConfigError("probe_field: link_template is not valid with view 'badge'")
-    elif badge_colors is not None:
-        raise ProbeDetailsConfigError("probe_field: badge_colors requires view 'badge' (or a Column option)")
-    if badge_colors:
-        for value_name, color in badge_colors.items():
-            if color not in BADGE_COLOR_NAMES:
-                raise ProbeDetailsConfigError(
-                    f"probe_field: unknown color '{color}' for badge value '{value_name}' "
-                    f'(expected one of {BADGE_COLOR_NAMES})'
-                )
-    if format is not None and format not in FORMAT_KINDS:
-        raise ProbeDetailsConfigError(f"probe_field: unknown format '{format}' (expected one of {FORMAT_KINDS})")
-    if format is not None and view not in ('string',):
-        raise ProbeDetailsConfigError("probe_field: format is only valid with view 'string'")
-    if link_template is not None and view not in ('string',):
-        raise ProbeDetailsConfigError("probe_field: link_template is only valid with view 'string'")
-    if link_template is not None:
-        _validate_template(link_template, where='probe_field', row_fields=None)
-    if view == 'custom':
-        if not renderer:
-            raise ProbeDetailsConfigError("probe_field: view 'custom' requires renderer='name'")
-    elif renderer is not None:
-        raise ProbeDetailsConfigError("probe_field: renderer is only valid with view='custom'")
-    if renderer is not None:
-        _validate_renderer_name(renderer, where='probe_field')
-    if hint is not None and view in _ROW_VIEWS:
-        raise ProbeDetailsConfigError('probe_field: hint on row-bearing views belongs on a Column')
-    if columns is not None and view not in _ROW_VIEWS:
-        raise ProbeDetailsConfigError("probe_field: columns is only valid with views 'table', 'tables', 'tree'")
-    if detail is not None and view not in _ROW_VIEWS:
-        raise ProbeDetailsConfigError("probe_field: detail is only valid with views 'table', 'tables', 'tree'")
-    if link_template is not None and detail is not None:
-        raise ProbeDetailsConfigError('probe_field: link_template and detail are mutually exclusive')
-    columns_map: dict[str, Column] | None = None
-    if columns is not None:
-        # dict.fromkeys, not set(): this module's `set` verb shadows the
-        # builtin (see the note above the logging-like API below).
-        if not isinstance(columns, dict) and len(dict.fromkeys(columns)) != len(columns):
-            raise ProbeDetailsConfigError('probe_field: duplicate column name in columns')
-        columns_map = dict(columns) if isinstance(columns, dict) else {name: Column() for name in columns}
-        if not columns_map:
-            raise ProbeDetailsConfigError('probe_field: columns must not be empty')
+    _check_group_by(view, group_by)
+    _check_badge(view, badge_colors, link_template)
+    _check_string_options(view, format, link_template)
+    _check_renderer(view, renderer)
+    _check_row_view_options(view, hint, columns, detail, link_template)
+    columns_map = _columns_option(columns)
     extra = {
         _METADATA_KEY: {
             'section': section,
@@ -388,30 +425,24 @@ def _row_model_of(annotation: Any, view: str) -> type[BaseModel] | None:
     return None
 
 
+# The field type each row-bearing view needs, as the error message names it.
+_ROW_VIEW_SHAPES: dict[str, str] = {
+    'table': 'list[RowModel]',
+    'tables': 'dict[str, list[RowModel]]',
+    'tree': 'list[RowModel]',
+}
+
+
 def _validate_view(model: type[BaseModel], name: str, view: str, annotation: Any) -> type[BaseModel] | None:
     """Check the field type fits the declared view. Returns the row model for tables."""
     ann = _unwrap_optional(annotation)
     origin = typing.get_origin(ann)
-    if view == 'table':
+    if view in _ROW_VIEW_SHAPES:
         row = _row_model_of(annotation, view)
         if row is None:
             raise ProbeDetailsConfigError(
-                f"{model.__name__}.{name}: view 'table' requires list[RowModel] where RowModel is a BaseModel"
-            )
-        return row
-    if view == 'tables':
-        row = _row_model_of(annotation, view)
-        if row is None:
-            raise ProbeDetailsConfigError(
-                f"{model.__name__}.{name}: view 'tables' requires dict[str, list[RowModel]] "
+                f"{model.__name__}.{name}: view '{view}' requires {_ROW_VIEW_SHAPES[view]} "
                 'where RowModel is a BaseModel'
-            )
-        return row
-    if view == 'tree':
-        row = _row_model_of(annotation, view)
-        if row is None:
-            raise ProbeDetailsConfigError(
-                f"{model.__name__}.{name}: view 'tree' requires list[RowModel] where RowModel is a BaseModel"
             )
         return row
     if view == 'keyvalue':
@@ -436,6 +467,92 @@ def _validate_view(model: type[BaseModel], name: str, view: str, annotation: Any
             f"{model.__name__}.{name}: view '{view}' requires a scalar field (str/int/float/bool)"
         )
     return None
+
+
+def _validate_group_by_fields(group_by: list[str], where: str, row_model: type[BaseModel]) -> None:
+    """Check that every ``group_by`` name is a field of the row model."""
+    for key_name in group_by:
+        if key_name not in row_model.model_fields:
+            raise ProbeDetailsConfigError(
+                f"{where}: group_by names '{key_name}', which is not a field of {row_model.__name__}"
+            )
+
+
+def _columns_from_map(
+    columns_map: dict[str, Column], where: str, row_model: type[BaseModel]
+) -> list[ProbeDetailsColumn]:
+    """Build the wire columns from the declared ``columns`` and check each one against the row model."""
+    row_fields = row_model.model_fields
+    for col_name in columns_map:
+        if col_name not in row_fields:
+            raise ProbeDetailsConfigError(
+                f"{where}: columns names '{col_name}', which is not a field of {row_model.__name__}"
+            )
+    columns = [
+        ProbeDetailsColumn(
+            key=col_name,
+            label=opts.label or _prettify(col_name),
+            link_template=opts.link_template,
+            badge_colors=opts.badge_colors,
+            format=opts.format,
+            hint=opts.hint,
+            renderer=opts.renderer,
+        )
+        for col_name, opts in columns_map.items()
+    ]
+    for col in columns:
+        for template in (col.link_template, col.hint):
+            if template:
+                _validate_template(template, where=f'{where}.{col.key}', row_fields=row_fields)
+        if col.badge_colors is not None and not col.badge_colors:
+            raise ProbeDetailsConfigError(f'{where}.{col.key}: badge_colors must not be empty')
+        if col.badge_colors:
+            for value_name, color in col.badge_colors.items():
+                if color not in BADGE_COLOR_NAMES:
+                    raise ProbeDetailsConfigError(
+                        f"{where}.{col.key}: unknown color '{color}' for badge value "
+                        f"'{value_name}' (expected one of {BADGE_COLOR_NAMES})"
+                    )
+        _validate_column_renderer(col, where=f'{where}.{col.key}')
+    return columns
+
+
+def _validate_detail(detail: Detail, where: str, row_model: type[BaseModel]) -> None:
+    """Check a row detail: its title template and every element."""
+    row_fields = row_model.model_fields
+    if not detail.elements:
+        raise ProbeDetailsConfigError(f'{where}: detail requires at least one element')
+    if detail.title:
+        _validate_template(detail.title, where=where, row_fields=row_fields)
+    for i, element in enumerate(detail.elements):
+        el_where = f'{where}.detail[{i}]'
+        _validate_detail_element(element, el_where, row_model)
+
+
+def _validate_detail_element(element: Any, el_where: str, row_model: type[BaseModel]) -> None:
+    """Check one detail element: a ``links`` element or one that shows a row field."""
+    row_fields = row_model.model_fields
+
+    if element.view == 'links':
+        if element.field is not None or not element.links:
+            raise ProbeDetailsConfigError(f"{el_where}: view 'links' requires links=[Link(...)] and no field")
+        if element.renderer is not None:
+            raise ProbeDetailsConfigError(f"{el_where}: renderer is only valid with view='custom'")
+        for link in element.links:
+            _validate_template(link.template, where=el_where, row_fields=row_fields)
+    else:
+        if element.field is None or element.links is not None:
+            raise ProbeDetailsConfigError(f'{el_where}: element requires field= (links= is only for view=links)')
+        if element.field not in row_fields:
+            raise ProbeDetailsConfigError(
+                f"{el_where}: names '{element.field}', which is not a field of {row_model.__name__}"
+            )
+        if element.view == 'custom':
+            if not element.renderer:
+                raise ProbeDetailsConfigError(f"{el_where}: view 'custom' requires renderer='name'")
+            _validate_renderer_name(element.renderer, where=el_where)
+        elif element.renderer is not None:
+            raise ProbeDetailsConfigError(f"{el_where}: renderer is only valid with view='custom'")
 
 
 def build_layout(model: type[BaseModel]) -> ProbeDetailsLayout:
@@ -464,12 +581,7 @@ def build_layout(model: type[BaseModel]) -> ProbeDetailsLayout:
         if view == 'tree' and row_model is not None and group_by:
             # probe_field already validated shape (non-empty, <=TREE_MAX_DEPTH,
             # unique); membership needs the row model, so it lives here.
-            for key_name in group_by:
-                if key_name not in row_model.model_fields:
-                    raise ProbeDetailsConfigError(
-                        f"{model.__name__}.{name}: group_by names '{key_name}', "
-                        f'which is not a field of {row_model.__name__}'
-                    )
+            _validate_group_by_fields(group_by, f'{model.__name__}.{name}', row_model)
         link_template = meta.get('link_template')
         badge_colors = meta.get('badge_colors')
         fmt = meta.get('format')
@@ -479,70 +591,10 @@ def build_layout(model: type[BaseModel]) -> ProbeDetailsLayout:
         detail: Detail | None = meta.get('detail')
         where = f'{model.__name__}.{name}'
         if row_model is not None:
-            row_fields = row_model.model_fields
             if columns_map is not None:
-                for col_name in columns_map:
-                    if col_name not in row_fields:
-                        raise ProbeDetailsConfigError(
-                            f"{where}: columns names '{col_name}', which is not a field of {row_model.__name__}"
-                        )
-                columns = [
-                    ProbeDetailsColumn(
-                        key=col_name,
-                        label=opts.label or _prettify(col_name),
-                        link_template=opts.link_template,
-                        badge_colors=opts.badge_colors,
-                        format=opts.format,
-                        hint=opts.hint,
-                        renderer=opts.renderer,
-                    )
-                    for col_name, opts in columns_map.items()
-                ]
-                for col in columns:
-                    for template in (col.link_template, col.hint):
-                        if template:
-                            _validate_template(template, where=f'{where}.{col.key}', row_fields=row_fields)
-                    if col.badge_colors is not None and not col.badge_colors:
-                        raise ProbeDetailsConfigError(f'{where}.{col.key}: badge_colors must not be empty')
-                    if col.badge_colors:
-                        for value_name, color in col.badge_colors.items():
-                            if color not in BADGE_COLOR_NAMES:
-                                raise ProbeDetailsConfigError(
-                                    f"{where}.{col.key}: unknown color '{color}' for badge value "
-                                    f"'{value_name}' (expected one of {BADGE_COLOR_NAMES})"
-                                )
-                    _validate_column_renderer(col, where=f'{where}.{col.key}')
+                columns = _columns_from_map(columns_map, where, row_model)
             if detail is not None:
-                if not detail.elements:
-                    raise ProbeDetailsConfigError(f'{where}: detail requires at least one element')
-                if detail.title:
-                    _validate_template(detail.title, where=where, row_fields=row_fields)
-                for i, element in enumerate(detail.elements):
-                    el_where = f'{where}.detail[{i}]'
-                    if element.view == 'links':
-                        if element.field is not None or not element.links:
-                            raise ProbeDetailsConfigError(
-                                f"{el_where}: view 'links' requires links=[Link(...)] and no field"
-                            )
-                        if element.renderer is not None:
-                            raise ProbeDetailsConfigError(f"{el_where}: renderer is only valid with view='custom'")
-                        for link in element.links:
-                            _validate_template(link.template, where=el_where, row_fields=row_fields)
-                    else:
-                        if element.field is None or element.links is not None:
-                            raise ProbeDetailsConfigError(
-                                f'{el_where}: element requires field= (links= is only for view=links)'
-                            )
-                        if element.field not in row_fields:
-                            raise ProbeDetailsConfigError(
-                                f"{el_where}: names '{element.field}', which is not a field of {row_model.__name__}"
-                            )
-                        if element.view == 'custom':
-                            if not element.renderer:
-                                raise ProbeDetailsConfigError(f"{el_where}: view 'custom' requires renderer='name'")
-                            _validate_renderer_name(element.renderer, where=el_where)
-                        elif element.renderer is not None:
-                            raise ProbeDetailsConfigError(f"{el_where}: renderer is only valid with view='custom'")
+                _validate_detail(detail, where, row_model)
         if link_template:
             _validate_template(link_template, where=where, row_fields=None)
         if hint and row_model is None:

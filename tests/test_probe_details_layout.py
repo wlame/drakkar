@@ -304,3 +304,55 @@ class ParityDetails(BaseModel):
 def test_layout_matches_cross_backend_golden_fixture():
     golden = json.loads(pathlib.Path('tests/fixtures/probe_user_details_layout.json').read_text())
     assert build_layout(ParityDetails).model_dump() == golden
+
+
+# --- exact messages of the declaration rules ---
+
+
+@pytest.mark.parametrize(
+    ('view', 'options', 'shape'),
+    [
+        ('table', {}, 'list[RowModel]'),
+        ('tables', {}, 'dict[str, list[RowModel]]'),
+        ('tree', {'group_by': ('item_id',)}, 'list[RowModel]'),
+    ],
+)
+def test_build_layout_names_the_field_type_a_row_view_needs(view, options, shape):
+    class Wrong(BaseModel):
+        rows: int = probe_field(section='S', view=view, default=0, **options)
+
+    with pytest.raises(ProbeDetailsConfigError) as raised:
+        build_layout(Wrong)
+
+    assert str(raised.value) == f"Wrong.rows: view '{view}' requires {shape} where RowModel is a BaseModel"
+
+
+@pytest.mark.parametrize(
+    ('options', 'message'),
+    [
+        ({'view': 'tree'}, "probe_field: view 'tree' requires group_by=(...) naming 1-4 row-model fields"),
+        ({'view': 'tree', 'group_by': ('a', 'a')}, 'probe_field: group_by entries must be unique'),
+        ({'view': 'string', 'group_by': ('a',)}, "probe_field: group_by is only valid with view='tree'"),
+        ({'view': 'badge'}, "probe_field: view 'badge' requires badge_colors={value: color}"),
+        (
+            {'view': 'string', 'badge_colors': {'ok': 'green'}},
+            "probe_field: badge_colors requires view 'badge' (or a Column option)",
+        ),
+        ({'view': 'dict', 'format': 'bytes'}, "probe_field: format is only valid with view 'string'"),
+        ({'view': 'dict', 'link_template': '/x'}, "probe_field: link_template is only valid with view 'string'"),
+        ({'view': 'custom'}, "probe_field: view 'custom' requires renderer='name'"),
+        ({'view': 'string', 'renderer': 'chart'}, "probe_field: renderer is only valid with view='custom'"),
+        ({'view': 'table', 'hint': 'h'}, 'probe_field: hint on row-bearing views belongs on a Column'),
+        (
+            {'view': 'string', 'columns': ['a']},
+            "probe_field: columns is only valid with views 'table', 'tables', 'tree'",
+        ),
+        ({'view': 'table', 'columns': ['a', 'a']}, 'probe_field: duplicate column name in columns'),
+        ({'view': 'table', 'columns': []}, 'probe_field: columns must not be empty'),
+    ],
+)
+def test_probe_field_reports_each_broken_rule_with_its_message(options, message):
+    with pytest.raises(ProbeDetailsConfigError) as raised:
+        probe_field(section='S', default=None, **options)
+
+    assert str(raised.value) == message
