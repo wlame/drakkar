@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from starlette.datastructures import QueryParams
 
 from drakkar.cache import LWW_UPSERT_SQL, Cache, CacheEngine, CacheScope
 from drakkar.cache.changes import MARK_KEY_MAX_CHARS, ChangesQuery, parse_changes_query
@@ -84,6 +85,21 @@ def test_parse_changes_query_matches_the_shared_fixture(case):
             scopes=tuple(expected['scopes']),
             after=None if expected['after'] is None else (expected['after'][0], expected['after'][1]),
             limit=expected['limit'],
+        )
+
+
+@pytest.mark.parametrize('case', FIXTURE['raw_query'], ids=[case['name'] for case in FIXTURE['raw_query']])
+def test_parse_changes_query_of_a_raw_query_matches_the_shared_fixture(case):
+    # The route reads dict(request.query_params); QueryParams parses the raw text the same way.
+    parsed = parse_changes_query(dict(QueryParams(case['query'])))
+
+    if case['status'] == 400:
+        assert parsed == case['body']['error']
+    else:
+        assert parsed == ChangesQuery(
+            scopes=tuple(case['parsed']['scopes']),
+            after=None if case['parsed']['after'] is None else tuple(case['parsed']['after']),
+            limit=case['parsed']['limit'],
         )
 
 

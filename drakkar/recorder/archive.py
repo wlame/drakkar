@@ -12,9 +12,14 @@ A pass has one of two scopes:
   ``<cluster>-<from>__<to>.db.gz``.
 * **One worker's own files** (``only_worker``). It takes only the sealed files
   of that worker and writes ``<cluster>-<worker>-<from>__<to>.db.gz``. Its
-  retention and its sweep touch only that worker's names, so workers that
+  archiving and its sweep touch only that worker's names, so workers that
   share a folder never take each other's files. It has no election: no other
-  worker reads or deletes these files.
+  worker archives these files. Its retention also deletes the archives and
+  the sealed files of other names of the cluster once their window is older
+  than ``recorder.archive.retention``: no own-scope pass archives another
+  name's files, so the files of a name that stopped for good (an old pod
+  name, a dead worker's folder that the orphan pass sealed) would otherwise
+  stay for ever.
 
 Three ideas carry the design:
 
@@ -465,6 +470,8 @@ def _archive_folder(
         return completed
     if archive.retention > 0:
         _expire_archives(target, now, archive.retention)
+        if target.worker is not None:
+            _expire_sealed_of_other_names(target, now, archive)
     return completed
 
 
@@ -844,18 +851,33 @@ def _observe_footprint_in(folder: str, cluster: str, worker: str | None = None) 
     recorder_archive_files.set(count)
 
 
+def _expires_archive_of(target: _PassTarget, owner: str) -> bool:
+    """Whether this pass expires the archives of ``owner``.
+
+    A cluster pass expires only the cluster's archives. An own-scope pass
+    expires the archives of every owner of its cluster (the cluster, or the
+    cluster and a worker name). No own-scope pass ever archives another
+    worker's files, so the archives of a worker name that stopped for good
+    (an old pod name) would otherwise stay for ever. Every worker of a
+    cluster has the same retention, so expiring another name's archive by it
+    deletes nothing that its own pass would keep.
+    """
+    if target.worker is None:
+        return owner == target.owner
+    return owner == target.cluster or owner.startswith(f'{target.cluster}-')
+
+
 def _expire_archives(target: _PassTarget, now: float, retention_days: int) -> None:
-    """Delete the archives of this pass's owner whose window ended too long ago.
+    """Delete the archives of the owners this pass expires whose window ended too long ago.
 
     The end timestamp comes from the file name, so no archive is opened.
-    The owner is compared exactly: an archive of another cluster or another
-    worker (``search-w-1`` for the owner ``search-w``) is never touched.
+    See :func:`_expires_archive_of` for which owners a pass covers.
     """
     cluster = target.cluster
     cutoff = now - retention_days * 86400
     for path in Path(target.folder).glob(f'*{ARCHIVE_SUFFIX}'):
         match = ARCHIVE_NAME_RE.fullmatch(path.name)
-        if match is None or match['owner'] != target.owner:
+        if match is None or not _expires_archive_of(target, match['owner']):
             continue
         try:
             end_ts = _parse_bound(match['to_ts'])
@@ -881,6 +903,42 @@ def _expire_archives(target: _PassTarget, now: float, retention_days: int) -> No
             name=path.name,
             window_end=end_ts,
             retention_days=retention_days,
+        )
+
+
+def _expire_sealed_of_other_names(target: _PassTarget, now: float, archive: RecorderArchiveConfig) -> None:
+    """Delete the sealed files of other worker names whose window ended more than the retention ago.
+
+    Own scope only. Such files come from a worker name that no process uses
+    any more: the orphan pass sealed and published them, or the worker
+    stopped for good before its own pass archived them. No own-scope pass
+    archives another name's files, so without this they stay for ever. The
+    rule is the one an archive of that window would follow: the window that
+    holds the file's start ends before ``now - retention``. A live worker
+    archives its own files long before that (the retention covers
+    ``due_after`` plus one window), so only files of stopped names reach
+    it. A file another pass deleted first is skipped.
+    """
+    window_seconds = archive.window * SECONDS_PER_HOUR
+    cutoff = now - archive.retention * 86400
+    for path in list_sealed(target.folder):
+        name = os.path.basename(path)
+        if target.worker is not None and is_own_sealed_name(name, target.worker):
+            continue
+        start = parse_db_start_ts(path)
+        window_end = (start // window_seconds + 1) * window_seconds
+        if window_end >= cutoff:
+            continue
+        _remove_with_sidecars(path)
+        with contextlib.suppress(OSError):
+            os.unlink(meta_path(path))
+        logger.info(
+            'recorder_sealed_expired',
+            category='recorder',
+            cluster=target.cluster,
+            name=name,
+            window_end=window_end,
+            retention_days=archive.retention,
         )
 
 

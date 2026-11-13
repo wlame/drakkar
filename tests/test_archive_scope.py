@@ -236,22 +236,79 @@ def test_own_scope_pass_can_stop_between_windows(tmp_path):
 # --- what an own-scope pass prunes ----------------------------------------
 
 
-def test_own_scope_prunes_only_this_workers_archives(tmp_path):
+def test_own_scope_expires_every_old_archive_of_its_cluster_and_keeps_the_recent_ones(tmp_path):
     folder = history_folder(tmp_path)
     now = time.time()
     old_mine = _make_archive(folder, now - 10 * DAY, worker=WORKER)
     recent_mine = _make_archive(folder, now - DAY, worker=WORKER)
     old_neighbour = _make_archive(folder, now - 10 * DAY, worker=NEIGHBOUR)
+    recent_neighbour = _make_archive(folder, now - DAY, worker=NEIGHBOUR)
     old_cluster = _make_archive(folder, now - 10 * DAY)
+    foreign = folder / archive_file_name('another-cluster', now - 11 * DAY, now - 10 * DAY)
+    foreign.write_bytes(b'not-really-gzip')
 
     with capture_logs() as logs:
         _own_pass(tmp_path, cfg=_archive_config(retention='3d'))
 
     assert not old_mine.exists()
+    assert not old_neighbour.exists()
+    assert not old_cluster.exists()
     assert recent_mine.exists()
-    assert old_neighbour.exists()
-    assert old_cluster.exists()
-    assert [entry['name'] for entry in logs if entry['event'] == 'recorder_archive_expired'] == [old_mine.name]
+    assert recent_neighbour.exists()
+    assert foreign.exists()
+    assert sorted(entry['name'] for entry in logs if entry['event'] == 'recorder_archive_expired') == sorted(
+        [old_mine.name, old_neighbour.name, old_cluster.name]
+    )
+
+
+def test_own_scope_expires_the_old_sealed_files_of_other_names_with_their_meta_files(tmp_path):
+    folder = history_folder(tmp_path)
+    now = time.time()
+    old_neighbour = make_sealed_db(folder, NEIGHBOUR, due_start(now, days_back=10))
+    recent_neighbour = make_sealed_db(folder, NEIGHBOUR, due_start(now))
+
+    with capture_logs() as logs:
+        _own_pass(tmp_path, cfg=_archive_config(retention='3d'))
+
+    assert not Path(old_neighbour).exists()
+    assert not Path(meta_path(old_neighbour)).exists()
+    assert Path(recent_neighbour).exists()
+    assert Path(meta_path(recent_neighbour)).exists()
+    expired = [entry for entry in logs if entry['event'] == 'recorder_sealed_expired']
+    assert [entry['name'] for entry in expired] == [os.path.basename(old_neighbour)]
+    assert expired[0]['retention_days'] == 3
+
+
+def test_own_scope_with_archives_kept_for_ever_expires_no_file_of_another_name(tmp_path):
+    folder = history_folder(tmp_path)
+    now = time.time()
+    old_neighbour = make_sealed_db(folder, NEIGHBOUR, due_start(now, days_back=400))
+    old_archive = _make_archive(folder, now - 400 * DAY, worker=NEIGHBOUR)
+
+    _own_pass(tmp_path, cfg=_archive_config(retention=0))
+
+    assert Path(old_neighbour).exists()
+    assert old_archive.exists()
+
+
+def test_cluster_scope_archives_old_sealed_files_instead_of_expiring_them(tmp_path):
+    folder = history_folder(tmp_path)
+    now = time.time()
+    old = make_sealed_db(folder, NEIGHBOUR, due_start(now, days_back=10))
+    fence = MagicMock(token='0123456789abcdef', provider_name='scripted')
+
+    with capture_logs() as logs:
+        run_archive_pass(
+            str(tmp_path / 'shared'),
+            cluster=CLUSTER,
+            instance=INSTANCE,
+            archive=_archive_config(retention='30d'),
+            fence=fence,
+        )
+
+    assert not Path(old).exists()
+    assert len(list_archives(str(folder))) == 1
+    assert not [entry for entry in logs if entry['event'] == 'recorder_sealed_expired']
 
 
 def test_cluster_scope_prunes_no_own_scope_archive(tmp_path):
@@ -407,22 +464,18 @@ def test_own_scope_archive_name_matches_the_fixture(case):
     assert match['owner'] == name.removesuffix(f'-{match["from_ts"]}__{match["to_ts"]}.db.gz')
 
 
-def test_own_scope_of_a_worker_name_holding_the_time_format_takes_and_prunes_only_its_own(tmp_path):
+def test_own_scope_of_a_worker_name_holding_the_time_format_takes_only_its_own_files(tmp_path):
     folder = history_folder(tmp_path)
     now = time.time()
     start = due_start(now)
     worker = 'w-2026-07-14__00_00_00'
     mine = make_sealed_db(folder, worker, start)
     other = make_sealed_db(folder, WORKER, start)
-    old_mine = _make_archive(folder, now - 10 * DAY, worker=worker)
-    old_other = _make_archive(folder, now - 10 * DAY, worker=WORKER)
 
-    _own_pass(tmp_path, worker=worker, cfg=_archive_config(retention='3d'))
+    _own_pass(tmp_path, worker=worker)
 
     assert not Path(mine).exists()
     assert Path(other).exists()
-    assert not old_mine.exists()
-    assert old_other.exists()
 
 
 @pytest.mark.parametrize('case', FIXTURE['own_sealed_files'], ids=lambda case: f'{case["worker"]}:{case["file"]}')

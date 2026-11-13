@@ -1,5 +1,5 @@
 {
-  "_comment": "GET /api/v1/peer/cache/changes, shared by every implementation. validation: query parameters (last value of a repeated parameter already taken) and either the 400 answer or the parsed query (scopes in the order cluster, global; after is [after_ms, after_key] or null). page: the cache rows of worker w-a seeded with the LWW upsert, the server clock now_ms, and for each request the expected answer (rows of other origins, the local scope and rows expired at now_ms are never served; order is (updated_at_ms, key); more is true when rows remain past limit).",
+  "_comment": "GET /api/v1/peer/cache/changes, shared by every implementation. validation: query parameters (last value of a repeated parameter already taken) and either the 400 answer or the parsed query (scopes in the order cluster, global; after is [after_ms, after_key] or null). page: the cache rows of worker w-a seeded with the LWW upsert, the server clock now_ms, and for each request the expected answer (rows of other origins, the local scope and rows expired at now_ms are never served; order is (updated_at_ms, key); more is true when rows remain past limit). raw_query: the raw query text of the request, read as a form-encoded query: pairs split on & only (a ; stays in the value), empty pairs skipped, a name with no = has the value \"\", + is a space, a %XX escape with two hex digits (either case) is decoded and any other % stays as text, the decoded bytes are UTF-8, and a repeated parameter keeps its last value; then the same checks as validation, with the parsed query under parsed.",
   "validation": [
     {
       "name": "scopes_missing",
@@ -648,5 +648,192 @@
         }
       }
     ]
-  }
+  },
+  "raw_query": [
+    {
+      "name": "bad_percent_escape_stays_text",
+      "query": "scopes=global&after_ms=1&after_key=%zz",
+      "status": 200,
+      "parsed": {
+        "scopes": [
+          "global"
+        ],
+        "after": [
+          1,
+          "%zz"
+        ],
+        "limit": 500
+      }
+    },
+    {
+      "name": "cut_percent_escape_at_the_end_stays_text",
+      "query": "scopes=global&after_ms=1&after_key=a%2",
+      "status": 200,
+      "parsed": {
+        "scopes": [
+          "global"
+        ],
+        "after": [
+          1,
+          "a%2"
+        ],
+        "limit": 500
+      }
+    },
+    {
+      "name": "lone_percent_stays_text",
+      "query": "scopes=global&after_ms=1&after_key=%",
+      "status": 200,
+      "parsed": {
+        "scopes": [
+          "global"
+        ],
+        "after": [
+          1,
+          "%"
+        ],
+        "limit": 500
+      }
+    },
+    {
+      "name": "semicolon_stays_in_the_value",
+      "query": "scopes=cluster&after_ms=1;x&after_key=a",
+      "status": 400,
+      "body": {
+        "error": "after_ms must be an integer"
+      }
+    },
+    {
+      "name": "semicolon_does_not_split_pairs",
+      "query": "scopes=cluster;limit=5",
+      "status": 400,
+      "body": {
+        "error": "scopes must be cluster, global or both"
+      }
+    },
+    {
+      "name": "plus_is_a_space",
+      "query": "scopes=cluster&after_ms=1&after_key=a+b%20c",
+      "status": 200,
+      "parsed": {
+        "scopes": [
+          "cluster"
+        ],
+        "after": [
+          1,
+          "a b c"
+        ],
+        "limit": 500
+      }
+    },
+    {
+      "name": "escaped_plus_is_a_plus",
+      "query": "scopes=cluster&after_ms=1&after_key=a%2Bb",
+      "status": 200,
+      "parsed": {
+        "scopes": [
+          "cluster"
+        ],
+        "after": [
+          1,
+          "a+b"
+        ],
+        "limit": 500
+      }
+    },
+    {
+      "name": "lower_case_hex_escape",
+      "query": "scopes=cluster&after_ms=1&after_key=%c3%a9",
+      "status": 200,
+      "parsed": {
+        "scopes": [
+          "cluster"
+        ],
+        "after": [
+          1,
+          "é"
+        ],
+        "limit": 500
+      }
+    },
+    {
+      "name": "name_without_equals_has_an_empty_value",
+      "query": "scopes=cluster&after_ms=5&after_key",
+      "status": 200,
+      "parsed": {
+        "scopes": [
+          "cluster"
+        ],
+        "after": [
+          5,
+          ""
+        ],
+        "limit": 500
+      }
+    },
+    {
+      "name": "empty_pairs_are_skipped",
+      "query": "&&scopes=cluster&&",
+      "status": 200,
+      "parsed": {
+        "scopes": [
+          "cluster"
+        ],
+        "after": null,
+        "limit": 500
+      }
+    },
+    {
+      "name": "escaped_name",
+      "query": "scop%65s=global",
+      "status": 200,
+      "parsed": {
+        "scopes": [
+          "global"
+        ],
+        "after": null,
+        "limit": 500
+      }
+    },
+    {
+      "name": "repeated_parameter_keeps_the_last_value",
+      "query": "scopes=local&scopes=global&limit=7&limit=3",
+      "status": 200,
+      "parsed": {
+        "scopes": [
+          "global"
+        ],
+        "after": null,
+        "limit": 3
+      }
+    },
+    {
+      "name": "escaped_comma_splits_scopes",
+      "query": "scopes=cluster%2Cglobal",
+      "status": 200,
+      "parsed": {
+        "scopes": [
+          "cluster",
+          "global"
+        ],
+        "after": null,
+        "limit": 500
+      }
+    },
+    {
+      "name": "second_equals_stays_in_the_value",
+      "query": "scopes=cluster&after_ms=1&after_key=a=b",
+      "status": 200,
+      "parsed": {
+        "scopes": [
+          "cluster"
+        ],
+        "after": [
+          1,
+          "a=b"
+        ],
+        "limit": 500
+      }
+    }
+  ]
 }

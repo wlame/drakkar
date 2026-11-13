@@ -143,6 +143,55 @@ def test_take_own_lock_makes_the_folder_again_when_an_orphan_pass_renamed_it_awa
         lock.release()
 
 
+def test_take_own_lock_lock_on_a_removed_file_is_dropped_and_taken_again_in_a_new_folder(tmp_path, monkeypatch):
+    folder = tmp_path / 'own'
+    folder.mkdir()
+    staging = tmp_path / '.orphan-own-0123'
+    real_flock = fcntl.flock
+    calls: list[int] = []
+
+    def orphan_pass_wins_the_race(fd, operation):
+        calls.append(1)
+        if len(calls) == 1:
+            # Between our open and our flock: the orphan pass renames the
+            # folder, deletes the lock file and removes the staging folder.
+            folder.rename(staging)
+            (staging / OWNER_LOCK_NAME).unlink()
+            staging.rmdir()
+        real_flock(fd, operation)
+
+    monkeypatch.setattr(ownerlock.fcntl, 'flock', orphan_pass_wins_the_race)
+    lock = take_own_lock(str(folder))
+    try:
+        held = os.fstat(lock._fd)
+        at_path = os.lstat(folder / OWNER_LOCK_NAME)
+        assert (held.st_dev, held.st_ino) == (at_path.st_dev, at_path.st_ino)
+        assert len(calls) == 2
+    finally:
+        lock.release()
+
+
+def test_try_sibling_lock_lock_file_removed_before_the_flock_returns_none_and_closes_it(tmp_path, monkeypatch):
+    (tmp_path / OWNER_LOCK_NAME).write_text('')
+    closed: list[int] = []
+    real_flock = fcntl.flock
+    real_close = os.close
+
+    def removed_before_flock(fd, operation):
+        (tmp_path / OWNER_LOCK_NAME).unlink()
+        real_flock(fd, operation)
+
+    def recording_close(fd):
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(ownerlock.fcntl, 'flock', removed_before_flock)
+    monkeypatch.setattr(ownerlock.os, 'close', recording_close)
+
+    assert try_sibling_lock(str(tmp_path)) is None
+    assert len(closed) == 1
+
+
 def test_take_own_lock_second_holder_fails_with_the_folder_in_use_message(tmp_path, short_lock_wait):
     first = take_own_lock(str(tmp_path))
     try:

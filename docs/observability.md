@@ -1161,6 +1161,13 @@ byte-level spec. The short version:
 - **Merge results expire.** The pass also deletes UI merge results in
   `<storage.shared_dir>/merged/` older than `recorder.archive.merged_retention`
   (default 32; `0` keeps them), logging `recorder_merged_pruned`.
+- **Files of stopped names expire (own scope).** An own-scope pass also
+  deletes the archives of other names of its cluster, and their sealed
+  files with their meta files, once the window ended more than
+  `recorder.archive.retention` ago. It logs `recorder_archive_expired` for
+  an archive and `recorder_sealed_expired` (fields `cluster`, `name`,
+  `window_end`, `retention_days`) for a sealed file. With `retention: 0`
+  nothing expires.
 - **Opting out** (`recorder.archive.enabled: false`) disables the pass
   entirely — nothing then deletes sealed recorder files or merge results
   automatically, and a startup log line (`recorder_archiving_disabled`,

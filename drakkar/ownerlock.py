@@ -85,11 +85,19 @@ def _try_lock(folder: str, *, create: bool) -> OwnerLock | None:
     Raises ``FileNotFoundError`` when ``create`` is false and the folder has
     no lock file, and ``OSError`` for any other open failure (a symlink in
     place of the file is refused).
+
+    A lock taken on a file that is no longer at its path counts as not
+    taken (``None``), so the caller tries again: see
+    :func:`_still_at_path`.
     """
+    path = os.path.join(folder, OWNER_LOCK_NAME)
     flags = _OPEN_FLAGS | os.O_CREAT if create else _OPEN_FLAGS
-    fd = os.open(os.path.join(folder, OWNER_LOCK_NAME), flags, OWNER_LOCK_MODE)
+    fd = os.open(path, flags, OWNER_LOCK_MODE)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if not _still_at_path(fd, path):
+            os.close(fd)
+            return None
     except BlockingIOError:
         os.close(fd)
         return None
@@ -97,6 +105,23 @@ def _try_lock(folder: str, *, create: bool) -> OwnerLock | None:
         os.close(fd)
         raise
     return OwnerLock(folder, fd)
+
+
+def _still_at_path(fd: int, path: str) -> bool:
+    """Whether the open file ``fd`` is still the file at ``path``.
+
+    Between the open and the ``flock``, another worker's orphan pass can
+    take the lock, rename the folder away, delete the lock file and remove
+    the folder. The ``flock`` then succeeds on a file that no path names
+    any more, and the lock protects nothing. The device and inode of the
+    open file and of the path tell the two cases apart.
+    """
+    try:
+        at_path = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    opened = os.fstat(fd)
+    return (opened.st_dev, opened.st_ino) == (at_path.st_dev, at_path.st_ino)
 
 
 def take_own_lock(folder: str) -> OwnerLock:
