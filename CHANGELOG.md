@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A stop with no shutdown time left now counts and logs the rows that the recorder's Postgres writer drops (`drakkar_recorder_postgres_dropped_rows_total{reason="shutdown"}`, `recorder_postgres_rows_dropped`). Before, a writer thread that was slow to wake was stopped before its final stage ran, and the rows were dropped with no count and no log line.
 - Update `dnspython` to 2.9.2. This version fixes the advisory CVE-2026-128089 that `pip-audit` reports for 2.9.1.
 - A worker that restarts while another worker's orphan pass removes its old folder no longer holds its owner lock on a deleted file. The lock is taken again on the file that is at the path.
 

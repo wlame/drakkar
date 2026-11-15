@@ -291,6 +291,10 @@ class PostgresLoopThread:
 
     def __init__(self, name: str) -> None:
         self._loop = asyncio.new_event_loop()
+        # Coroutines posted with ``wait``: the loop's stop lets them end
+        # instead of cancelling them. Added and removed from other threads;
+        # one set operation each, so no lock.
+        self._must_finish: set[Coroutine[Any, Any, Any]] = set()
         self.thread = threading.Thread(target=self._serve, name=name, daemon=True)
         self.thread.start()
 
@@ -298,6 +302,12 @@ class PostgresLoopThread:
         asyncio.set_event_loop(self._loop)
         try:
             self._loop.run_forever()
+            # A coroutine posted with ``wait`` still counts and logs what it
+            # does, so it gets a short time to end first. A stop that follows
+            # its post at once would otherwise cancel it before its first step.
+            finishing = {task for task in asyncio.all_tasks(self._loop) if task.get_coro() in self._must_finish}
+            if finishing:
+                self._loop.run_until_complete(asyncio.wait(finishing, timeout=LOOP_DRAIN_SECONDS))
             # Coroutines still on the loop (a call its caller gave up on) are
             # cancelled, so none is destroyed while pending.
             pending = asyncio.all_tasks(self._loop)
@@ -332,9 +342,19 @@ class PostgresLoopThread:
         """Run ``factory()`` on the thread and wait at most ``timeout`` seconds; the coroutine is never cancelled.
 
         After a timeout the coroutine goes on to its end on the thread, for
-        work that must still count what it does, such as the final stage.
+        work that must still count what it does, such as the final stage. A
+        :meth:`stop` that comes before it ended gives it ``LOOP_DRAIN_SECONDS``
+        to end.
         """
-        future = asyncio.wrap_future(self.submit(factory))
+        coroutine = factory()
+        self._must_finish.add(coroutine)
+        try:
+            posted = self.submit(lambda: coroutine)
+        except RuntimeError:
+            self._must_finish.discard(coroutine)
+            raise
+        posted.add_done_callback(lambda _future: self._must_finish.discard(coroutine))
+        future = asyncio.wrap_future(posted)
         done, _ = await asyncio.wait({future}, timeout=timeout)
         if not done:
             raise TimeoutError

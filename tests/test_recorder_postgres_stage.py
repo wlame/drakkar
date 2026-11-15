@@ -817,6 +817,28 @@ async def test_stop_with_time_spent_drops_with_shutdown():
     assert [(line['reason'], line['rows'], line['error']) for line in lines] == [('shutdown', 6, '')]
 
 
+async def test_stop_with_time_spent_still_counts_the_drop_when_the_thread_wakes_late():
+    fake = RecorderFakePostgres()
+    rec = _recorder(fake)
+    await rec.start()
+    await _start_stage_p(rec)
+    _record(rec, 6)
+    dropped_before = _dropped()
+    timeouts_before = _calls('copy', 'timeout')
+    # The writer thread is busy while the stop posts the final stage, the
+    # close and the loop stop: all three reach its loop before it runs one.
+    rec._pg_thread._loop.call_soon_threadsafe(time.sleep, 0.05)
+
+    with capture_logs() as captured:
+        await rec.stop(timeout=0.0)
+
+    assert fake.copy_calls() == []
+    assert _calls('copy', 'timeout') == timeouts_before + 1
+    assert _dropped()['shutdown'] == dropped_before['shutdown'] + 6
+    lines = _logs(captured, 'recorder_postgres_rows_dropped')
+    assert [(line['reason'], line['rows'], line['error']) for line in lines] == [('shutdown', 6, '')]
+
+
 async def test_stop_with_time_spent_gives_the_thread_its_grace_and_logs_no_thread_failure():
     fake = RecorderFakePostgres()
     rec = _recorder(fake)
