@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Update `dnspython` to 2.9.2. This version fixes the advisory CVE-2026-128089 that `pip-audit` reports for 2.9.1.
 - A worker that restarts while another worker's orphan pass removes its old folder no longer holds its owner lock on a deleted file. The lock is taken again on the file that is at the path.
 
 ## [3.1.0] - 2026-11-11
