@@ -960,7 +960,8 @@ paths:
         batch per worker at a time (rows busy otherwise), at most 2 reads at
         once (1 with postgres); never starts the provider and never counts
         against the election's breaker. election is null when the worker runs
-        no cluster task.
+        no cluster task, also when it keeps an election only for the detach
+        budget.
       responses:
         '200':
           description: The election state and one row per cluster task.
@@ -1356,8 +1357,11 @@ paths:
         transition and answers 202 with the state at once. The outcome shows
         later in last_request. An operator detach of a worker that the
         handler detached takes the origin and replaces the deadline. 403
-        when ui.detach_enabled is false; 422 for a duration out of range or
-        a body that does not parse.
+        when ui.detach_enabled is false or the worker has no Kafka source;
+        422 for a duration out of range or a body that does not parse (with
+        the switch off, a body that does not parse may answer 422 before the
+        403; nothing is started in either case); 503 when the worker's main
+        loop does not answer within 5 s or is closed.
       requestBody:
         required: true
         content:
@@ -1380,11 +1384,20 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/DetachState'}
         '403':
-          description: ui.detach_enabled is false; detail carries the hint.
+          description: >-
+            ui.detach_enabled is false, or the worker has no Kafka source;
+            detail carries the hint.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Detail'}
         '422': {$ref: '#/components/responses/ValidationError'}
+        '503':
+          description: >-
+            The worker's main loop did not answer within 5 s, or is closed
+            because the worker stops. The request may or may not have started; read the GET.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Detail'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
   /api/v1/debug/attach:
@@ -1395,7 +1408,9 @@ paths:
       description: >-
         v1.33. An operator attach, started like a detach; answers 202 with
         the state at once. Idempotent: on an attached worker it changes
-        nothing. 403 when ui.detach_enabled is false.
+        nothing. 403 when ui.detach_enabled is false or the worker has no
+        Kafka source; 503 when the worker's main loop does not answer within
+        5 s or is closed.
       responses:
         '202':
           description: The transition started; the state at once.
@@ -1403,7 +1418,16 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/DetachState'}
         '403':
-          description: ui.detach_enabled is false; detail carries the hint.
+          description: >-
+            ui.detach_enabled is false, or the worker has no Kafka source;
+            detail carries the hint.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Detail'}
+        '503':
+          description: >-
+            The worker's main loop did not answer within 5 s, or is closed
+            because the worker stops. The request may or may not have started; read the GET.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Detail'}
@@ -2467,7 +2491,12 @@ components:
         # v1.33, optional: from the card's features.kafka.detached. True while
         # that worker is detached from its consumer group. Absent or null:
         # unknown (no Kafka source, or a backend that does not publish it).
-        detached: {type: [boolean, 'null']}
+        detached:
+          type: [boolean, 'null']
+          description: >-
+            v1.33. features.kafka.detached of the registry card: true while
+            the worker is detaching, detached or attaching, false while
+            attached; null or missing when unknown.
       required: [worker_name, url, is_current]
 
     ProcessorsReport:

@@ -9,6 +9,11 @@ POST that answers before its transition ends, and the auth gate.
 from __future__ import annotations
 
 import asyncio
+import gc
+import threading
+import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -17,6 +22,7 @@ from httpx import ASGITransport, AsyncClient
 from drakkar.config import DrakkarConfig, UIConfig
 from drakkar.detach import ACTION_DETACH, OUTCOME_DETACHED, REASON_MAX_CHARS, DetachController
 from drakkar.recorder import EventRecorder
+from drakkar.uiserver import server as server_module
 from drakkar.uiserver.server import create_ui_app
 from tests.conftest import kafka_connections
 
@@ -121,8 +127,12 @@ async def test_detach_with_a_duration_out_of_range_answers_422():
         long = await client.post(DETACH, json={'duration_seconds': 86401})
 
     assert short.status_code == 422
-    assert 'duration must be from 10 to 86400 seconds' in short.json()['detail']
+    (error,) = short.json()['detail']
+    assert error['loc'] == ['body', 'duration_seconds']
+    assert error['msg'] == 'duration must be from 10 to 86400 seconds, got 5.0'
+    assert error['type'] == 'value_error'
     assert long.status_code == 422
+    assert long.json()['detail'][0]['loc'] == ['body', 'duration_seconds']
     assert app.detach._tasks == set()
     assert app.detach.wire_state()['last_request'] is None
 
@@ -207,3 +217,75 @@ async def test_routes_need_the_token_when_one_is_configured():
     assert anonymous == [401, 401, 401]
     assert authed.status_code == 200
     assert app.detach._tasks == set()
+
+
+@contextmanager
+def _loop_in_thread(*, running: bool) -> Iterator[asyncio.AbstractEventLoop]:
+    """A second event loop on a thread of its own; ``running=False`` gives a loop that never answers."""
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True) if running else None
+    if thread is not None:
+        thread.start()
+    try:
+        yield loop
+    finally:
+        if thread is not None:
+            loop.call_soon_threadsafe(loop.stop)
+        else:
+            # The loop wakes up late: the queued dispatch runs and finds its request given up.
+            thread = threading.Thread(target=loop.run_until_complete, args=(asyncio.sleep(0.01),), daemon=True)
+            thread.start()
+        thread.join(timeout=5)
+        loop.close()
+
+
+async def test_attach_runs_the_request_on_the_main_loop_of_another_thread():
+    app = _app(_config())
+    asked_on: list[asyncio.AbstractEventLoop] = []
+    done = threading.Event()
+
+    async def recording_attach(**_kwargs: Any) -> None:
+        asked_on.append(asyncio.get_running_loop())
+        done.set()
+
+    app.detach.attach = recording_attach
+    with _loop_in_thread(running=True) as main_loop:
+        app.main_loop = main_loop
+        async with _client(app) as client:
+            resp = await client.post(ATTACH)
+        assert await asyncio.to_thread(done.wait, 5)
+
+    assert resp.status_code == 202
+    assert resp.json()['state'] == 'attached'
+    assert asked_on == [main_loop]
+
+
+async def test_post_routes_answer_503_when_the_main_loop_does_not_answer(monkeypatch):
+    monkeypatch.setattr(server_module, 'MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS', 0.05)
+    app = _app(_config())
+    with _loop_in_thread(running=False) as stuck_loop:
+        app.main_loop = stuck_loop
+        async with _client(app) as client:
+            detach = await client.post(DETACH, json={'duration_seconds': 60})
+            attach = await client.post(ATTACH)
+
+    assert (detach.status_code, attach.status_code) == (503, 503)
+    assert 'did not answer in time' in detach.json()['detail']
+    assert app.detach._tasks == set()
+
+
+async def test_post_routes_answer_503_when_the_main_loop_is_closed():
+    app = _app(_config())
+    closed_loop = asyncio.new_event_loop()
+    closed_loop.close()
+    app.main_loop = closed_loop
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        async with _client(app) as client:
+            detach = await client.post(DETACH, json={'duration_seconds': 60})
+            attach = await client.post(ATTACH)
+        gc.collect()
+
+    assert (detach.status_code, attach.status_code) == (503, 503)
+    assert 'did not answer' in attach.json()['detail']
+    assert not [w for w in caught if 'was never awaited' in str(w.message)]

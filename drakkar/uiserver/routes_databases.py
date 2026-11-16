@@ -420,7 +420,7 @@ def create_databases_router(deps: UIDeps) -> APIRouter:
         started = election.started and not election.stopped
         results: dict[str, Any] = {}
         busy = False
-        if started and skeletons:
+        if started:
             answered = await dispatch_bounded(
                 election.read_holders([skeleton.scope for skeleton in skeletons]), drakkar_app.main_loop
             )

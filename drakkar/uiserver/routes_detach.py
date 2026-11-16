@@ -18,17 +18,24 @@ takes the worker out of its consumer group.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+from collections.abc import Coroutine
 from typing import TYPE_CHECKING, Any
 
+import structlog
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from drakkar.concurrency import dispatch_to_loop
 from drakkar.detach import ACTION_ATTACH, ACTION_DETACH, REASON_MAX_CHARS, check_duration
+from drakkar.uiserver import server as server_module
 
 if TYPE_CHECKING:
     from drakkar.uiserver.server import UIDeps
+
+logger = structlog.get_logger()
 
 ACCEPTED = 202
 
@@ -36,6 +43,8 @@ DISABLED_DETAIL = (
     'The detach and attach routes are disabled by configuration: set ui.detach_enabled to true '
     '(it needs the Kafka source and sources.kafka.detach.enabled)'
 )
+
+NO_ANSWER_DETAIL = 'The worker did not answer in time; try again'
 
 
 class DetachRequest(BaseModel):
@@ -53,6 +62,40 @@ class DetachRequest(BaseModel):
 def _disabled_response() -> JSONResponse:
     """403 when the operator has not turned the routes on."""
     return JSONResponse({'detail': DISABLED_DETAIL}, status_code=403)
+
+
+def _duration_error(message: str) -> JSONResponse:
+    """422 in the validation envelope of the API, for a duration that the config range refuses."""
+    error = {'loc': ['body', 'duration_seconds'], 'msg': message, 'type': 'value_error'}
+    return JSONResponse({'detail': [error]}, status_code=422)
+
+
+async def _dispatch_start(coro: Coroutine[Any, Any, dict[str, Any]], main_loop: Any) -> JSONResponse:
+    """Run ``coro`` on the main loop and answer 202 with its state, or 503 when the loop does not answer.
+
+    The wait is bounded like every UI read: a wedged main loop gives a 503,
+    not a request that hangs. Giving up is safe because ``coro`` only starts
+    a background transition. A closed loop (a stop) raises ``RuntimeError``
+    before ``coro`` is scheduled; it is closed then, so no warning about a
+    coroutine that was never awaited is raised.
+    """
+    try:
+        state = await asyncio.wait_for(
+            dispatch_to_loop(coro, main_loop),
+            # Read at call time, so a test can shorten it.
+            timeout=server_module.MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS,
+        )
+    except (TimeoutError, RuntimeError) as exc:
+        if inspect.getcoroutinestate(coro) == inspect.CORO_CREATED and isinstance(exc, RuntimeError):
+            coro.close()
+        await logger.awarning(
+            'ui_detach_request_unanswered',
+            category='debug',
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return JSONResponse({'detail': NO_ANSWER_DETAIL}, status_code=503)
+    return JSONResponse(state, status_code=ACCEPTED)
 
 
 def create_detach_router(deps: UIDeps) -> APIRouter:
@@ -86,19 +129,17 @@ def create_detach_router(deps: UIDeps) -> APIRouter:
         try:
             check_duration(body.duration_seconds, drakkar_app.config.sources.kafka.detach)
         except ValueError as exc:
-            return JSONResponse({'detail': str(exc)}, status_code=422)
-        state = await dispatch_to_loop(
+            return _duration_error(str(exc))
+        return await _dispatch_start(
             _start(ACTION_DETACH, duration=body.duration_seconds, reason=body.reason[:REASON_MAX_CHARS]),
             drakkar_app.main_loop,
         )
-        return JSONResponse(state, status_code=ACCEPTED)
 
     @router.post('/api/v1/debug/attach')
     async def attach_start():
         """Start an operator attach and answer 202 at once; on an attached worker it changes nothing."""
         if not _routes_enabled():
             return _disabled_response()
-        state = await dispatch_to_loop(_start(ACTION_ATTACH), drakkar_app.main_loop)
-        return JSONResponse(state, status_code=ACCEPTED)
+        return await _dispatch_start(_start(ACTION_ATTACH), drakkar_app.main_loop)
 
     return router
