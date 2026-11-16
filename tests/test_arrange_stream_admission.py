@@ -248,11 +248,11 @@ async def test_two_partitions_streaming_share_the_budget_in_turn():
     for proc in procs:
         await finish(proc)
     await releaser
-    # The first stream pulls its first group alone, and both then wait in the
-    # FIFO list and take turns. The admissions are 0, 0, 1, 0, 1, 0, 1: the
-    # fourth admission of the first stream is the pull that ends its stream,
-    # so it yields no group.
-    assert order == [0, 0, 1, 0, 1, 1]
+    # The first stream takes the one unmeasured slot and pulls its first
+    # group; a pull runs as a task, so the second stream queues for room
+    # meanwhile and is first in the FIFO list. From then on the two take
+    # turns, one group each.
+    assert order == [0, 1, 0, 1, 0, 1]
     assert all(len(handler.message_groups) == 1 for handler in handlers)
     assert budget.tasks == 0 and budget.reserved_tasks == 0
 
