@@ -6,8 +6,9 @@ import asyncio
 import contextlib
 import math
 import time
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -49,6 +50,18 @@ MIN_TEARDOWN_STEP_SECONDS = 0.5
 
 # How often the broker-lag gauge is refreshed from the cached watermarks.
 LAG_REFRESH_INTERVAL_SECONDS = 10.0
+
+# Seconds a group leave may take beyond ``executor.drain_timeout``: the revoke
+# drain has that bound, and the poll that runs the revoke needs a little more.
+LEAVE_MARGIN_SECONDS = 10.0
+
+
+class LeaveOutcome(StrEnum):
+    """How a leave of the consumer group ended."""
+
+    LEFT = 'left'
+    TIMED_OUT = 'timed_out'
+    STOPPING = 'stopping'
 
 
 def _remaining(deadline: float) -> float:
@@ -101,6 +114,15 @@ class KafkaSource:
         # runs (or after a stop request): its drain and final commit share one
         # deadline and the consumer pool with every broker read.
         self._revokes_in_progress = 0
+        # Group membership. False from the call to ``unsubscribe()`` until a
+        # join has seen one poll after its ``subscribe()``.
+        self._group_member = True
+        # Polls of the poll loop: started and completed, and the event set at
+        # the end of each poll (and on a stop) and then replaced. A leave or a
+        # join waits on it for a poll that started after its call.
+        self._polls_started = 0
+        self._polls_completed = 0
+        self._poll_progress = asyncio.Event()
 
     def bind(self, ctx: SourceContext) -> None:
         """Receive the worker context. Called once, before ``start``."""
@@ -290,7 +312,12 @@ class KafkaSource:
 
             await self._apply_backpressure(consumer, queued, low_watermark, high_watermark)
 
-            messages = await consumer.poll_batch()
+            self._polls_started += 1
+            try:
+                messages = await consumer.poll_batch()
+            finally:
+                self._polls_completed += 1
+                self._wake_poll_waiters()
             if self._stop_requested:
                 # A stop arrived while the poll was in flight. The partition
                 # loops are leaving, and a loop that has already ended never
@@ -318,7 +345,8 @@ class KafkaSource:
             if not messages:
                 # Consumer idle: no messages from Kafka, nothing queued, not paused.
                 # Measures time with genuinely nothing to do (consumer lag is zero).
-                if total == 0 and not self.paused:
+                # Time out of the group is not idle: the worker chose to take no work.
+                if total == 0 and not self.paused and self._group_member:
                     consumer_idle.inc(dt)
                 await asyncio.sleep(POLL_IDLE_SLEEP)
 
@@ -332,6 +360,83 @@ class KafkaSource:
         self._stop_requested = True
         for processor in list(self.processors.values()):
             processor.signal_stop()
+        # The poll loop runs no further poll, so a leave or a join must not
+        # wait for one.
+        self._wake_poll_waiters()
+
+    @property
+    def is_group_member(self) -> bool:
+        """Whether the consumer is a member of its group: False from a leave until a join."""
+        return self._group_member
+
+    def _wake_poll_waiters(self) -> None:
+        """Wake every coroutine waiting for a poll, and arm a fresh event for the next one."""
+        self._poll_progress.set()
+        self._poll_progress = asyncio.Event()
+
+    async def _wait_for_poll(self, after: int, until: Callable[[], bool]) -> bool:
+        """Wait for a completed poll numbered above ``after`` after which ``until()`` holds.
+
+        Polls run one at a time, so poll ``after + 1`` started after the
+        caller read ``after``. Returns False when a stop was requested first.
+        """
+        while not self._stop_requested:
+            if self._polls_completed > after and until():
+                return True
+            await self._poll_progress.wait()
+        return False
+
+    def _nothing_left_to_revoke(self) -> bool:
+        """Whether no partition and no revoke drain is left on this worker."""
+        return not self.processors and self._revokes_in_progress == 0
+
+    async def leave_group(self) -> LeaveOutcome:
+        """Leave the consumer group and wait until no partition is left on this worker.
+
+        ``unsubscribe()`` changes nothing by itself: the client runs the
+        revoke inside its next poll, which waits for ``on_revoke`` and so for
+        the drain. So the wait ends on a poll that started after the call,
+        with no processor and no revoke left. A member that holds no
+        partition gets no revoke at all; that poll alone ends its leave. The
+        wait is bounded by ``executor.drain_timeout`` plus
+        ``LEAVE_MARGIN_SECONDS``; on ``TIMED_OUT`` the source stays out of
+        the group until a join. A stop request ends the wait at once.
+        """
+        if self._stop_requested:
+            return LeaveOutcome.STOPPING
+        assert self.consumer is not None
+        bound = self._context().config.executor.drain_timeout + LEAVE_MARGIN_SECONDS
+        self._group_member = False
+        try:
+            await self.consumer.unsubscribe()
+        except BaseException:
+            # Nothing was sent, so the consumer is still a member.
+            self._group_member = True
+            raise
+        after = self._polls_started
+        try:
+            async with asyncio.timeout(bound):
+                left = await self._wait_for_poll(after, self._nothing_left_to_revoke)
+        except TimeoutError:
+            return LeaveOutcome.TIMED_OUT
+        return LeaveOutcome.LEFT if left else LeaveOutcome.STOPPING
+
+    async def join_group(self) -> bool:
+        """Join the consumer group again and wait for one poll that started after ``subscribe()``.
+
+        The assignment comes in a later poll and can be empty, so the join
+        does not wait for one. Returns False when a stop was requested
+        before the call or during the wait.
+        """
+        if self._stop_requested:
+            return False
+        assert self.consumer is not None
+        await self.consumer.subscribe()
+        after = self._polls_started
+        joined = await self._wait_for_poll(after, lambda: True)
+        if joined:
+            self._group_member = True
+        return joined
 
     async def drain(self, deadline: float) -> bool:
         """Wait for queued and in-flight work, bounded by ``deadline``.
@@ -624,6 +729,11 @@ class KafkaSource:
                 to_stop.append(processor)
 
         assigned_partitions.set(len(self.processors))
+        if not self.processors and self.paused:
+            # Nothing is left to pause, so the next assignment (after a join,
+            # say) must not start under an old backpressure pause.
+            self.paused = False
+            backpressure_active.set(0)
 
         if to_stop:
             self._revokes_in_progress += 1

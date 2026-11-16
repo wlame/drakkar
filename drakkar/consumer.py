@@ -149,6 +149,10 @@ class KafkaConsumer:
             on_revoke=self._handle_revoke,
         )
 
+    async def unsubscribe(self) -> None:
+        """Leave the consumer group; the revoke callback runs inside the next poll."""
+        await self._consumer.unsubscribe()
+
     async def _handle_assign(self, consumer: object, partitions: list[TopicPartition]) -> None:
         """Async rebalance callback — runs on the event loop."""
         partition_ids = [p.partition for p in partitions]
