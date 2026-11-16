@@ -470,6 +470,26 @@ def test_uses_arrange_stream_only_for_an_override():
     assert uses_arrange_stream(ProtocolOnly()) is False
 
 
+def test_overrides_arrange_only_for_an_override():
+    from drakkar.handler import overrides_arrange
+
+    class ListHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return []
+
+    class StreamHandler(BaseDrakkarHandler):
+        async def arrange_stream(self, message):
+            yield []
+
+    class ProtocolOnly:
+        pass
+
+    assert overrides_arrange(ListHandler()) is True
+    assert overrides_arrange(StreamHandler()) is False
+    assert overrides_arrange(BaseDrakkarHandler()) is False
+    assert overrides_arrange(ProtocolOnly()) is False
+
+
 def test_base_handler_arrange_stream_raises(handler: BaseDrakkarHandler, source_message: SourceMessage):
     with pytest.raises(NotImplementedError, match='arrange_stream'):
         handler.arrange_stream(source_message)

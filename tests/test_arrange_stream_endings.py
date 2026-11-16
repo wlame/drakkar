@@ -16,7 +16,7 @@ from structlog.testing import capture_logs
 
 from drakkar import partition as partition_module
 from drakkar.budget import PendingBudget
-from drakkar.models import CollectResult, KafkaPayload
+from drakkar.models import CollectResult, KafkaPayload, SinkDeliveryFailedError
 from tests.conftest import wait_for
 from tests.stream_helpers import (
     Out,
@@ -335,21 +335,22 @@ async def test_drain_does_not_wait_for_an_abandoned_stream():
 
 async def test_generator_that_ignores_the_close_does_not_hang_the_stop():
     class Stubborn(RecordingStreamHandler):
-        stubborn = True
-
         async def arrange_stream(self, message):
             yield self.make_group(message, 0, 1)
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
                 pass
+            ignored = False
             while True:
                 try:
                     yield self.make_group(message, 1, 1)
                 except GeneratorExit:
-                    # Gives in only after the test, so the finalizer can close it.
-                    if not self.stubborn:
+                    # Ignores the framework's close only, so the finalizer
+                    # can close it whenever it runs.
+                    if ignored:
                         raise
+                    ignored = True
 
     handler = Stubborn()
     proc = stream_processor(handler)
@@ -366,7 +367,6 @@ async def test_generator_that_ignores_the_close_does_not_hang_the_stop():
     assert len(close_failed) == 1
     assert 'GeneratorExit' in close_failed[0]['error']
     assert 'task:m0-g1-t0' not in handler.log
-    handler.stubborn = False
 
 
 async def test_pull_that_ignores_the_cancel_is_left_at_the_close_time_bound(monkeypatch):
@@ -690,4 +690,119 @@ async def test_stop_and_dlq_outcome_together_end_the_message_and_do_not_abandon_
     assert proc._abandoned_offsets == set()
     assert handler.log.count('message:0') == 1
     assert not proc.offset_tracker.has_pending()
+    await proc.stop()
+
+
+async def test_a_message_taken_off_the_queue_after_a_stop_is_dropped_unarranged():
+    handler = RecordingStreamHandler([1])
+    proc = stream_processor(handler)
+    get = proc._queue.get
+
+    async def stop_then_get():
+        # The stop comes while the loop waits, and a message arrives with it.
+        message = await get()
+        proc.signal_stop()
+        return message
+
+    proc._queue.get = stop_then_get
+    proc.enqueue(make_msg(0))
+    with capture_logs() as cap:
+        proc.start()
+        await wait_for(lambda: proc._loop_ended)
+
+    assert handler.log == []
+    assert not proc.offset_tracker.has_pending()
+    assert events(cap, 'arrange_stream_abandoned') == []
+    [dropped] = events(cap, 'queued_messages_dropped_at_stop')
+    assert dropped['count'] == 1 and dropped['first_offset'] == 0
+    await proc.stop()
+
+
+class FailedDelivery(RecordingCollect):
+    """An ``on_collect`` double whose delivery of a task result cannot be confirmed."""
+
+    async def __call__(self, result, partition_id, message_context=None):
+        await super().__call__(result, partition_id, message_context)
+        if any(payload.data.v.startswith('task-') for payload in result.kafka):
+            raise SinkDeliveryFailedError(sink_name='out', sink_type='kafka', reason='dlq down')
+        return {}
+
+
+async def test_a_message_whose_offset_will_stall_stops_pulling_groups():
+    handler = TaskResultsHandler()
+    proc = stream_processor(handler, on_collect=FailedDelivery(handler.log), on_dlq_failure='stall')
+    proc.enqueue(make_msg(0))
+    proc.start()
+    await wait_for(lambda: 0 in proc._stalled_offsets)
+
+    assert handler.pulls == 2
+    assert handler.finally_ran
+    assert 'task:m0-g1-t0' not in handler.log
+    assert handler.log.count('group:0:0') == 1
+    assert handler.log.count('message:0') == 1
+    assert proc._abandoned_offsets == set()
+    assert proc.offset_tracker.has_pending()
+    await proc.stop()
+
+
+async def test_a_task_that_ends_between_the_stop_and_the_abandon_delivers_nothing():
+    handler = TaskResultsHandler([1])
+    proc = stream_processor(handler, on_collect=RecordingCollect(handler.log))
+    release = asyncio.Event()
+    block_offsets(proc, {0}, release)
+    start_group = proc._start_group
+
+    async def stop_while_a_task_ends(tracker, tasks, window):
+        await start_group(tracker, tasks, window)
+        # The stop comes during the fan-out, and the task ends before the
+        # stream is abandoned.
+        proc.signal_stop()
+        release.set()
+        await wait_for(lambda: proc.inflight_count == 0)
+
+    proc._start_group = stop_while_a_task_ends
+    proc.enqueue(make_msg(0))
+    proc.start()
+    await wait_for(lambda: proc._loop_ended)
+
+    assert 'task:m0-g0-t0' in handler.log
+    assert not any(entry.startswith(('deliver:', 'group:', 'message:')) for entry in handler.log)
+    assert proc._abandoned_offsets == {0}
+    await proc.stop()
+
+
+async def test_a_failed_stream_gives_back_its_kept_bytes_at_a_stop():
+    budget = PendingBudget(max_tasks=1000, max_bytes=1 << 40)
+
+    class FailsWithOneTaskDone(WithGroupHook):
+        async def arrange_stream(self, message):
+            yield self.make_group(message, 0, 3)
+            await wait_for(lambda: 'task:m0-g0-t0' in self.log)
+            raise RuntimeError('side api down')
+
+    handler = FailsWithOneTaskDone()
+    proc = stream_processor(handler, budget=budget)
+    release = asyncio.Event()
+    execute = proc._executor_pool.execute
+
+    async def first_task_settles(task, recorder, partition_id):
+        # One task finishes, so the group keeps its output; the others wait.
+        if not task.task_id.endswith('t0'):
+            await release.wait()
+        return await execute(task, recorder, partition_id)
+
+    proc._executor_pool.execute = first_task_settles
+    proc.enqueue(make_msg(0))
+    with capture_logs() as cap:
+        proc.start()
+        await wait_for(lambda: events(cap, 'partition_processor_restarting') and proc.inflight_count == 2)
+        assert budget.bytes > 0
+
+        proc.signal_stop()
+        await wait_for(lambda: proc._loop_ended)
+
+    # Read before stop() closes the account, so a leak cannot hide.
+    assert budget.tasks == 0 and budget.bytes == 0
+    assert proc._message_trackers[0].open_windows == {}
+    assert handler.group_calls == []
     await proc.stop()

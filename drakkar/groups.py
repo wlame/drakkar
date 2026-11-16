@@ -1,9 +1,13 @@
-"""Task groups of the streaming arrange hook: creation, label collection, note checks."""
+"""Task groups of the streaming arrange hook: creation, label collection, note checks, pulls and the close."""
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import inspect
-from collections.abc import AsyncIterator, Sequence
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from drakkar.models import ExecutorTask, SourceMessage, TaskGroup
@@ -104,6 +108,99 @@ def new_task_group(
     for task in tasks:
         task.group = group
     return group
+
+
+class _StreamEnd:
+    """The marker a pull returns when the generator has no group left."""
+
+
+STREAM_END = _StreamEnd()
+
+
+@dataclass(frozen=True)
+class StreamCloseFailure:
+    """Why a stream could not be closed cleanly: the error it raised, or ``None`` when the close timed out."""
+
+    error: BaseException | None
+
+    @property
+    def timed_out(self) -> bool:
+        """Whether the close passed its time bound."""
+        return self.error is None
+
+
+def retrieve_task_outcome(task: asyncio.Task) -> None:
+    """Read the outcome of a task nobody awaits, so asyncio does not log an unread exception."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def next_stream_item(iterator: AsyncIterator[list[ExecutorTask]]) -> Any:
+    """The next item of ``iterator``, or ``STREAM_END`` when it has none; a coroutine, so it can run as a task."""
+    try:
+        return await anext(iterator)
+    except StopAsyncIteration:
+        return STREAM_END
+
+
+async def await_close(aclose: Callable[[], Awaitable[Any]]) -> None:
+    """Await ``aclose()`` inside a coroutine, so it can run as a task."""
+    await aclose()
+
+
+async def close_stream(
+    iterator: AsyncIterator[list[ExecutorTask]],
+    *,
+    pull: asyncio.Task | None,
+    context: contextvars.Context | None,
+    timeout: float,
+    run_close: Callable[[Callable[[], Awaitable[Any]]], Coroutine[Any, Any, None]] = await_close,
+) -> StreamCloseFailure | None:
+    """Cancel the pull in progress, then ``aclose()`` the generator in ``context``, within ``timeout`` seconds.
+
+    Returns ``None`` after a clean close, else the failure; never raises
+    one. Each wait uses ``asyncio.wait``, which does not cancel what it
+    waits for: a generator that catches the cancellation and keeps awaiting
+    cannot hold the close past its time bound, and is left behind. A cancel
+    of the caller during a wait cancels what it waits for and is passed on.
+    ``run_close`` awaits ``aclose()``; a caller passes its own to run the
+    close inside a scope of its own.
+    """
+    deadline = time.monotonic() + timeout
+    if pull is not None:
+        pull.cancel()
+        if not await _wait_until(pull, deadline):
+            return StreamCloseFailure(error=None)
+        pull_error = None if pull.cancelled() else pull.exception()
+        if pull_error is not None:
+            # A generator that raised when its pull was cancelled.
+            return StreamCloseFailure(error=pull_error)
+    aclose = getattr(iterator, 'aclose', None)
+    if aclose is None:
+        return None
+    closing = asyncio.create_task(run_close(aclose), context=context)
+    closing.add_done_callback(retrieve_task_outcome)
+    if not await _wait_until(closing, deadline):
+        return StreamCloseFailure(error=None)
+    error = None if closing.cancelled() else closing.exception()
+    return None if error is None else StreamCloseFailure(error=error)
+
+
+async def _wait_until(task: asyncio.Task, deadline: float) -> bool:
+    """Wait for ``task`` until ``deadline``; true when it ended. A task still running then is cancelled.
+
+    A cancel of the caller while it waits cancels ``task`` too and is passed
+    on to the caller.
+    """
+    try:
+        await asyncio.wait({task}, timeout=max(0.0, deadline - time.monotonic()))
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
+    if task.done():
+        return True
+    task.cancel()
+    return False
 
 
 def drop_invalid_notes(group: TaskGroup) -> list[str]:

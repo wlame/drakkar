@@ -524,7 +524,13 @@ framework never updates.
 | `started_at`, `finished_at` | `float` | framework | Monotonic times: the group was received; its last task settled. |
 
 The group never holds a task, a result or an output text, so it can live
-until the message ends without keeping task payloads in memory.
+until the message ends without keeping task payloads in memory. The group
+object itself still lives until the message ends, and the pending budget does
+not count it: about 2 KB for each group, plus one entry in `labels` for each
+task and each name in `group_labels`. A message of 100 000 tasks yielded as
+single-task groups keeps about 200 MB of group objects until
+`on_message_complete`. So do not yield single-task groups for a message with
+very many tasks; yield groups of tens or hundreds of tasks.
 
 **`notes`.** Any hook that can reach the group may write it:
 `on_task_complete` (through `result.task.group`) and `on_group_complete`.
@@ -588,7 +594,8 @@ small compared to `executor.max_pending_tasks`: the framework checks, labels
 and records a whole group in one step before it starts the tasks in chunks.
 `drakkar_stream_group_tasks` shows the group sizes. The output of a group
 kept for `on_group_complete` stays charged until the hook and its delivery
-end. See [Performance: Backpressure](performance.md#streaming-groups).
+end. The group objects themselves are not charged; see
+[The group object](#the-group-object) for their size. See [Performance: Backpressure](performance.md#streaming-groups).
 
 ### Replays
 
@@ -626,6 +633,18 @@ message was dropped. It also closes the stream: no further group is pulled, and 
 Groups that are running finish; `on_group_complete` and
 `on_message_complete` still fire, and their results are not delivered
 (`sink_not_started`, reason `message_dlq`). The offset completes.
+
+### A delivery that cannot be confirmed
+
+Under `dlq.on_send_failure: stall`, a delivery of a task or group result of
+the message can fail with no DLQ record to fall back on (the DLQ write
+failed too, or the delivery error is unknown). The offset of that message
+then stalls when the message ends, and the message is replayed whole. So the
+stream also stops pulling: no further group is pulled, a pull in progress is
+cancelled, and the generator is closed. Groups that are running finish with
+their hooks; `on_message_complete` fires; then the offset stalls
+(`offset_stalled_on_delivery_failure`). At a stop such a stream is abandoned
+like any open stream.
 
 ### Stop and revoke
 
@@ -705,7 +724,9 @@ The [Message Probe](observability.md#debug-debug-tools) runs a stream
 handler too, but only its first 5 groups. It calls `on_group_complete`, when
 the handler overrides it, right after the tasks of each group end, and then
 `on_message_complete` with the groups that ran; it reports a flag
-`stream_truncated` when the stream had more. After an error of the stream
+`stream_truncated` when the stream had more. To learn that, it pulls one
+group more than it runs, so the generator prepares a sixth group (with its
+side calls) that the probe drops. After an error of the stream
 the probe closes the stream, and `on_message_complete` does not run.
 
 The HTTP source does not stream: `arrange_http_request()` keeps its list

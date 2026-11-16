@@ -107,6 +107,26 @@ async def test_group_hook_gets_results_and_errors_and_the_group_keeps_none():
     assert refs and all(ref() is None for ref in refs)
 
 
+async def test_group_hook_keeps_its_own_lists_after_the_hook_returns():
+    class KeepsTheLists(WithGroupHook):
+        async def on_group_complete(self, group, results, errors):
+            # Kept as they are, not copied: the hook owns what it was given.
+            self.kept = (results, errors)
+            return await super().on_group_complete(group, results, errors)
+
+        async def on_error(self, task, error):
+            return ErrorAction.SKIP
+
+    handler = KeepsTheLists([2], exit_code=lambda task_id: 1 if task_id.endswith('t1') else 0)
+    proc = stream_processor(handler)
+    proc.enqueue(make_msg(0))
+    await run_until_settled(proc)
+
+    results, errors = handler.kept
+    assert [result.task.task_id for result in results] == ['m0-g0-t0']
+    assert [error.task.task_id for error in errors] == ['m0-g0-t1']
+
+
 async def test_group_results_are_freed_after_the_group_hook_while_the_message_is_open():
     refs: list[weakref.ref] = []
     gate = asyncio.Event()

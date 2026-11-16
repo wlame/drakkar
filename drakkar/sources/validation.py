@@ -15,19 +15,14 @@ def validate_handler_for_sources(handler: Any, sources: SourcesConfig) -> None:
     The checks of the streaming arrange hook run first, whatever sources are
     enabled: they are faults of the handler class alone.
     """
-    from drakkar.handler import BaseDrakkarHandler, uses_arrange_stream
+    from drakkar.handler import overrides_arrange, uses_arrange_stream
 
     validate_stream_hooks(handler)
-    if sources.kafka.enabled:
-        handler_cls = type(handler)
-        overrides_arrange = (
-            getattr(handler_cls, 'arrange', BaseDrakkarHandler.arrange) is not BaseDrakkarHandler.arrange
+    if sources.kafka.enabled and not overrides_arrange(handler) and not uses_arrange_stream(handler):
+        raise ConfigurationError(
+            f'sources.kafka.enabled=true but {type(handler).__name__} does not override arrange() or '
+            'arrange_stream() — implement one of them or disable sources.kafka'
         )
-        if not overrides_arrange and not uses_arrange_stream(handler):
-            raise ConfigurationError(
-                f'sources.kafka.enabled=true but {handler_cls.__name__} does not override arrange() or '
-                'arrange_stream() — implement one of them or disable sources.kafka'
-            )
     if sources.http.enabled:
         from drakkar.webapp.validation import validate_webapp_handler
 
@@ -36,7 +31,7 @@ def validate_handler_for_sources(handler: Any, sources: SourcesConfig) -> None:
 
 def validate_stream_hooks(handler: Any) -> None:
     """Raise ``ConfigurationError`` when the handler mixes the stream hooks with hooks that do not fit them."""
-    from drakkar.handler import BaseDrakkarHandler, overridden_completion_hooks, uses_arrange_stream
+    from drakkar.handler import overridden_completion_hooks, overrides_arrange, uses_arrange_stream
 
     handler_cls = type(handler)
     name = handler_cls.__name__
@@ -45,7 +40,7 @@ def validate_stream_hooks(handler: Any) -> None:
     group_labels = getattr(handler_cls, 'group_labels', ())
 
     if is_stream:
-        if getattr(handler_cls, 'arrange', BaseDrakkarHandler.arrange) is not BaseDrakkarHandler.arrange:
+        if overrides_arrange(handler):
             raise ConfigurationError(f'{name} overrides both arrange() and arrange_stream(); a handler has one of them')
         if hooks['window_complete']:
             raise ConfigurationError(

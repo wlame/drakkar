@@ -17,10 +17,14 @@ from drakkar.budget import TASKS_LIMIT, BudgetAccount, MessageShape, PendingBudg
 from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.groups import (
     STREAM_CLOSE_TIMEOUT,
+    STREAM_END,
     check_stream_item,
+    close_stream,
     drop_invalid_notes,
     new_task_group,
+    next_stream_item,
     open_arrange_stream,
+    retrieve_task_outcome,
 )
 from drakkar.handler import (
     BaseDrakkarHandler,
@@ -149,20 +153,7 @@ WARM_UP_WINDOWS = 3
 
 
 class _StreamInterrupted(Exception):
-    """A pull stopped waiting: a stop came, or a DLQ outcome ended the message."""
-
-
-class _StreamEnd:
-    """The marker a pull returns when the generator has no group left."""
-
-
-_STREAM_END = _StreamEnd()
-
-
-def _retrieve_task_outcome(task: asyncio.Task) -> None:
-    """Read the outcome of a task nobody awaits, so asyncio does not log an unread exception."""
-    if not task.cancelled():
-        task.exception()
+    """A pull stopped waiting: a stop came, or the message ended early (a DLQ outcome, an offset that will stall)."""
 
 
 @dataclass
@@ -796,6 +787,11 @@ class PartitionProcessor:
                 # retry any uncommitted offsets on idle iterations
                 await self._note_commit_due()
                 continue
+            if not self._running:
+                # Taken off the queue just after a stop: held, so the drop of
+                # the queued messages counts it, never accepted or arranged.
+                self._held_message = message
+                break
             partition_queue_size.labels(partition=str(self._partition_id)).set(self._queue.qsize())
             await self._process_stream_message(message)
 
@@ -829,9 +825,12 @@ class PartitionProcessor:
         accounted for.
 
         **What a restart does not fix.** ``_process_window`` registers
-        each offset *before* arrange runs, so a crash there leaves those
+        each offset *before* arrange runs, and ``_process_stream_message``
+        before ``arrange_stream`` runs, so a crash there leaves those
         offsets PENDING for the life of the process, and ``committable()``
-        stops at the first incomplete offset. The restarted loop keeps
+        stops at the first incomplete offset. The offset of a failed stream
+        is also left out of every drain (``_abandoned_offsets``), because it
+        can never complete here. The restarted loop keeps
         processing, but its commit watermark never advances past the
         window that died — lag climbs until a rebalance or restart hands
         those offsets to an owner that redelivers them. That is the
@@ -1366,7 +1365,8 @@ class PartitionProcessor:
 
         - the generator has no group left: the message finishes when its
           groups have;
-        - a DLQ outcome of the message: no group is pulled any more, the
+        - a DLQ outcome of the message, or a delivery of it that could not be
+          confirmed (its offset will stall): no group is pulled any more, the
           generator is closed, and the message finishes when its groups have;
         - a stop: the stream is abandoned (see :meth:`_abandon_stream`);
         - an error of the stream: it is logged, the generator is closed and
@@ -1404,14 +1404,12 @@ class PartitionProcessor:
                 await self._fail_stream(stream, tracker, e)
                 raise
 
-            if not ended and not self._has_dlq_outcome(tracker):
-                # A stop with the stream open. A DLQ outcome seen together
-                # with the stop wins: its message is ended, and abandoning it
-                # would let the next owner write a second DLQ record.
+            if self._abandons_stream(tracker, ended=ended):
                 await self._abandon_stream(stream, tracker)
                 return
             if not ended:
-                # A DLQ outcome ended the message: no group is pulled any more.
+                # A DLQ outcome or an unconfirmed delivery ended the message:
+                # no group is pulled any more.
                 await self._close_stream(stream, tracker)
             tracker.stream_open = False
             if self._message_is_done(tracker):
@@ -1420,7 +1418,7 @@ class PartitionProcessor:
             self._stream_context = None
 
     async def _pull_groups(self, stream: AsyncIterator[list[ExecutorTask]], tracker: MessageTracker) -> bool:
-        """Admit, pull and start the groups of the stream; true when the generator ended, false at a stop or a DLQ outcome."""
+        """Admit, pull and start the groups of the stream; true when the generator ended, false at a stop or an early end."""
         while True:
             # The index of the group this turn makes, for the error line of
             # a pull or a group start that raises.
@@ -1458,13 +1456,44 @@ class PartitionProcessor:
                 self._end_window_reservation()
 
     def _stream_must_end(self, tracker: MessageTracker) -> bool:
-        """Whether the stream of ``tracker`` must stop pulling: a stop came, or its message has a DLQ outcome."""
-        return self._stopping or self._has_dlq_outcome(tracker)
+        """Whether the stream of ``tracker`` must stop pulling: a stop came, or its message is ended early."""
+        return self._stopping or self._message_ended_early(tracker)
+
+    @classmethod
+    def _message_ended_early(cls, tracker: MessageTracker) -> bool:
+        """Whether the message of ``tracker`` pulls no more groups: a DLQ outcome, or an offset that will stall.
+
+        A message with an unconfirmed delivery stalls when its groups end and
+        is replayed whole, so a further group would be work for nothing.
+        """
+        return cls._has_dlq_outcome(tracker) or tracker.delivery_failed
 
     @staticmethod
     def _has_dlq_outcome(tracker: MessageTracker) -> bool:
         """Whether the message of ``tracker`` has a DLQ outcome: its record was written, or its loss counted."""
         return tracker.dlq.dlq_written or tracker.dlq.dlq_lost
+
+    def _abandons_stream(self, tracker: MessageTracker, *, ended: bool) -> bool:
+        """Whether a stream that stopped pulling is abandoned, not ended.
+
+        A stop with the stream open abandons it. A DLQ outcome ends the
+        message instead, also at a stop: abandoning it would let the next
+        owner write a second DLQ record. An unconfirmed delivery ends the
+        message too, except at a stop: the message is replayed either way,
+        so its tasks are cancelled rather than drained.
+        """
+        if ended or self._has_dlq_outcome(tracker):
+            return False
+        return self._stopping or not tracker.delivery_failed
+
+    def _stream_is_abandoning(self, tracker: MessageTracker) -> bool:
+        """Whether the open stream of ``tracker`` is about to be abandoned at a stop, so nothing of it is delivered.
+
+        The next owner of the partition runs its message again, so a task or
+        group result delivered now would be delivered twice. With a DLQ
+        outcome the message is ended instead, and its results go on.
+        """
+        return tracker.stream_open and self._stopping and not self._has_dlq_outcome(tracker)
 
     async def _fail_stream(
         self, stream: AsyncIterator[list[ExecutorTask]] | None, tracker: MessageTracker, error: Exception
@@ -1489,52 +1518,20 @@ class PartitionProcessor:
     async def _close_stream(self, stream: AsyncIterator[list[ExecutorTask]], tracker: MessageTracker) -> None:
         """Cancel the pull in progress, then ``aclose()`` the generator, within ``STREAM_CLOSE_TIMEOUT``; never raises.
 
-        Each wait uses ``asyncio.wait``, which does not cancel what it waits
-        for: a generator that catches the cancellation and keeps awaiting
-        must not hold the close past its time bound. Such a generator is left
-        behind, still running, and the time bound is logged.
+        A generator that catches the cancellation and keeps running is left
+        behind after the time bound (see :func:`drakkar.groups.close_stream`);
+        a failed close is logged.
         """
-        deadline = time.monotonic() + STREAM_CLOSE_TIMEOUT
         pull, self._pull_task = self._pull_task, None
-        context = self._stream_context
-        try:
-            if pull is not None:
-                pull.cancel()
-                await asyncio.wait({pull}, timeout=max(0.0, deadline - time.monotonic()))
-                if not pull.done():
-                    self._log_close_failure(tracker, 'timed out')
-                    return
-                pull_error = None if pull.cancelled() else pull.exception()
-                if pull_error is not None:
-                    # A generator that raised when its pull was cancelled.
-                    raise pull_error
-            aclose = getattr(stream, 'aclose', None)
-            if aclose is None:
-                return
-            closing = asyncio.create_task(self._await_close(aclose), context=context)
-            closing.add_done_callback(_retrieve_task_outcome)
-            await asyncio.wait({closing}, timeout=max(0.0, deadline - time.monotonic()))
-            if not closing.done():
-                closing.cancel()
-                self._log_close_failure(tracker, 'timed out')
-                return
-            closing.result()
-        except Exception as e:
-            self._log_close_failure(tracker, str(e))
-
-    @staticmethod
-    async def _await_close(aclose: Callable[[], Awaitable[Any]]) -> None:
-        """Await ``aclose()`` inside a coroutine, so it can run as a task."""
-        await aclose()
-
-    def _log_close_failure(self, tracker: MessageTracker, error: str) -> None:
-        """Log that a stream could not be closed cleanly."""
+        failure = await close_stream(stream, pull=pull, context=self._stream_context, timeout=STREAM_CLOSE_TIMEOUT)
+        if failure is None:
+            return
         logger.error(
             'arrange_stream_close_failed',
             category='handler',
             partition=self._partition_id,
             offset=tracker.source_message.offset,
-            error=error,
+            error='timed out' if failure.timed_out else str(failure.error),
         )
 
     async def _abandon_stream(self, stream: AsyncIterator[list[ExecutorTask]], tracker: MessageTracker) -> None:
@@ -1554,14 +1551,7 @@ class PartitionProcessor:
         self._abandoned_offsets.add(offset)
         cancelled = await self._cancel_stream_runs(offset)
         await self._close_stream(stream, tracker)
-        for window in tracker.open_windows.values():
-            # The group hook will not run, so its kept outcomes have no reader.
-            if self._account is not None and window.kept_bytes:
-                self._account.release(0, window.kept_bytes)
-            window.kept_bytes = 0
-            window.results.clear()
-            window.errors.clear()
-        tracker.open_windows.clear()
+        self._drop_open_windows(tracker)
         await logger.ainfo(
             'arrange_stream_abandoned',
             category='partition',
@@ -1582,12 +1572,35 @@ class PartitionProcessor:
             await asyncio.gather(*runs, return_exceptions=True)
         return len(runs)
 
+    def _drop_open_windows(self, tracker: MessageTracker) -> None:
+        """Give back the kept bytes of the unfinished groups of ``tracker`` and drop their outcomes.
+
+        For a stream whose group hooks will not run: the kept outcomes have
+        no reader left.
+        """
+        for window in tracker.open_windows.values():
+            # Not through _release_kept_bytes: an unfinished group says
+            # nothing about the output a finished one keeps.
+            if self._account is not None and window.kept_bytes:
+                self._account.release(0, window.kept_bytes)
+            window.kept_bytes = 0
+            window.results.clear()
+            window.errors.clear()
+        tracker.open_windows.clear()
+
     async def _cancel_runs_of_abandoned_streams(self) -> None:
-        """At a stop, cancel the tasks still running for failed streams; their messages never complete here."""
+        """At a stop, cancel the tasks still running for failed streams and give back what their groups keep.
+
+        Their messages never complete here.
+        """
         cancelled = 0
         offsets = sorted(offset for offset in self._abandoned_offsets if offset in self._stream_runs)
         for offset in offsets:
             cancelled += await self._cancel_stream_runs(offset)
+        for offset in self._abandoned_offsets:
+            tracker = self._message_trackers.get(offset)
+            if tracker is not None:
+                self._drop_open_windows(tracker)
         if not cancelled:
             return
         await logger.ainfo(
@@ -1634,7 +1647,7 @@ class PartitionProcessor:
             await asyncio.sleep(0)
 
     async def _admit_next_group(self, tracker: MessageTracker | None = None) -> bool:
-        """Wait for room in the pending budget, then reserve one group's estimate; false after a stop or a DLQ outcome.
+        """Wait for room in the pending budget, then reserve one group's estimate; false after a stop or an early end.
 
         Only "below the limits" is needed, not "the group fits": a group
         larger than the limits is admitted when its turn comes, so a stream
@@ -1649,11 +1662,11 @@ class PartitionProcessor:
         while not await self._wait_for_room():
             if not self._running:
                 return False
-            if tracker is not None and self._has_dlq_outcome(tracker):
+            if tracker is not None and self._message_ended_early(tracker):
                 self._leave_room_queue()
                 return False
             await self._note_commit_due()
-        if tracker is not None and self._has_dlq_outcome(tracker):
+        if tracker is not None and self._message_ended_early(tracker):
             # The outcome came while the stream waited: the room it was given
             # goes to the next waiting loop, and no further step of the
             # generator (a side call, maybe) runs for nothing.
@@ -1687,8 +1700,9 @@ class PartitionProcessor:
         The pull runs as a task (``_pull_task``), so a stop can cancel it and
         the generator can be closed. The loop waits for it in turns of
         ``IDLE_POLL_TIMEOUT``; each turn retries a due commit and checks for
-        a stop or a DLQ outcome of the message, which raise
-        ``_StreamInterrupted`` and leave the task to ``_close_stream``. A
+        a stop or an early end of the message (:meth:`_message_ended_early`),
+        which raise ``_StreamInterrupted`` and leave the task to
+        ``_close_stream``. A
         group that comes back after either is dropped: none of its tasks
         starts and no group is made.
         """
@@ -1703,9 +1717,9 @@ class PartitionProcessor:
         self._arranging = True
         self._arrange_start = time.monotonic()
         self._arrange_labels = [self._handler.message_label(message)]
-        pull = asyncio.create_task(self._next_item(stream), context=context)
+        pull = asyncio.create_task(next_stream_item(stream), context=context)
         # A pull left behind by a stop must not log an unread exception.
-        pull.add_done_callback(_retrieve_task_outcome)
+        pull.add_done_callback(retrieve_task_outcome)
         self._pull_task = pull
         try:
             while True:
@@ -1717,7 +1731,7 @@ class PartitionProcessor:
                 await self._note_commit_due()
             self._pull_task = None
             item = pull.result()
-            if item is _STREAM_END:
+            if item is STREAM_END:
                 return None
         finally:
             self._arranging = False
@@ -1765,14 +1779,6 @@ class PartitionProcessor:
         unbind_contextvars('hook', 'window_id', 'offsets')
         reset_request_id(request_id_tokens)
         clear_hook_context(hook_token)
-
-    @staticmethod
-    async def _next_item(stream: AsyncIterator[list[ExecutorTask]]) -> Any:
-        """The next item of ``stream``, or ``_STREAM_END`` when it has none; a coroutine, so it can run as a task."""
-        try:
-            return await anext(stream)
-        except StopAsyncIteration:
-            return _STREAM_END
 
     async def _start_group(self, tracker: MessageTracker, tasks: list[ExecutorTask], window: Window) -> None:
         """Make the group of ``tasks``, count it on the tracker, then charge and start its tasks in chunks."""
@@ -2240,7 +2246,13 @@ class PartitionProcessor:
         return collect_result
 
     async def _deliver_task_collect(self, task: ExecutorTask, collect_result: CollectResult | None, log: Any) -> None:
-        """Deliver what ``on_task_complete`` returned, and decide the offsets when delivery fails."""
+        """Deliver what ``on_task_complete`` returned, and decide the offsets when delivery fails.
+
+        A result of a stream that is about to be abandoned is not delivered
+        (see :meth:`_stream_is_abandoning`).
+        """
+        if task.group is not None and self._stream_is_abandoning_for(task.group):
+            return
         if collect_result and self._on_collect and self._deliveries_suppressed:
             self._note_suppressed_delivery('on_task_complete')
         elif collect_result and self._on_collect:
@@ -2295,6 +2307,11 @@ class PartitionProcessor:
                     offset_action='stall' if self._on_dlq_failure == 'stall' else 'commit',
                 )
                 raise
+
+    def _stream_is_abandoning_for(self, group: TaskGroup) -> bool:
+        """:meth:`_stream_is_abandoning` for the message of ``group``; false when the message has finished."""
+        tracker = self._message_trackers.get(group.source_message.offset)
+        return tracker is not None and self._stream_is_abandoning(tracker)
 
     @staticmethod
     def _count_skipped_deliveries(group: TaskGroup | None, outcomes: object) -> None:
@@ -2555,10 +2572,8 @@ class PartitionProcessor:
         with self._request_ids.scope([message.request_id]):
             group.finished_at = time.monotonic()
             # A stream still open at a stop is about to be abandoned: its
-            # message is run again by the next owner, so its group result is
-            # not made or delivered here. With a DLQ outcome the message is
-            # ended instead, and its hooks run.
-            abandoning = tracker.stream_open and self._stopping and not self._has_dlq_outcome(tracker)
+            # group result is not made or delivered here.
+            abandoning = self._stream_is_abandoning(tracker)
             try:
                 if self._keep_group_results and not abandoning:
                     collect_result = await self._call_on_group_complete(window, group)
@@ -2598,7 +2613,9 @@ class PartitionProcessor:
         )
         started = time.monotonic()
         try:
-            collect_result = await self._handler.on_group_complete(group, window.results, window.errors)
+            # Copies, as on_message_complete gets: the window's lists are
+            # cleared after the hook, and a hook may keep what it was given.
+            collect_result = await self._handler.on_group_complete(group, list(window.results), list(window.errors))
         except Exception as e:
             # Log and move on, as for on_message_complete: the group counts as
             # finished, so a handler bug cannot hold its message open.

@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `b236b63d8fad41ec`.
+Registry version: `19c8a436ca74e396`.
 
 ## Concepts
 
@@ -401,6 +401,8 @@ Each task gets `task.group`. A replacement task from `on_error` joins the group 
 `labels` holds, for each name of the handler class attribute `group_labels`, the values of that label on the yielded tasks in list order, one per task that has it (a list, so equal values stay). `notes` takes only `str`, `int`, `float` and `bool` values; another type is removed when the group ends, with one `log:group_notes_invalid` line.
 
 The group lives until `on_message_complete`, which gets every group in `MessageGroup.groups`. In stream mode `MessageGroup.tasks`, `results` and `errors` are empty and the counters are the sums over the groups.
+
+Each group object lives until its message ends, and the pending budget does not count it: about 2 KB for each group, plus one `labels` entry for each task and each name in `group_labels`. So a message with very many tasks must not be yielded as single-task groups; 100 000 such groups keep about 200 MB until `on_message_complete`.
 
 **Principles:**
 - Keep only small scalar values in notes; the group must never hold a task, a result or an output text.

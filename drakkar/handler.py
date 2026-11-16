@@ -944,6 +944,11 @@ def uses_arrange_stream(handler: object) -> bool:
     return _overrides(handler, 'arrange_stream')
 
 
+def overrides_arrange(handler: object) -> bool:
+    """Whether the handler overrides ``arrange``, so it turns each window of messages into one task list."""
+    return _overrides(handler, 'arrange')
+
+
 def task_run_seconds_hook(handler: Any) -> Callable[[ExecutorResult], float | None] | None:
     """The handler's ``task_run_seconds`` override as a bound method, or None when it keeps the default.
 

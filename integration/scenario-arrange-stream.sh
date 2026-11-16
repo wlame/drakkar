@@ -42,6 +42,11 @@
 # Runs with every provider; the stream worker uses none.
 #
 # Usage: HARNESS_PROVIDER=filesystem integration/scenario-arrange-stream.sh
+#
+# Run `just integration-down` before a second run. The scenario removes its
+# container, but not the committed offsets of the consumer group
+# drakkar-stream: a request that a failed run left uncommitted is read again
+# first, and the next run then fails on records it did not produce.
 # ============================================================================
 
 # Some functions below run only through wait_until.
@@ -158,7 +163,8 @@ sink_records() {
 }
 
 # Check the records on stdin. Prints one summary line, or the first failed
-# check and exits 1.
+# check and exits 1; both go to stdout, so the caller's verdict line carries
+# the reason.
 #   check_records <mode: first|restart>
 check_records() {
     MODE="$1" TOKEN="$RUN_TOKEN" GROUP_COUNT="$GROUPS_PER_REQUEST" TASKS="$TASKS_PER_GROUP" \
@@ -242,11 +248,11 @@ if os.environ["MODE"] == "restart":
     if replayed != sorted(set(first_indices)):
         bad(f"{request}: groups {sorted(set(first_indices) - set(replayed))} of the first run did not run again")
     summary.append(
-        f"{request}: {len(first_run)} group records before the restart (indices {first_indices[0]}..{first_indices[-1]}), "
+        f"{request}: {len(first_run)} group records before the restart (indices {first_indices}), "
         f"all {groups} groups again after it, then 1 final record"
     )
 print("; ".join(summary))
-'
+' 2>&1
 }
 
 step "Scenario: arrange_stream on ${STREAM_SERVICE}"
