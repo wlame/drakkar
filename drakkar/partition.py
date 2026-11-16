@@ -384,6 +384,10 @@ class PartitionProcessor:
         self._keep_message_details = implemented['message_complete'] and not self._stream_mode
         self._keep_group_results = self._stream_mode and implemented['group_complete']
         self._group_label_names: tuple[str, ...] = tuple(getattr(handler, 'group_labels', ()))
+        # Tasks (and pulls, at least one each) the stream loop started since it
+        # last gave the event loop a turn. A generator that never awaits and
+        # a budget with room never suspend the loop on their own.
+        self._stream_work_since_turn = 0
         # The optional run-time hook, or None when the handler keeps the
         # default — asked once for the same reason, so a handler without it
         # pays nothing per task.
@@ -939,7 +943,7 @@ class PartitionProcessor:
         return self._windows_seen < WARM_UP_WINDOWS
 
     def _per_message_estimate(self, shape: MessageShape) -> tuple[float, float]:
-        """Tasks and bytes to reserve per message: the averages, never below the floor.
+        """Tasks and bytes to reserve per message (per group on a stream): the averages, never below the floor.
 
         The floor is ``max_pending_tasks / window_size`` tasks and
         ``max_pending_bytes / window_size`` bytes, so a full window always
@@ -949,6 +953,10 @@ class PartitionProcessor:
         all of them adds up.
         """
         assert self._account is not None and shape.tasks is not None
+        if self._stream_mode:
+            # One reservation per stream at a time, sized by the group
+            # averages: ``executor.window_size`` has no effect on a stream.
+            return max(shape.tasks, 1.0), shape.held_bytes
         budget = self._account.budget
         floor_tasks = math.ceil(budget.max_tasks / self._window_size)
         floor_bytes = budget.max_bytes / self._window_size
@@ -1305,6 +1313,7 @@ class PartitionProcessor:
 
         stream = self._open_stream(message)
         while True:
+            await self._yield_after_a_chunk_of_stream_work()
             if not await self._admit_next_group():
                 # A stop while the stream waited for room: the message
                 # stays open, so its offset stays pending.
@@ -1313,6 +1322,9 @@ class PartitionProcessor:
                 tasks = await self._pull_group(stream, tracker)
                 if tasks is None:
                     break
+                # An empty list counts as one: a stream of empty lists must
+                # give the loop a turn too.
+                self._stream_work_since_turn += max(1, len(tasks))
                 # Each admitted group is a step of the warm-up, with tasks or
                 # without, as a window is.
                 self._windows_seen += 1
@@ -1330,6 +1342,19 @@ class PartitionProcessor:
         tracker.stream_open = False
         if self._message_is_done(tracker):
             await self._finalize_message_tracker(tracker)
+
+    async def _yield_after_a_chunk_of_stream_work(self) -> None:
+        """Give the event loop a turn once ``FANOUT_CHUNK_TASKS`` tasks were started since the last one.
+
+        Called before the admission, never between its room check and its
+        reservation. Without it a stream of small groups from a generator
+        that does not await runs admission, pull and fan-out back to back
+        until the budget is full, and nothing else runs meanwhile: no Kafka
+        poll, no sink delivery, no health tick.
+        """
+        if self._stream_work_since_turn >= FANOUT_CHUNK_TASKS:
+            self._stream_work_since_turn = 0
+            await asyncio.sleep(0)
 
     async def _admit_next_group(self) -> bool:
         """Wait for room in the pending budget, then reserve one group's estimate; false after a stop.

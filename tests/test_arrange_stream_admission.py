@@ -6,12 +6,13 @@ most one group for each streaming message.
 """
 
 import asyncio
+import itertools
 
 import pytest
 
 from drakkar.budget import PendingBudget, output_bytes, text_bytes
 from drakkar.metrics import window_admission_wait
-from drakkar.partition import PartitionProcessor
+from drakkar.partition import FANOUT_CHUNK_TASKS, PartitionProcessor
 from tests.conftest import wait_for
 from tests.stream_helpers import (
     RecordingStreamHandler,
@@ -111,6 +112,15 @@ async def test_pending_tasks_never_pass_the_limit_by_more_than_one_group():
     budget = PendingBudget(max_tasks=6, max_bytes=1 << 40)
     handler = OneAtATime(groups=20, size=3, budget=budget)
     proc = budget_processor(handler, budget)
+    pending_after_fan_out: list[int] = []
+    note_shape = proc._note_window_shape
+
+    def note_shape_and_sample(message_count, task_count, stdin_bytes):
+        # Called once per group, right after its fan-out: the peak of the charge.
+        pending_after_fan_out.append(budget.tasks)
+        note_shape(message_count, task_count, stdin_bytes)
+
+    proc._note_window_shape = note_shape_and_sample
     proc.enqueue(make_msg(0))
     proc.start()
 
@@ -130,7 +140,8 @@ async def test_pending_tasks_never_pass_the_limit_by_more_than_one_group():
     assert handler.pulls == 20
     # A pull starts only below the limit; a group of 3 may then pass it.
     assert max(handler.pending_at_pull) < 6
-    assert 6 <= max(handler.pending_in_hook) <= 6 + 3
+    assert len(pending_after_fan_out) == 20
+    assert 6 <= max(pending_after_fan_out) <= 6 + 3
 
 
 async def test_a_group_larger_than_the_limit_is_admitted_and_the_stream_goes_on():
@@ -215,22 +226,24 @@ async def test_two_partitions_streaming_share_the_budget_in_turn():
         proc.enqueue(make_msg(0, partition=proc.partition_id))
         proc.start()
 
+    released = {id(handler): 0 for handler in handlers}
+
     async def release_one_group_when_full():
-        # The oldest tasks settle first, one group's worth at a time, and
-        # only while the budget is full and both streams wait (a stream
-        # waits before its last group too, for the pull that ends it).
+        # Only while the budget is full and both streams wait (a stream waits
+        # before its last group too, for the pull that ends it), the two
+        # tasks that wait in their hook settle: one group's worth at a time.
         while len(order) < 6:
-            if budget.tasks == 2 and budget.waiting_loops == 2:
-                oldest = turn.pop(0)
-                oldest.permits.release()
-                oldest.permits.release()
-                turn.append(oldest)
+            holders = [h for h in handlers if len(h.pending_in_hook) - released[id(h)] >= 2]
+            if budget.tasks == 2 and budget.waiting_loops == 2 and holders:
+                [holder] = holders
+                holder.permits.release()
+                holder.permits.release()
+                released[id(holder)] += 2
             await asyncio.sleep(0.001)
         for handler in handlers:
             for _ in range(6):
                 handler.permits.release()
 
-    turn = list(handlers)
     releaser = asyncio.create_task(release_one_group_when_full())
     for proc in procs:
         await finish(proc)
@@ -319,8 +332,8 @@ async def test_the_first_groups_reserve_the_free_room_and_later_ones_their_estim
     proc._end_window_reservation()
     proc._windows_seen = 3
     assert await proc._admit_next_group() is True
-    # After the warm-up: the floor of max_pending_tasks / window_size.
-    assert budget.reserved_tasks == 100
+    # After the warm-up: the group average, with no floor from window_size.
+    assert budget.reserved_tasks == 2
     proc._end_window_reservation()
 
 
@@ -337,6 +350,8 @@ async def test_a_raising_pull_gives_back_its_reservation():
         await proc._process_stream_message(make_msg(0))
     assert budget.reserved_tasks == 0 and budget.reserved_bytes == 0
     assert not budget.unmeasured_window_open
+    await wait_for(lambda: proc.inflight_count == 0)
+    assert budget.tasks == 0
 
 
 async def test_a_stop_while_the_stream_waits_leaves_its_message_open():
@@ -353,3 +368,93 @@ async def test_a_stop_while_the_stream_waits_leaves_its_message_open():
     assert proc._message_trackers[0].stream_open
     assert proc.offset_tracker.has_pending()
     budget.release(1, 0)
+
+
+async def test_an_empty_list_gives_back_its_reservation_and_the_unmeasured_slot():
+    class EmptyFirst(RecordingStreamHandler):
+        async def arrange_stream(self, message):
+            yield []
+            self.log.append(f'after-empty:{budget.reserved_tasks}:{budget.reserved_bytes}')
+            yield self.make_group(message, 0, 2)
+
+    budget = PendingBudget(max_tasks=1000, max_bytes=1 << 40)
+    handler = EmptyFirst()
+    proc = budget_processor(handler, budget)
+    proc.enqueue(make_msg(0))
+    proc.start()
+    await finish(proc)
+    # The empty list gave back the unmeasured slot (else the next pull would
+    # wait for it for ever); the next pull took it again and reserved nothing.
+    assert 'after-empty:0:0' in handler.log
+    assert handler.message_groups[0].succeeded == 2
+    assert budget.reserved_tasks == 0 and budget.reserved_bytes == 0
+    assert not budget.unmeasured_window_open
+
+
+async def test_a_stream_of_two_task_groups_reserves_about_its_group_with_default_limits():
+    reserved_at_pull: list[tuple[int, int]] = []
+
+    class Sampling(RecordingStreamHandler):
+        async def arrange_stream(self, message):
+            for index in range(8):
+                reserved_at_pull.append((budget.reserved_tasks, budget.reserved_bytes))
+                yield self.make_group(message, index, 2)
+
+    # The defaults of executor.max_pending_tasks, max_pending_bytes and window_size.
+    budget = PendingBudget(max_tasks=2000, max_bytes=1 << 30)
+    proc = PartitionProcessor(
+        partition_id=0,
+        handler=Sampling(),
+        executor_pool=make_pool(),
+        window_size=100,
+        budget=budget,
+    )
+    proc.enqueue(make_msg(0))
+    proc.start()
+    await finish(proc)
+    # After the warm-up a pull reserves the group average, not
+    # 2000 / 100 = 20 tasks and 1 GiB / 100 bytes.
+    assert len(reserved_at_pull) == 8
+    for tasks, held_bytes in reserved_at_pull[4:]:
+        assert tasks == 2
+        assert held_bytes <= 2 * text_bytes('in')
+
+
+class Splitter(RecordingStreamHandler):
+    """Yields ``count`` single-task groups and never awaits, as a CPU-only splitter does."""
+
+    def __init__(self, count: int) -> None:
+        super().__init__()
+        self.count = count
+        self.pulls = 0
+
+    async def arrange_stream(self, message):
+        for index in range(self.count):
+            self.pulls += 1
+            yield self.make_group(message, index, 1)
+
+
+async def ticks_until_streamed(handler: Splitter) -> list[int]:
+    """Run beside the stream, noting ``handler.pulls`` at each of its turns, until every group was pulled."""
+    samples = [handler.pulls]
+    while handler.pulls < handler.count:
+        await asyncio.sleep(0)
+        samples.append(handler.pulls)
+    return samples
+
+
+@pytest.mark.parametrize('with_budget', [True, False], ids=['budget', 'no_budget'])
+async def test_a_stream_of_small_groups_gives_the_loop_a_turn_every_chunk_of_tasks(with_budget):
+    handler = Splitter(count=4 * FANOUT_CHUNK_TASKS)
+    if with_budget:
+        proc = budget_processor(handler, PendingBudget(max_tasks=100_000, max_bytes=1 << 40))
+    else:
+        proc = stream_processor(handler)
+    ticker = asyncio.create_task(ticks_until_streamed(handler))
+    proc.enqueue(make_msg(0))
+    proc.start()
+    samples = await asyncio.wait_for(ticker, timeout=10)
+    await finish(proc)
+    steps = [later - earlier for earlier, later in itertools.pairwise(samples)]
+    assert max(steps) <= FANOUT_CHUNK_TASKS
+    assert len(handler.message_groups) == 1

@@ -30,7 +30,8 @@ by window: before each pull its loop waits for room and reserves one group's
 estimate, and the group's tasks are charged out of that reservation. A
 group larger than the limits is admitted when its turn comes, so a stream
 never waits for ever; the limits are passed by at most one group for each
-streaming message. On a stream worker the averages below are per group, and
+streaming message. On a stream worker the averages below are per group, a
+group reserves the averages with no floor from ``executor.window_size``, and
 the first groups of a partition are its warm-up.
 
 The estimate comes from moving averages of tasks and bytes per message, which
