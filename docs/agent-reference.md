@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `42b0f9987e2461a5`.
+Registry version: `36764bc76bd9eeb9`.
 
 ## Concepts
 
@@ -300,6 +300,25 @@ Each worker publishes a hash of its cluster task definitions in its card. Peers 
 
 **Related:** `concept:autodiscover`, `metric:drakkar_periodic_cluster_slots_total`, `metric:drakkar_periodic_cluster_mismatch_peers`, `event:periodic_run`, `rule:cluster-tasks-mismatch`, `recipe:cluster-task-not-running`
 
+### `concept:detach`
+
+A detached worker left its Kafka consumer group for a bounded time; its partitions go to the other workers of the group until it attaches again.
+
+The handler (`detach()`) or an operator (the Live page) can detach a worker with `sources.kafka.detach.enabled`. The worker takes one of `sources.kafka.detach.max_detached` lease slots in the autodiscover store, leaves the group, and waits until the revoke drain of its partitions has ended. It is then `detached`; the states on the way are `detaching` and `attaching`. The `origin` is `handler` or `operator`.
+
+A detach is refused when fewer than `sources.kafka.detach.min_attached` attached workers of the group would remain, when every slot is held, or when the store does not answer. The group size comes from the registry cards; the held slots are counted in the store.
+
+A detach ends, and the worker joins the group again, when the handler attaches (only a handler detach), when an operator attaches, when the deadline passes, when the slot lease is lost, or when too few workers of the group stay attached. A detach never survives a restart: a started worker is attached. The slot of a worker that crashed stays held until its lease ends.
+
+While detached, the worker reads no Kafka message and has no `drakkar_consumer_lag` series. Periodic tasks, cluster tasks, the HTTP source, the recorder and the UI keep running, and `/readyz` answers as before.
+
+**Principles:**
+- Lag belongs to a partition, not to a worker; a rule that detaches on high lag moves the hot partition to a peer.
+- Each return makes the other workers of the group give partitions back through a revoke drain.
+- Every worker of one group should use the same max_detached and min_attached.
+
+**Related:** `concept:autodiscover`, `config:sources.kafka.detach.enabled`, `config:sources.kafka.detach.max_detached`, `config:sources.kafka.detach.min_attached`, `config:sources.kafka.detach.default_duration`, `config:sources.kafka.detach.max_duration`, `config:sources.kafka.detach.cooldown`, `config:sources.kafka.detach.lease`, `config:ui.detach_enabled`, `metric:drakkar_detached`, `metric:drakkar_detach_requests_total`, `metric:drakkar_attach_total`, `event:worker_detached`, `event:worker_attached`, `rule:worker-detached`, `recipe:worker-detached`
+
 ### `concept:cache-exchange`
 
 The cache exchange lets each worker pull the cluster and global cache rows that its peers wrote, over HTTP.
@@ -502,7 +521,7 @@ Whether this worker may leave its consumer group for a bounded time and join it 
 
 **Advice:** Turn it on only with autodiscover on, and set max_detached and min_attached to the same values on every worker of the group.
 
-**Related:** `concept:autodiscover`, `config:sources.kafka.detach.max_detached`
+**Related:** `concept:detach`, `concept:autodiscover`, `config:sources.kafka.detach.max_detached`
 
 ### `config:sources.kafka.detach.max_detached`
 
@@ -510,7 +529,7 @@ How many workers of one consumer group may be detached at once.
 
 **Advice:** Keep it well below the group size; workers that are away leave their partitions to the others, which must carry the load.
 
-**Related:** `config:sources.kafka.detach.min_attached`
+**Related:** `concept:detach`, `config:sources.kafka.detach.min_attached`
 
 ### `config:sources.kafka.detach.min_attached`
 
@@ -518,7 +537,7 @@ How many workers of one consumer group must stay attached.
 
 **Advice:** Raise it when the group needs a minimum number of consumers to keep up with the topic.
 
-**Related:** `config:sources.kafka.detach.max_detached`
+**Related:** `concept:detach`, `config:sources.kafka.detach.max_detached`
 
 ### `config:sources.kafka.detach.default_duration`
 
@@ -526,7 +545,7 @@ How long a detach lasts when the request gives no duration.
 
 **Advice:** Set it to the usual time a worker needs to recover; it must not be above max_duration.
 
-**Related:** `config:sources.kafka.detach.max_duration`
+**Related:** `concept:detach`, `config:sources.kafka.detach.max_duration`
 
 ### `config:sources.kafka.detach.max_duration`
 
@@ -534,11 +553,15 @@ The longest detach a request may ask for.
 
 **Advice:** Keep it short enough that a forgotten detach ends by itself in a time the group can carry.
 
+**Related:** `concept:detach`
+
 ### `config:sources.kafka.detach.cooldown`
 
 The shortest time between the return of a handler detach and the next handler detach.
 
 **Advice:** Raise it when handler detaches repeat often; each return makes the other workers of the group run a revoke drain.
+
+**Related:** `concept:detach`
 
 ### `config:sources.kafka.detach.lease`
 
@@ -546,7 +569,7 @@ The lease of the detach slot in the autodiscover store.
 
 **Advice:** Keep the default unless the store is slow; a longer lease keeps a slot longer after a worker died.
 
-**Related:** `concept:autodiscover`
+**Related:** `concept:detach`, `concept:autodiscover`
 
 ### `config:sources.http.request_timeout`
 
@@ -810,7 +833,7 @@ Whether the operator detach and attach routes answer and the Live page shows the
 
 **Advice:** Turn it on only where operators may take a worker out of its group; the debug UI is open, so anyone who reaches it can detach.
 
-**Related:** `config:sources.kafka.detach.enabled`
+**Related:** `concept:detach`, `config:sources.kafka.detach.enabled`
 
 ### `config:agent.enabled`
 
@@ -992,7 +1015,7 @@ Partition loops that ended on an unexpected error, with outcome restarted or dea
 
 **Healthy:** 0 outside of a detach that an operator or the handler asked for.
 
-**Related:** `config:sources.kafka.detach.enabled`, `event:worker_detached`
+**Related:** `concept:detach`, `config:sources.kafka.detach.enabled`, `event:worker_detached`
 
 ### `metric:drakkar_detach_requests_total`
 
@@ -1002,7 +1025,7 @@ Detach requests by origin and outcome.
 
 **Healthy:** Few requests; refusals with store_unavailable or leave_failed need a look.
 
-**Related:** `config:sources.kafka.detach.max_detached`, `event:worker_detached`
+**Related:** `concept:detach`, `config:sources.kafka.detach.max_detached`, `event:worker_detached`
 
 ### `metric:drakkar_attach_total`
 
@@ -1012,7 +1035,7 @@ Returns to the consumer group after a detach, by cause.
 
 **Healthy:** Mostly the causes handler, operator and deadline.
 
-**Related:** `config:sources.kafka.detach.lease`, `event:worker_attached`
+**Related:** `concept:detach`, `config:sources.kafka.detach.lease`, `event:worker_attached`
 
 ### `metric:drakkar_total_queued`
 
@@ -2438,7 +2461,7 @@ Kafka took a partition away from this worker.
 
 This worker left its consumer group for a bounded time.
 
-**When:** Once per detach, after the revoke drain ended and a budget slot was taken.
+**When:** Once per detach, after a budget slot was taken and the revoke drain ended.
 
 **Fields:**
 - `metadata`: The origin, the reason, the deadline (until) and the index of the budget slot.
@@ -2446,7 +2469,7 @@ This worker left its consumer group for a bounded time.
 
 **Action:** Check the reason; the worker takes no Kafka input until it attaches again.
 
-**Related:** `config:sources.kafka.detach.enabled`, `metric:drakkar_detached`
+**Related:** `concept:detach`, `config:sources.kafka.detach.enabled`, `metric:drakkar_detached`
 
 ### `event:worker_attached`
 
@@ -2458,7 +2481,9 @@ This worker joined its consumer group again after a detach.
 - `metadata`: The cause that ended the detach and the seconds the worker was away.
 - `partition`: Always -1; the row belongs to the worker.
 
-**Related:** `config:sources.kafka.detach.enabled`, `metric:drakkar_attach_total`
+**Action:** Check the cause; lease_lost and too_few_workers mean the framework ended the detach early.
+
+**Related:** `concept:detach`, `config:sources.kafka.detach.enabled`, `metric:drakkar_attach_total`
 
 ### `event:committed`
 
@@ -3280,6 +3305,34 @@ Set timeouts, retries and failure policies so that they agree with each other an
 
 **Related:** `concept:failure-outcomes`, `concept:dlq`, `concept:sinks-and-delivery`, `config:executor.on_failure`, `config:executor.max_retries`, `config:dlq.on_send_failure`, `config:executor.drain_timeout`
 
+### `recipe:worker-detached`
+
+Find out why a worker is detached from its consumer group, when it comes back, and why a detach was refused or ended early.
+
+**Question:** Why is this worker detached, and why did a detach end or fail?
+
+**Steps:**
+1. Call /api/v1/agent/state?parts=detach. Why: It gives the state (attached, detaching, detached or attaching), the origin (handler or operator), the reason text, since and until in epoch seconds.
+2. With the UI on, call GET /api/v1/debug/detach and read last_request. Why: It names the origin, the action (detach or attach) and the outcome of the last request, also when the request was refused.
+3. Read drakkar_detached, drakkar_detach_requests_total by origin and outcome, and drakkar_attach_total by cause. Why: They count the time away, the refusals by reason and what ended each detach.
+4. Read the log events worker_detached, worker_attached, detach_refused, detach_lease_unconfirmed, detach_join_failed and detach_undone. Why: worker_detached and worker_attached mark each detach and its end with the cause; detach_refused gives the refusal reason; detach_lease_unconfirmed means the store did not confirm the slot lease; detach_join_failed means a return to the group did not succeed yet and is tried again every 5 seconds; detach_undone means a detach failed before the worker was detached and was taken back.
+5. Read the lag of the partitions on the other workers of the group, not on this worker. Why: Lag belongs to a partition, not to a worker. A detached worker has no partitions and no lag metric of its own, so a rule that attaches when its own lag is low cannot work.
+6. Expect revokes on the other workers when this worker returns. Why: At the return the other workers give partitions back; each runs its revoke drain, and tasks that do not finish within executor.drain_timeout are cancelled and run again on the returning worker.
+
+**Causes:**
+- The deadline passed (attach cause deadline). Check: drakkar_attach_total{cause="deadline"} grew and worker_attached has cause deadline. Fix: Nothing to fix; ask for a longer duration up to sources.kafka.detach.max_duration if the worker needed more time.
+- The handler or an operator attached the worker (attach cause handler or operator). Check: worker_attached has cause handler or operator; a handler attach does not end an operator detach. Fix: Nothing to fix.
+- The slot lease was lost (attach cause lease_lost). Check: detach_lease_unconfirmed lines came before, or another worker holds the slot. Fix: Check the autodiscover store and its breaker; the framework ended the detach early.
+- Too few workers of the group stayed attached (attach cause too_few_workers, or the refusal too_few_workers). Check: The registry shows fewer attached online workers of the group than sources.kafka.detach.min_attached. Fix: Start or repair the other workers, or lower min_attached on every worker of the group.
+- The detach was refused with budget_full. Check: Every one of the max_detached slots is held by another worker. Fix: Wait for a detached worker to return, or raise sources.kafka.detach.max_detached on every worker of the group.
+- The detach was refused with store_unavailable. Check: drakkar_provider_calls_total{feature="detach"} shows outcomes other than ok. Fix: Fix the autodiscover provider or its connection.
+- The detach was refused with leave_failed. Check: The revoke drain did not end within executor.drain_timeout plus 10 seconds; the worker joined the group again. Fix: Find the slow tasks or hooks that hold the drain; follow the tasks-slow recipe.
+- The detach was refused with cooldown. Check: A handler detach came sooner than sources.kafka.detach.cooldown after the last return. Fix: Detach less often, or raise the cooldown so the group is not rebalanced so often.
+- The detach was refused with inside_pipeline_hook. Check: The handler called detach from code that runs as part of a partition's work, which would wait for itself. Fix: Call detach from a periodic task, from on_assign or on_revoke, or from a task the handler started itself.
+- The detach was refused with already_detached, join_failed, not_running, stopping or disabled. Check: already_detached means an operator detach is active; join_failed means the worker is still on its way back; not_running and stopping mean the Kafka source is not running; disabled means sources.kafka.detach.enabled is false or there is no Kafka source. Fix: Wait for the state to change, or turn the feature on.
+
+**Related:** `concept:detach`, `config:sources.kafka.detach.max_detached`, `config:sources.kafka.detach.min_attached`, `metric:drakkar_detached`, `metric:drakkar_detach_requests_total`, `metric:drakkar_attach_total`, `event:worker_detached`, `event:worker_attached`, `rule:worker-detached`
+
 ## Routes
 
 ### `route:GET /healthz`
@@ -3988,3 +4041,21 @@ The agent routes need no token; anyone who reaches the API port can read the con
 
 **Inputs:**
 - `agent.auth_token`
+
+### `rule:worker-detached`
+
+This worker left its consumer group for a bounded time; its partitions are consumed by the other workers of the group until it attaches again.
+
+**Severity:** info
+
+**Title:** The worker is detached from its consumer group
+
+**Explain:** `concept:detach`
+
+**Suggestion:** Read origin to learn who detached the worker (handler or operator) and until for the time it attaches by itself; meanwhile its partitions are on its peers, so check their lag, and do not restart it.
+
+**Inputs:**
+- `detach.state`
+- `detach.origin`
+- `detach.reason`
+- `detach.until`

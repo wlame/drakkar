@@ -49,6 +49,7 @@
       "sinks",
       "recorder",
       "autodiscover",
+      "detach",
       "recent_failures"
     ]
   },
@@ -117,38 +118,39 @@
         "sinks",
         "recorder",
         "autodiscover",
+        "detach",
         "recent_failures"
       ]
     },
     {
       "route": "state",
       "parts": "rules,concepts",
-      "error": "unknown part 'rules'; known: autodiscover, budget, health, partitions, recent_failures, recorder, sinks"
+      "error": "unknown part 'rules'; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks"
     },
     {
       "route": "state",
       "parts": "rules,rules",
-      "error": "unknown part 'rules'; known: autodiscover, budget, health, partitions, recent_failures, recorder, sinks"
+      "error": "unknown part 'rules'; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks"
     },
     {
       "route": "state",
       "parts": "",
-      "error": "unknown part ''; known: autodiscover, budget, health, partitions, recent_failures, recorder, sinks"
+      "error": "unknown part ''; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks"
     },
     {
       "route": "state",
       "parts": "concepts,",
-      "error": "unknown part 'concepts'; known: autodiscover, budget, health, partitions, recent_failures, recorder, sinks"
+      "error": "unknown part 'concepts'; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks"
     },
     {
       "route": "state",
       "parts": "nope,also",
-      "error": "unknown part 'nope'; known: autodiscover, budget, health, partitions, recent_failures, recorder, sinks"
+      "error": "unknown part 'nope'; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks"
     },
     {
       "route": "state",
       "parts": "Concepts",
-      "error": "unknown part 'Concepts'; known: autodiscover, budget, health, partitions, recent_failures, recorder, sinks"
+      "error": "unknown part 'Concepts'; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks"
     },
     {
       "route": "state",
@@ -156,6 +158,14 @@
       "value": [
         "health",
         "budget"
+      ]
+    },
+    {
+      "route": "state",
+      "parts": "recent_failures,detach",
+      "value": [
+        "detach",
+        "recent_failures"
       ]
     }
   ],
@@ -1219,6 +1229,13 @@
                   "peers_offline": 0,
                   "cluster_tasks_match": true
                 },
+                "detach": {
+                  "state": "attached",
+                  "origin": null,
+                  "reason": "",
+                  "since": null,
+                  "until": null
+                },
                 "recent_failures": {
                   "failures": []
                 }
@@ -1767,6 +1784,156 @@
                 }
               }
             ]
+          }
+        ]
+      },
+      {
+        "name": "worker detached",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "detach": {
+                  "state": "detached",
+                  "origin": "operator",
+                  "reason": "slow disk",
+                  "since": 1794830400.5,
+                  "until": 1794834000.5
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "worker-detached",
+                "severity": "info",
+                "evidence": {
+                  "origin": "operator",
+                  "reason": "slow disk",
+                  "until": 1794834000.5
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "worker not detached",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "detach": {
+                  "state": "attached",
+                  "origin": null,
+                  "reason": "",
+                  "since": null,
+                  "until": null
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "detach": {
+                  "state": "detaching",
+                  "origin": "handler",
+                  "reason": "x",
+                  "since": 1794830400,
+                  "until": null
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "detach": {
+                  "state": "attaching",
+                  "origin": "handler",
+                  "reason": "x",
+                  "since": 1794830400,
+                  "until": null
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "detach": null
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 0,
+            "input": {
+              "state": {},
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
           }
         ]
       },

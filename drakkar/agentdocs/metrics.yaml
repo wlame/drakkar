@@ -125,6 +125,7 @@
   meaning: The worker left its consumer group for a bounded time; it takes no Kafka input until it attaches again.
   healthy: 0 outside of a detach that an operator or the handler asked for.
   related:
+    - concept:detach
     - config:sources.kafka.detach.enabled
     - event:worker_detached
 
@@ -133,6 +134,7 @@
   meaning: The outcome is detached, or the reason why the request was refused.
   healthy: Few requests; refusals with store_unavailable or leave_failed need a look.
   related:
+    - concept:detach
     - config:sources.kafka.detach.max_detached
     - event:worker_detached
 
@@ -141,6 +143,7 @@
   meaning: The cause says what ended the detach; lease_lost and too_few_workers mean the framework ended it early.
   healthy: Mostly the causes handler, operator and deadline.
   related:
+    - concept:detach
     - config:sources.kafka.detach.lease
     - event:worker_attached
 

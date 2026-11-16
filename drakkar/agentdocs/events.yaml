@@ -43,12 +43,13 @@
 
 - key: worker_detached
   summary: This worker left its consumer group for a bounded time.
-  when: Once per detach, after the revoke drain ended and a budget slot was taken.
+  when: Once per detach, after a budget slot was taken and the revoke drain ended.
   fields:
     partition: Always -1; the row belongs to the worker.
     metadata: The origin, the reason, the deadline (until) and the index of the budget slot.
   action: Check the reason; the worker takes no Kafka input until it attaches again.
   related:
+    - concept:detach
     - config:sources.kafka.detach.enabled
     - metric:drakkar_detached
 
@@ -58,7 +59,9 @@
   fields:
     partition: Always -1; the row belongs to the worker.
     metadata: The cause that ended the detach and the seconds the worker was away.
+  action: Check the cause; lease_lost and too_few_workers mean the framework ended the detach early.
   related:
+    - concept:detach
     - config:sources.kafka.detach.enabled
     - metric:drakkar_attach_total
 

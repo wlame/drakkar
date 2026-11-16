@@ -6,7 +6,8 @@ read in one coroutine on the main loop through the bounded dispatch of the API
 server; a main loop that does not answer in time gives those parts ``null``.
 The other parts are read where the request runs, from values that are safe to
 read from any thread: the runtime health monitor (it answers during a stall),
-the recorder's status and the registry's last peer snapshot.
+the recorder's status, the registry's last peer snapshot and the detach state
+(one immutable object that is replaced as a whole).
 
 Payload text (the stderr tail and the args of a failed task) is read only when
 ``agent.include_payloads`` is true, and only into ``recent_failures``.
@@ -37,10 +38,13 @@ from drakkar.uiserver.databases_status import recorder_block
 from drakkar.uiserver.server import dispatch_bounded
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from prometheus_client.metrics import MetricWrapperBase
 
     from drakkar.app import DrakkarApp
     from drakkar.config import DrakkarConfig
+    from drakkar.detach import DetachState
 
 STATE_ENDPOINT = '/api/v1/agent/state'
 MAX_RECENT_FAILURES = 20
@@ -240,6 +244,29 @@ def autodiscover_part(config: DrakkarConfig, fleet: Any, *, own_cluster: str, ow
     return answer
 
 
+# --- detach -------------------------------------------------------------
+
+
+def _epoch_seconds(moment: datetime | None) -> int | float | None:
+    return None if moment is None else json_number(round(moment.timestamp(), 3))
+
+
+def detach_part(state: DetachState) -> dict[str, Any]:
+    """The ``detach`` part: the state, its origin, its reason, and ``since`` and ``until`` in epoch seconds.
+
+    A worker that never detached (the feature off, or no Kafka source) is
+    ``attached`` with no origin, an empty reason and no times. ``until`` is set
+    only while ``detached``.
+    """
+    return {
+        'state': state.state,
+        'origin': str(state.origin) if state.origin is not None else None,
+        'reason': state.reason,
+        'since': _epoch_seconds(state.since),
+        'until': _epoch_seconds(state.until),
+    }
+
+
 # --- recent failures ----------------------------------------------------
 
 
@@ -403,6 +430,8 @@ async def read_state(app: DrakkarApp, parts: Sequence[str], *, include_payloads:
                 own_cluster=app.worker_identity.cluster,
                 own_hash=app.cluster_tasks_hash,
             )
+        elif part == 'detach':
+            answer[part] = detach_part(app.detach.state)
         else:
             answer[part] = loop_parts.get(part)
     return answer

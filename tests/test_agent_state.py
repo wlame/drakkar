@@ -6,6 +6,7 @@ import json
 import sqlite3
 import time
 from contextlib import closing
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,6 +25,7 @@ from drakkar.agent.state import (
     bounded_args,
     budget_part,
     counter_total,
+    detach_part,
     failure_row,
     health_part,
     partitions_part,
@@ -37,6 +39,7 @@ from drakkar.agent.state import (
 )
 from drakkar.budget import PendingBudget
 from drakkar.config import DrakkarConfig
+from drakkar.detach import ATTACHED_STATE, DetachOrigin, DetachState
 from drakkar.recorder.schema import SCHEMA_EVENTS
 from drakkar.schedule import cluster_tasks_hash
 from drakkar.sinks.manager import SinkStats
@@ -397,6 +400,61 @@ def test_autodiscover_reports_a_mismatch_of_an_online_peer_of_the_same_cluster()
     assert part['cluster_tasks_match'] is False
 
 
+# --- detach ---
+
+
+def test_detach_of_an_attached_worker():
+    assert detach_part(ATTACHED_STATE) == {
+        'state': 'attached',
+        'origin': None,
+        'reason': '',
+        'since': None,
+        'until': None,
+    }
+
+
+def test_detach_of_a_detached_worker_gives_epoch_seconds():
+    state = DetachState(
+        state='detached',
+        origin=DetachOrigin.OPERATOR,
+        reason='slow disk',
+        since=datetime(2026, 11, 16, 10, 0, 0, 500000, tzinfo=UTC),
+        until=datetime(2026, 11, 16, 11, 0, 0, tzinfo=UTC),
+    )
+
+    part = detach_part(state)
+
+    assert part == {
+        'state': 'detached',
+        'origin': 'operator',
+        'reason': 'slow disk',
+        'since': 1794823200.5,
+        'until': 1794826800,
+    }
+    assert type(part['origin']) is str
+    assert dumps(part) == (
+        '{"state":"detached","origin":"operator","reason":"slow disk","since":1794823200.5,"until":1794826800}'
+    )
+
+
+def test_detach_while_leaving_has_no_deadline():
+    state = DetachState(
+        state='detaching',
+        origin=DetachOrigin.HANDLER,
+        reason='',
+        since=datetime(2026, 11, 16, 10, 0, tzinfo=UTC),
+        until=None,
+    )
+
+    assert detach_part(state) == {
+        'state': 'detaching',
+        'origin': 'handler',
+        'reason': '',
+        'since': 1794823200,
+        'until': None,
+    }
+
+
 # --- recent failures ---
 
 
@@ -628,6 +686,7 @@ def _state_app(config: DrakkarConfig, **fields: Any) -> Any:
     app.fleet = None
     app.worker_identity = SimpleNamespace(cluster='main')
     app.cluster_tasks_hash = cluster_tasks_hash(())
+    app.detach = SimpleNamespace(state=ATTACHED_STATE)
     for name, value in fields.items():
         setattr(app, name, value)
     return app
@@ -640,6 +699,25 @@ async def test_read_state_answers_every_part_in_the_contract_order():
     assert state['health']['state'] == 'off'
     assert state['partitions'] == []
     assert state['recent_failures'] == {'failures': [], 'note': NO_RECORDER_STORE_NOTE}
+    assert state['detach'] == detach_part(ATTACHED_STATE)
+
+
+async def test_read_state_reads_the_detach_state_without_the_main_loop(monkeypatch):
+    dispatch = AsyncMock()
+    monkeypatch.setattr('drakkar.agent.state.dispatch_bounded', dispatch)
+    detached = DetachState(
+        state='detached',
+        origin=DetachOrigin.HANDLER,
+        reason='probe failed',
+        since=datetime(2026, 11, 16, 10, 0, tzinfo=UTC),
+        until=datetime(2026, 11, 16, 10, 30, tzinfo=UTC),
+    )
+    app = _state_app(_config(), detach=SimpleNamespace(state=detached))
+
+    state = await read_state(app, ['detach'], include_payloads=False)
+
+    assert state == {'detach': detach_part(detached)}
+    dispatch.assert_not_awaited()
 
 
 async def test_read_state_answers_only_the_asked_parts_and_skips_the_loop_when_none_needs_it(monkeypatch):

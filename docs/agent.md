@@ -45,7 +45,7 @@ Every route is a `GET` under `/api/v1/agent`. Every answer has
 | `/api/v1/agent/manual` | The registry: concepts, config advice, metrics, events, recipes, routes, rules, and the handler notes (`app`). | `parts`, `detail`, `format=json\|markdown`, `topic=<kind>:<key>` |
 | `/api/v1/agent/config` | The effective config, one entry per key: `path`, `value`, `default`, `origin` (`default`, `yaml`, `env` or `on_startup`), `type`, `secret`, `meaning`, and `advice` with `detail=full`. | `parts` (the root sections), `detail` |
 | `/api/v1/agent/metrics` | The framework and handler metrics with their meaning, the healthy values and at most 100 samples per family; `promql` and `related` with `detail=full`. | `names`, `prefix`, `detail` |
-| `/api/v1/agent/state` | One snapshot: `health`, `budget`, `partitions`, `sinks`, `recorder`, `autodiscover`, `recent_failures` (the last 20 failed tasks). | `parts` |
+| `/api/v1/agent/state` | One snapshot: `health`, `budget`, `partitions`, `sinks`, `recorder`, `autodiscover`, `detach` (the state, origin, reason, and `since` and `until` in epoch seconds), `recent_failures` (the last 20 failed tasks). | `parts` |
 | `/api/v1/agent/diagnose` | The findings of the rules, by severity, with their evidence, an `explain` reference and a suggestion; `checked` names every rule that ran and `failed` every rule that could not run. | none |
 
 The common parameters:
@@ -104,6 +104,7 @@ text, also with `agent.include_payloads: true`.
 | `partition-paused-by-debug` | info | An operator paused a partition from the UI. |
 | `dlq-writing` | info | The worker wrote DLQ records since the previous call. |
 | `agent-unauthenticated` | info | The agent routes need no token. |
+| `worker-detached` | info | The worker is detached from its consumer group. |
 
 Three rules compare with the previous call on the same worker process; the
 first call never fires them. Each rule's text is in the

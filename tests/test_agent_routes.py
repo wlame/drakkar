@@ -56,6 +56,7 @@ from drakkar.agent.registry import (
 from drakkar.agent.rules import DiagnoseResult, RuleInput, finding_of
 from drakkar.app import DrakkarApp
 from drakkar.config import DrakkarConfig
+from drakkar.detach import ATTACHED_STATE
 from drakkar.schedule import cluster_tasks_hash
 from drakkar.uiserver.routes_agent import AgentSurface, create_agent_router, token_matches
 from drakkar.uiserver.server import create_api_app, create_ui_app
@@ -109,6 +110,7 @@ def _drakkar_app(config: DrakkarConfig) -> MagicMock:
     app.fleet = None
     app.worker_identity = SimpleNamespace(cluster='cluster-a')
     app.cluster_tasks_hash = cluster_tasks_hash(())
+    app.detach = SimpleNamespace(state=ATTACHED_STATE)
     return app
 
 
@@ -1230,8 +1232,19 @@ async def test_the_state_and_diagnose_sizes_reach_the_index():
 
     state_sizes = index['routes'][3]['approx_tokens']
     assert state_sizes['budget'] == approx_tokens(budget_text)
+    assert state_sizes['detach'] == 0
     assert state_sizes['health'] == 0
     assert index['routes'][4]['approx_tokens'] == {'all': approx_tokens(diagnose_text)}
+
+
+async def test_the_detach_part_size_reaches_the_index():
+    async with _client(create_api_app(_drakkar_app(_config()))) as client:
+        detach_text = (await client.get('/api/v1/agent/state', params={'parts': 'detach'})).text
+        index = (await client.get('/api/v1/agent')).json()
+
+    assert list(index['routes'][3]['approx_tokens']).index('detach') == list(STATE_PARTS).index('detach')
+    assert index['routes'][3]['approx_tokens']['detach'] == approx_tokens(detach_text)
+    assert detach_text == '{"detach":{"state":"attached","origin":null,"reason":"","since":null,"until":null}}'
 
 
 async def test_diagnose_runs_every_rule_and_finds_the_missing_token():

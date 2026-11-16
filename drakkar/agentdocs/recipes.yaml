@@ -409,3 +409,61 @@
     - config:executor.max_retries
     - config:dlq.on_send_failure
     - config:executor.drain_timeout
+
+- key: worker-detached
+  summary: Find out why a worker is detached from its consumer group, when it comes back, and why a detach was refused or ended early.
+  question: Why is this worker detached, and why did a detach end or fail?
+  steps:
+    - do: Call /api/v1/agent/state?parts=detach.
+      why: It gives the state (attached, detaching, detached or attaching), the origin (handler or operator), the reason text, since and until in epoch seconds.
+    - do: With the UI on, call GET /api/v1/debug/detach and read last_request.
+      why: It names the origin, the action (detach or attach) and the outcome of the last request, also when the request was refused.
+    - do: Read drakkar_detached, drakkar_detach_requests_total by origin and outcome, and drakkar_attach_total by cause.
+      why: They count the time away, the refusals by reason and what ended each detach.
+    - do: Read the log events worker_detached, worker_attached, detach_refused, detach_lease_unconfirmed, detach_join_failed and detach_undone.
+      why: worker_detached and worker_attached mark each detach and its end with the cause; detach_refused gives the refusal reason; detach_lease_unconfirmed means the store did not confirm the slot lease; detach_join_failed means a return to the group did not succeed yet and is tried again every 5 seconds; detach_undone means a detach failed before the worker was detached and was taken back.
+    - do: Read the lag of the partitions on the other workers of the group, not on this worker.
+      why: Lag belongs to a partition, not to a worker. A detached worker has no partitions and no lag metric of its own, so a rule that attaches when its own lag is low cannot work.
+    - do: Expect revokes on the other workers when this worker returns.
+      why: At the return the other workers give partitions back; each runs its revoke drain, and tasks that do not finish within executor.drain_timeout are cancelled and run again on the returning worker.
+  causes:
+    - cause: The deadline passed (attach cause deadline).
+      check: drakkar_attach_total{cause="deadline"} grew and worker_attached has cause deadline.
+      fix: Nothing to fix; ask for a longer duration up to sources.kafka.detach.max_duration if the worker needed more time.
+    - cause: The handler or an operator attached the worker (attach cause handler or operator).
+      check: worker_attached has cause handler or operator; a handler attach does not end an operator detach.
+      fix: Nothing to fix.
+    - cause: The slot lease was lost (attach cause lease_lost).
+      check: detach_lease_unconfirmed lines came before, or another worker holds the slot.
+      fix: Check the autodiscover store and its breaker; the framework ended the detach early.
+    - cause: Too few workers of the group stayed attached (attach cause too_few_workers, or the refusal too_few_workers).
+      check: The registry shows fewer attached online workers of the group than sources.kafka.detach.min_attached.
+      fix: Start or repair the other workers, or lower min_attached on every worker of the group.
+    - cause: The detach was refused with budget_full.
+      check: Every one of the max_detached slots is held by another worker.
+      fix: Wait for a detached worker to return, or raise sources.kafka.detach.max_detached on every worker of the group.
+    - cause: The detach was refused with store_unavailable.
+      check: drakkar_provider_calls_total{feature="detach"} shows outcomes other than ok.
+      fix: Fix the autodiscover provider or its connection.
+    - cause: The detach was refused with leave_failed.
+      check: The revoke drain did not end within executor.drain_timeout plus 10 seconds; the worker joined the group again.
+      fix: Find the slow tasks or hooks that hold the drain; follow the tasks-slow recipe.
+    - cause: The detach was refused with cooldown.
+      check: A handler detach came sooner than sources.kafka.detach.cooldown after the last return.
+      fix: Detach less often, or raise the cooldown so the group is not rebalanced so often.
+    - cause: The detach was refused with inside_pipeline_hook.
+      check: The handler called detach from code that runs as part of a partition's work, which would wait for itself.
+      fix: Call detach from a periodic task, from on_assign or on_revoke, or from a task the handler started itself.
+    - cause: The detach was refused with already_detached, join_failed, not_running, stopping or disabled.
+      check: already_detached means an operator detach is active; join_failed means the worker is still on its way back; not_running and stopping mean the Kafka source is not running; disabled means sources.kafka.detach.enabled is false or there is no Kafka source.
+      fix: Wait for the state to change, or turn the feature on.
+  related:
+    - concept:detach
+    - config:sources.kafka.detach.max_detached
+    - config:sources.kafka.detach.min_attached
+    - metric:drakkar_detached
+    - metric:drakkar_detach_requests_total
+    - metric:drakkar_attach_total
+    - event:worker_detached
+    - event:worker_attached
+    - rule:worker-detached

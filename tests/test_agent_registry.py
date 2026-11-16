@@ -46,6 +46,7 @@ REQUIRED_CONCEPTS = {
     'http-source',
     'databases-view',
     'agent-surface',
+    'detach',
 }
 REQUIRED_RECIPES = {
     'lag-growing',
@@ -60,6 +61,7 @@ REQUIRED_RECIPES = {
     'peer-missing',
     'cluster-task-not-running',
     'disk-filling',
+    'worker-detached',
 }
 REQUIRED_RULES = {
     'worker-stalled',
@@ -75,6 +77,7 @@ REQUIRED_RULES = {
     'peers-offline',
     'cluster-tasks-mismatch',
     'agent-unauthenticated',
+    'worker-detached',
 }
 RULE_SEVERITIES = {
     'worker-stalled': 'critical',
@@ -90,6 +93,7 @@ RULE_SEVERITIES = {
     'peers-offline': 'warning',
     'cluster-tasks-mismatch': 'warning',
     'agent-unauthenticated': 'info',
+    'worker-detached': 'info',
 }
 
 

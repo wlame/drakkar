@@ -43,6 +43,7 @@ DLQ_MESSAGES_METRIC = 'drakkar_sink_dlq_messages_total'
 RULE_METRICS = (DROPPED_EVENTS_METRIC, DROPPED_POSTGRES_ROWS_METRIC, DLQ_MESSAGES_METRIC)
 
 STALLED_STATE = 'stalled'
+DETACHED_STATE = 'detached'
 DEBUG_PAUSE = 'debug'
 
 
@@ -294,6 +295,14 @@ def agent_unauthenticated(rule_input: RuleInput, baselines: Baselines) -> dict[s
     return {'auth_token_set': False}
 
 
+def worker_detached(rule_input: RuleInput, baselines: Baselines) -> dict[str, Any] | None:
+    """``detach.state`` is ``detached``; a worker on its way out or back finds nothing."""
+    detach = _part(rule_input, 'detach')
+    if detach.get('state') != DETACHED_STATE:
+        return None
+    return {'origin': detach.get('origin'), 'reason': detach.get('reason'), 'until': detach.get('until')}
+
+
 # The implementations by rule key, in the order of rules.yaml; a test keeps
 # the two lists equal.
 FRAMEWORK_RULES: dict[str, Rule] = {
@@ -310,6 +319,7 @@ FRAMEWORK_RULES: dict[str, Rule] = {
     'peers-offline': peers_offline,
     'cluster-tasks-mismatch': cluster_tasks_mismatch,
     'agent-unauthenticated': agent_unauthenticated,
+    'worker-detached': worker_detached,
 }
 
 

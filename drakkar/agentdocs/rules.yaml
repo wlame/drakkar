@@ -128,3 +128,15 @@
   suggestion: Set agent.auth_token, or keep the API port on a private network.
   inputs:
     - agent.auth_token
+
+- key: worker-detached
+  summary: This worker left its consumer group for a bounded time; its partitions are consumed by the other workers of the group until it attaches again.
+  severity: info
+  title: The worker is detached from its consumer group
+  explain: concept:detach
+  suggestion: Read origin to learn who detached the worker (handler or operator) and until for the time it attaches by itself; meanwhile its partitions are on its peers, so check their lag, and do not restart it.
+  inputs:
+    - detach.state
+    - detach.origin
+    - detach.reason
+    - detach.until

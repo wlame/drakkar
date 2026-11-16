@@ -356,6 +356,38 @@
     - rule:cluster-tasks-mismatch
     - recipe:cluster-task-not-running
 
+- key: detach
+  summary: A detached worker left its Kafka consumer group for a bounded time; its partitions go to the other workers of the group until it attaches again.
+  body: |-
+    The handler (`detach()`) or an operator (the Live page) can detach a worker with `sources.kafka.detach.enabled`. The worker takes one of `sources.kafka.detach.max_detached` lease slots in the autodiscover store, leaves the group, and waits until the revoke drain of its partitions has ended. It is then `detached`; the states on the way are `detaching` and `attaching`. The `origin` is `handler` or `operator`.
+
+    A detach is refused when fewer than `sources.kafka.detach.min_attached` attached workers of the group would remain, when every slot is held, or when the store does not answer. The group size comes from the registry cards; the held slots are counted in the store.
+
+    A detach ends, and the worker joins the group again, when the handler attaches (only a handler detach), when an operator attaches, when the deadline passes, when the slot lease is lost, or when too few workers of the group stay attached. A detach never survives a restart: a started worker is attached. The slot of a worker that crashed stays held until its lease ends.
+
+    While detached, the worker reads no Kafka message and has no `drakkar_consumer_lag` series. Periodic tasks, cluster tasks, the HTTP source, the recorder and the UI keep running, and `/readyz` answers as before.
+  principles:
+    - Lag belongs to a partition, not to a worker; a rule that detaches on high lag moves the hot partition to a peer.
+    - Each return makes the other workers of the group give partitions back through a revoke drain.
+    - Every worker of one group should use the same max_detached and min_attached.
+  related:
+    - concept:autodiscover
+    - config:sources.kafka.detach.enabled
+    - config:sources.kafka.detach.max_detached
+    - config:sources.kafka.detach.min_attached
+    - config:sources.kafka.detach.default_duration
+    - config:sources.kafka.detach.max_duration
+    - config:sources.kafka.detach.cooldown
+    - config:sources.kafka.detach.lease
+    - config:ui.detach_enabled
+    - metric:drakkar_detached
+    - metric:drakkar_detach_requests_total
+    - metric:drakkar_attach_total
+    - event:worker_detached
+    - event:worker_attached
+    - rule:worker-detached
+    - recipe:worker-detached
+
 - key: cache-exchange
   summary: The cache exchange lets each worker pull the cluster and global cache rows that its peers wrote, over HTTP.
   body: |-

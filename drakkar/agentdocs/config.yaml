@@ -36,6 +36,7 @@
   summary: Whether this worker may leave its consumer group for a bounded time and join it again.
   advice: Turn it on only with autodiscover on, and set max_detached and min_attached to the same values on every worker of the group.
   related:
+    - concept:detach
     - concept:autodiscover
     - config:sources.kafka.detach.max_detached
 
@@ -43,32 +44,40 @@
   summary: How many workers of one consumer group may be detached at once.
   advice: Keep it well below the group size; workers that are away leave their partitions to the others, which must carry the load.
   related:
+    - concept:detach
     - config:sources.kafka.detach.min_attached
 
 - key: sources.kafka.detach.min_attached
   summary: How many workers of one consumer group must stay attached.
   advice: Raise it when the group needs a minimum number of consumers to keep up with the topic.
   related:
+    - concept:detach
     - config:sources.kafka.detach.max_detached
 
 - key: sources.kafka.detach.default_duration
   summary: How long a detach lasts when the request gives no duration.
   advice: Set it to the usual time a worker needs to recover; it must not be above max_duration.
   related:
+    - concept:detach
     - config:sources.kafka.detach.max_duration
 
 - key: sources.kafka.detach.max_duration
   summary: The longest detach a request may ask for.
   advice: Keep it short enough that a forgotten detach ends by itself in a time the group can carry.
+  related:
+    - concept:detach
 
 - key: sources.kafka.detach.cooldown
   summary: The shortest time between the return of a handler detach and the next handler detach.
   advice: Raise it when handler detaches repeat often; each return makes the other workers of the group run a revoke drain.
+  related:
+    - concept:detach
 
 - key: sources.kafka.detach.lease
   summary: The lease of the detach slot in the autodiscover store.
   advice: Keep the default unless the store is slow; a longer lease keeps a slot longer after a worker died.
   related:
+    - concept:detach
     - concept:autodiscover
 
 - key: sources.http.request_timeout
@@ -283,6 +292,7 @@
   summary: Whether the operator detach and attach routes answer and the Live page shows the Detach button.
   advice: Turn it on only where operators may take a worker out of its group; the debug UI is open, so anyone who reaches it can detach.
   related:
+    - concept:detach
     - config:sources.kafka.detach.enabled
 
 - key: agent.enabled
