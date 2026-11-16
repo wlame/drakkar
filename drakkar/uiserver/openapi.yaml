@@ -12,7 +12,7 @@
 openapi: 3.1.0
 info:
   title: Drakkar Backend API
-  version: "1.31"
+  version: "1.32"
   description: >-
     The JSON surface every Drakkar backend (Python reference and Go port)
     serves identically under /api/v1, plus the unprefixed Kubernetes probes.
@@ -2466,6 +2466,12 @@ components:
             task_complete: {type: boolean}
             message_complete: {type: boolean}
             window_complete: {type: boolean}
+            group_complete:
+              type: boolean
+              description: >-
+                v1.32. True when the handler overrides on_group_complete.
+                A missing key means false. The Group Results rows come from
+                /api/v1/events?event_types=group_complete and /ws.
           required: [task_complete, message_complete, window_complete]
         kafka_ui_base: {type: string}
         kafka_ui_cluster: {type: string}
@@ -3403,8 +3409,69 @@ components:
             - {$ref: '#/components/schemas/ProbeUserDetails'}
             - {type: 'null'}
         truncated: {type: boolean}
+        groups:
+          type: array
+          description: >-
+            v1.32. One entry for each group that ran, in index order. Present
+            only for a handler that overrides arrange_stream; the probe runs
+            at most its first 5 groups.
+          items: {$ref: '#/components/schemas/ProbeGroup'}
+        stream_truncated:
+          type: boolean
+          description: >-
+            v1.32. True when the probe stopped after 5 groups and the stream
+            had more; false when the stream ended by itself or after a
+            stream error (the error is then on the arrange stage). Present
+            only for a handler that overrides arrange_stream.
       required: [input, arrange, tasks, planned_sink_payloads, cache_calls,
                  cache_summary, timing, errors, truncated]
+
+    ProbeGroup:
+      type: object
+      description: >-
+        v1.32. One group yielded by arrange_stream that the probe ran. It
+        holds counters and small values only, never a task or a result.
+      properties:
+        index:
+          type: integer
+          minimum: 0
+          description: Order of the group in its message, from 0.
+        task_count:
+          type: integer
+          description: Tasks in the yielded list.
+        succeeded: {type: integer}
+        failed: {type: integer}
+        replaced:
+          type: integer
+          description: Tasks that on_error replaced with other tasks.
+        labels:
+          type: object
+          description: >-
+            For each name in the handler's group_labels, the values of that
+            label on the yielded tasks, in list order. A declared name that
+            no task has gives an empty list.
+          additionalProperties:
+            type: array
+            items: {type: string}
+        notes:
+          type: object
+          description: Scalar values the hooks wrote.
+          additionalProperties:
+            type: [string, integer, number, boolean]
+        skipped_deliveries:
+          type: object
+          description: For each sink "<type>/<name>", deliveries of this group that ended in skip.
+          additionalProperties: {type: integer}
+        hook:
+          description: >-
+            The outcome of on_group_complete, in the shape of the
+            on_message_complete stage; null when the handler does not
+            override on_group_complete.
+          oneOf:
+            - {$ref: '#/components/schemas/ProbeStageResult'}
+            - {type: 'null'}
+      required: [index, task_count, succeeded, failed, replaced, labels, notes,
+                 skipped_deliveries, hook]
 
     CacheEntry:
       type: object
