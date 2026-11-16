@@ -4216,7 +4216,6 @@ async def test_a_generator_that_swallows_the_cancel_and_waits_is_left_behind_wit
             with contextlib.suppress(asyncio.CancelledError):
                 await never.wait()
             await never.wait()
-            yield self.make_group(message, 1)
 
     runner = _stream_runner(SwallowsTheCancelAndWaits(group_count=0))
     state = runner._make_run_state(ProbeInput(value='{}'))
@@ -4234,6 +4233,34 @@ async def test_a_generator_that_swallows_the_cancel_and_waits_is_left_behind_wit
     never.set()
     for _ in range(3):
         await asyncio.sleep(0)
+
+
+async def test_a_second_cancel_during_the_close_keeps_the_arrange_result():
+    never = asyncio.Event()
+    in_close = asyncio.Event()
+
+    class SwallowsTheFirstCancel(_StreamHandler):
+        async def arrange_stream(self, message):
+            yield self.make_group(message, 0)
+            try:
+                await never.wait()
+            except asyncio.CancelledError:
+                in_close.set()
+                await never.wait()
+
+    runner = _stream_runner(SwallowsTheFirstCancel(group_count=0))
+    state = runner._make_run_state(ProbeInput(value='{}'))
+    run = asyncio.create_task(runner._run_with_state(state))
+    await wait_for(lambda: state.groups is not None and len(state.groups) == 1)
+    run.cancel()
+    await asyncio.wait_for(in_close.wait(), timeout=5)
+    # The close waits for the pull; a second cancel ends the close.
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    assert state.arrange.duration_seconds is not None
+    assert state.arrange.error is None
 
 
 async def test_a_cancel_during_the_close_cancels_the_close():

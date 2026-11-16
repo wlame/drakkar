@@ -1704,10 +1704,14 @@ class DebugRunner:
             else:
                 error = await self._run_stream_groups(state=state, msg=msg, stream=stream, groups=groups)
         finally:
-            if stream is not None:
-                await self._close_probe_stream(state=state, stream=stream)
-            state.timing.setdefault('arrange', 0.0)
-            state.arrange = ProbeStageResult(duration_seconds=state.timing['arrange'], error=error)
+            try:
+                if stream is not None:
+                    await self._close_probe_stream(state=state, stream=stream)
+            finally:
+                # A second cancel during the close ends the close; the report
+                # still gets the arrange duration and error.
+                state.timing.setdefault('arrange', 0.0)
+                state.arrange = ProbeStageResult(duration_seconds=state.timing['arrange'], error=error)
         if error is not None:
             return
         await self._run_on_message_complete(
@@ -1920,7 +1924,8 @@ class DebugRunner:
     async def _wait_until(task: asyncio.Task, deadline: float) -> bool:
         """Wait for ``task`` until ``deadline``; true when it ended. A task still running then is cancelled.
 
-        A cancel of the caller while it waits cancels ``task`` too, and goes on.
+        A cancel of the caller while it waits cancels ``task`` too and is
+        passed on to the caller.
         """
         try:
             await asyncio.wait({task}, timeout=max(0.0, deadline - time.monotonic()))

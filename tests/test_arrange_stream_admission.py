@@ -205,7 +205,21 @@ async def test_kept_group_output_is_charged_until_the_group_hook_ends():
     assert proc._shape.window_kept_bytes == kept
 
 
-async def test_two_partitions_streaming_share_the_budget_in_turn():
+def longest_run_while_the_other_has_groups(order: list[int], groups_each: int) -> int:
+    """The most pulls one stream made in a row while the other stream still had groups to pull."""
+    pulled = {0: 0, 1: 0}
+    longest = run = 0
+    last = None
+    for partition in order:
+        if pulled[1 - partition] < groups_each:
+            run = run + 1 if partition == last else 1
+            longest = max(longest, run)
+        last = partition
+        pulled[partition] += 1
+    return longest
+
+
+async def test_two_partitions_streaming_share_the_budget_and_neither_is_starved():
     # Each group fills the budget, so every pull after the first waits in the FIFO list.
     budget = PendingBudget(max_tasks=2, max_bytes=1 << 40)
     order: list[int] = []
@@ -248,11 +262,14 @@ async def test_two_partitions_streaming_share_the_budget_in_turn():
     for proc in procs:
         await finish(proc)
     await releaser
-    # The first stream takes the one unmeasured slot and pulls its first
-    # group; a pull runs as a task, so the second stream queues for room
-    # meanwhile and is first in the FIFO list. From then on the two take
-    # turns, one group each.
-    assert order == [0, 1, 0, 1, 0, 1]
+    # The exact order is not a guarantee: whether the second stream queues
+    # for room before the first stream's next admission depends on which
+    # coroutine the event loop runs first, so the order is [0, 1, 0, 1, 0, 1]
+    # or [0, 0, 1, 0, 1, 1]. Once both wait, the FIFO list gives them turns,
+    # so neither makes more than two pulls in a row while the other still
+    # has groups.
+    assert sorted(order) == [0, 0, 0, 1, 1, 1]
+    assert longest_run_while_the_other_has_groups(order, groups_each=3) <= 2
     assert all(len(handler.message_groups) == 1 for handler in handlers)
     assert budget.tasks == 0 and budget.reserved_tasks == 0
 
