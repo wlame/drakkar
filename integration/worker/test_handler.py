@@ -12,6 +12,7 @@ behaviour so any implementation of it stays provably identical.
 from datetime import UTC, datetime
 from pathlib import Path
 
+import handler as handler_module
 import pytest
 from handler import (
     CLUSTER_TICK_INTERVAL_SECONDS,
@@ -170,6 +171,62 @@ async def test_detach_on_request_without_a_request_file_does_not_detach(tmp_path
     await handler.detach_on_request()
 
     assert fake_detach.calls == []
+
+
+async def test_detach_on_request_with_a_refusal_logs_the_reason_and_does_not_raise(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handler = RipgrepHandler()
+    calls: list[float | None] = []
+
+    async def refuse(duration: float | None = None, reason: str = '') -> dk.DetachResult:
+        calls.append(duration)
+        return dk.DetachResult(detached=False, reason='budget_full', until=None)
+
+    handler.detach = refuse  # type: ignore[method-assign]
+    logged: list[tuple[str, dict]] = []
+
+    async def capture_warning(event: str, **fields: object) -> None:
+        logged.append((event, fields))
+
+    monkeypatch.setattr(handler_module.logger, 'awarning', capture_warning)
+    request_file = tmp_path / 'detach-request-worker-3'
+    request_file.touch()
+    handler.detach_request_file = request_file
+
+    await handler.detach_on_request()
+
+    assert calls == [20]
+    assert logged == [
+        ('harness_detach_result', {'category': 'handler', 'detached': False, 'reason': 'budget_full', 'until': None})
+    ]
+    assert not request_file.exists()
+
+
+@pytest.mark.parametrize(
+    ('shared_dir', 'expected'),
+    [
+        ('/shared', Path('/shared/detach-request-worker-3')),
+        ('', None),
+    ],
+)
+async def test_on_startup_builds_the_detach_request_file_from_the_shared_folder_and_the_worker_name(
+    shared_dir: str,
+    expected: Path | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv('DK_UI__RELEASE__ENABLED', 'false')
+    monkeypatch.setenv('WORKER_ID', 'worker-3')
+    monkeypatch.setenv('DK_STORAGE__SHARED_DIR', shared_dir)
+    # The filesystem provider of the shared yaml needs a shared folder.
+    monkeypatch.setenv('DK_AUTODISCOVER__ENABLED', 'false')
+    config = load_config(str(_REPO_ROOT / 'integration/worker/drakkar.yaml'))
+    handler = RipgrepHandler()
+
+    await handler.on_startup(config)
+
+    assert handler.detach_request_file == expected
 
 
 async def test_detach_on_request_before_on_startup_does_not_detach() -> None:

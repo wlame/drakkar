@@ -295,8 +295,11 @@ class RipgrepHandler(
             else None,
         )
         # The request file of the detach example: one per worker, in the
-        # folder that every worker of the harness shares.
-        self.detach_request_file = Path(config.storage.shared_dir) / f'detach-request-{config.worker.resolved_name()}'
+        # folder that every worker of the harness shares. With no shared
+        # folder there is no request file, and the example does nothing.
+        shared_dir = config.storage.shared_dir
+        if shared_dir:
+            self.detach_request_file = Path(shared_dir) / f'detach-request-{config.worker.resolved_name()}'
         return config
 
     async def on_ready(self, config: dk.DrakkarConfig, db_pool: object) -> None:
@@ -375,15 +378,18 @@ class RipgrepHandler(
         if not await asyncio.to_thread(_take_request_file, self.detach_request_file):
             return
         result = await self.detach(duration=DETACH_SECONDS, reason='harness request')
-        # result.detached is false when the framework refused: result.reason
-        # says why (for example budget_full when other workers are away).
-        await logger.awarning(
-            'harness_detach_result',
-            category='handler',
-            detached=result.detached,
-            reason=result.reason,
-            until=dk.format_rfc3339_micro(result.until) if result.until else None,
-        )
+        fields = {
+            'category': 'handler',
+            'detached': result.detached,
+            'reason': result.reason,
+            'until': dk.format_rfc3339_micro(result.until) if result.until else None,
+        }
+        if result.detached:
+            await logger.ainfo('harness_detach_result', **fields)
+        else:
+            # The framework refused: result.reason says why (for example
+            # budget_full when other workers of the group are away).
+            await logger.awarning('harness_detach_result', **fields)
 
     # -------------------------------------------------------------------
 
