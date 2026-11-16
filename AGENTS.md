@@ -188,6 +188,18 @@ parametrize).
     contract: `docs/agent-reference.md` is generated from them
     (`just agent-reference`) and a test fails when it differs.
 
+12. A handler with `arrange_stream` turns each message into groups of tasks
+    (`drakkar/groups.py`, the stream functions of `partition.py`). The
+    `TaskGroup` never holds a task, a result or an output text: it lives
+    until the message ends, and a reference there would keep every task
+    payload of a huge message in memory. A streamed message is done only
+    when its stream has ended, no task remains and no group is open; the
+    remaining count alone can be 0 between two groups. The offset of a
+    stream that cannot complete in this process (open at a stop, or failed)
+    is not drainable: the drain leaves it out, and the tasks of such a
+    stream are cancelled at a stop, because waiting for them could spend the
+    whole drain budget and cost every partition its final commit.
+
 ## API server footguns
 
 - The API server (`drakkar/uiserver/`) runs on its own thread and event loop. It is
@@ -234,6 +246,7 @@ internal mirror.
 drakkar/
   app.py, lifecycle.py     DrakkarApp wiring + startup/shutdown ordering
   handler.py, models.py    user extension points + typed messages
+  groups.py                task groups of arrange_stream: creation, label collection, note checks
   consumer.py, partition.py, offsets.py   poll loop, per-partition pipeline, watermarks
   budget.py                the worker's pending budget: tasks and bytes, reservations, the FIFO of waiting loops
   executor.py              subprocess pool (argv exec, process-group kill)

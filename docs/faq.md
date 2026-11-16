@@ -108,11 +108,11 @@ Kafka partitions become independent processing lanes: each partition has its own
 
 ### How do I write a handler?
 
-Subclass `BaseDrakkarHandler[InputModel, OutputModel]` and implement at least `arrange()`. See [Quick Start — Define a handler](index.md#define-a-handler) and the full [Handler System](handler.md) reference.
+Subclass `BaseDrakkarHandler[InputModel, OutputModel]` and implement at least `arrange()` (or `arrange_stream()`, see below). See [Quick Start — Define a handler](index.md#define-a-handler) and the full [Handler System](handler.md) reference.
 
 ### What hooks exist and when are they called?
 
-`on_startup` → `on_ready` → per-message: `arrange` → (per task) `on_task_complete` → `on_message_complete` → (per window) `on_window_complete`. Error paths: `on_error`, `on_delivery_error`. Partition lifecycle: `on_assign`, `on_revoke`. See [Hook Reference](handler.md#hook-reference).
+`on_startup` → `on_ready` → per-message: `arrange` → (per task) `on_task_complete` → `on_message_complete` → (per window) `on_window_complete`. A stream handler: `arrange_stream` → (per task) `on_task_complete` → (per group) `on_group_complete` → `on_message_complete`, with no window hook. Error paths: `on_error`, `on_delivery_error`. Partition lifecycle: `on_assign`, `on_revoke`. See [Hook Reference](handler.md#hook-reference).
 
 ### What's a "precomputed" task?
 
@@ -129,6 +129,10 @@ After **all** tasks generated from that message terminate (success or failure af
 ### Can I build per-message aggregates from multiple tasks?
 
 Yes — that's what `on_message_complete` is for. You get a `MessageGroup` with all the task outcomes. See [Fan-out: One Message → Many Tasks → One Aggregate](fan-out.md).
+
+### One message makes thousands of tasks and the worker runs out of memory. What can I do?
+
+Implement `arrange_stream()` instead of `arrange()`. It is an async generator that yields the tasks of one message in groups; the framework starts each group at once and pulls the next one only when the pending budget has room, so the memory is bounded by the limits plus one group. `on_group_complete` gives you a hook per group, and `on_message_complete` still fires once for the message. The offset still completes only when the whole message ends, so a restart runs every group again. See [Streaming a large message](fan-out.md#streaming-a-large-message).
 
 ### Can one task cover multiple messages (fan-in)?
 

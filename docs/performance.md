@@ -131,7 +131,12 @@ window's task count is **memory**, not loop time: every task is a parked
 `asyncio.Task` with a queue entry until a pool slot frees up. Keep
 `window_size` in proportion to the tasks per message — a handler emitting a
 thousand tasks per message wants a window of a few messages, not the default
-hundred.
+hundred. When one message makes many thousands of tasks, yield them in groups
+with [`arrange_stream()`](fan-out.md#streaming-a-large-message): a group
+starts in the same chunks, the loop gets a turn after every 256 tasks of
+consecutive small groups, and only the admitted groups exist in memory. The
+checks, labels and recorder row of a group are made in one step before its
+chunks start, so keep groups small.
 
 ### What the completion hooks cost
 
@@ -482,8 +487,8 @@ their results:
   ends until `on_task_complete` (or `on_error`) and its sink delivery end, on
   every path: success, failure, retry, an `on_error` replacement and a
   cancellation. Large outputs therefore slow admission.
-- A result kept for `on_message_complete` or `on_window_complete` counts until
-  that hook has run. Results are kept only when the handler overrides one of
+- A result kept for `on_group_complete`, `on_message_complete` or
+  `on_window_complete` counts until that hook has run. Results are kept only when the handler overrides one of
   those hooks. A result kept by a window takes its charge with it, so it is
   not counted twice; a result kept by both hooks counts twice, which
   overestimates and pauses earlier, and that is safe.
@@ -579,6 +584,31 @@ queues behind other waiters while there is room counts its wait under the
 limit that last blocked a loop, and a wait for the one unmeasured window at
 worker start counts under `tasks`.
 
+### Streaming groups
+
+A handler with [`arrange_stream()`](fan-out.md#streaming-a-large-message)
+is admitted group by group, not window by window. Before each pull the
+partition loop waits for room in the same first-in, first-out list, reserves
+the average size of a group (tasks, stdin bytes, kept output) with no
+`await` between the check and the reservation, pulls the next group, charges
+its real tasks and bytes out of the reservation, and gives back the rest.
+
+- Admission needs only "below the limits", not "the group fits". A group
+  larger than the limits is admitted when its turn comes, so a stream never
+  waits for ever.
+- **The limits are passed by at most one group for each message that
+  streams.** The handler bounds the memory by the size of its groups.
+- The averages are per group on such a worker; a worker has one handler, so
+  groups and windows never mix.
+- The output kept for `on_group_complete` stays charged until the hook and
+  its delivery end.
+- The wait counts in `drakkar_window_admission_wait_seconds_total`, as a
+  window wait does. `drakkar_stream_group_tasks` shows the group sizes.
+- At a stop, a message whose stream is still open is abandoned: its tasks
+  are cancelled, their charges and the kept output of its unfinished groups
+  are given back, and the drain does not wait for its offset. See
+  [Fan-out: Stop and revoke](fan-out.md#stop-and-revoke).
+
 ### Memory per task
 
 Measured with `tracemalloc` on Python 3.13:
@@ -599,8 +629,8 @@ When a task reaches its last outcome — after `on_task_complete` and its
 delivery, or after `on_error` with no retry — the framework sets
 `task.stdin` to `None`. A message or window hook that keeps the task no
 longer keeps its stdin. `arrange()`, `on_error`, `on_task_complete` and the
-retry run still see the stdin; `on_message_complete`, `on_window_complete`
-and `on_http_request_complete` see `None`. A task object scheduled more than
+retry run still see the stdin; `on_group_complete`, `on_message_complete`,
+`on_window_complete` and `on_http_request_complete` see `None`. A task object scheduled more than
 once keeps its stdin, and its charge, until its last run settles.
 
 ### Sizing

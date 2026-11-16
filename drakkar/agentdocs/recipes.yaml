@@ -335,3 +335,77 @@
     - concept:archive
     - concept:own-folder
     - metric:drakkar_storage_free_bytes
+
+- key: choose-arrange-form
+  summary: Choose between arrange and arrange_stream for the shape of the messages a worker reads.
+  question: Which arrange form fits my messages?
+  steps:
+    - do: Count the tasks one message makes and the stdin size of one task, for a usual message and for the largest one.
+      why: With arrange every task of a window exists in memory at once, and one message is the smallest unit the pending budget admits.
+    - do: Keep arrange when every message makes a bounded, small number of tasks.
+      why: Windows batch several messages into one call, on_window_complete is available, and the pending budget bounds the memory to about the limits plus one message.
+    - do: Use arrange_stream when one message can make thousands of tasks, or when finding the tasks needs slow side calls.
+      why: The first group starts while the generator prepares the rest, and the memory is bounded by the limits plus one group for each streaming message.
+    - do: Yield groups along independent parts of the message, each small compared to executor.max_pending_tasks.
+      why: A group is the unit of admission, of on_group_complete and of the group labels; a large group passes the limits by its own size.
+    - do: Set group_labels on the handler class and write small counters into group.notes when on_message_complete needs a total.
+      why: The group keeps counts and labels until the message ends; it never keeps tasks or results.
+    - do: Make the sinks accept a replay of the whole message.
+      why: The offset completes only when the message ends, so a restart or revoke runs every group again and the sinks receive finished groups again.
+  causes:
+    - cause: The worker runs out of memory on rare large messages with arrange.
+      check: drakkar_pending_bytes jumps far above executor.max_pending_bytes when such a message arrives.
+      fix: Move the handler to arrange_stream and yield the tasks in groups.
+    - cause: The first task of a large message starts late.
+      check: The duration of the arranged event of such a message is long.
+      fix: Use arrange_stream so that each group starts as soon as it is prepared.
+    - cause: The worker fails at startup after the change.
+      check: The startup error names both arrange and arrange_stream, or arrange_stream and on_window_complete.
+      fix: Keep exactly one of arrange and arrange_stream, and replace on_window_complete with on_group_complete or on_message_complete.
+    - cause: The pending gauges pass the limits by much.
+      check: The mean of drakkar_stream_group_tasks is a large part of executor.max_pending_tasks.
+      fix: Yield smaller groups.
+  related:
+    - concept:arrange
+    - concept:arrange-stream
+    - concept:task-group
+    - concept:pending-budget
+    - metric:drakkar_stream_group_tasks
+
+- key: configure-failure-handling
+  summary: Set timeouts, retries and failure policies so that they agree with each other and with the drain.
+  question: How do I configure what happens when a task or a delivery fails?
+  steps:
+    - do: Set executor.task_timeout above the slowest normal run of a task.
+      why: A timeout kills the process group and counts as a failure that on_error decides.
+    - do: Decide the end of a failed task with executor.on_failure (skip or dlq); implement on_error to retry, replace or decide per error, and bound its retries with executor.max_retries.
+      why: The default on_error returns executor.on_failure; a RETRY with no retries left, or a raising on_error, also applies it.
+    - do: Set sinks.defaults.on_failure (dlq or skip), max_retries and delivery_timeout, and override them on a sink that needs other values.
+      why: A failed delivery is retried up to max_retries, then the declared policy writes a DLQ record or skips the payloads.
+    - do: Choose dlq.on_send_failure, drop or stall.
+      why: It decides when no DLQ record can be written; drop loses the message and commits, stall holds the offset.
+    - do: Keep executor.drain_timeout below sources.kafka.max_poll_interval and check that executor.task_timeout times the retries fits the time a message may take.
+      why: A drain that times out cancels the work and skips the final commit of every partition; the messages run again on the next owner.
+    - do: With arrange_stream, catch the errors of side calls inside the generator and write cleanup in try and finally.
+      why: A raise ends the stream, keeps the offset pending and restarts the partition loop; at a stop the generator sees GeneratorExit or CancelledError.
+  causes:
+    - cause: Messages are lost without a record.
+      check: drakkar_dlq_dropped_payloads_total grows.
+      fix: Fix the DLQ topic, or set dlq.on_send_failure to stall.
+    - cause: A partition stops committing after a DLQ outage.
+      check: dlq.on_send_failure is stall and drakkar_delivery_stalled_offsets_total grew.
+      fix: Fix the DLQ topic; the stall is the chosen behaviour.
+    - cause: Failed tasks disappear without a DLQ record.
+      check: executor.on_failure is skip and drakkar_executor_tasks_total{status="failed"} grows.
+      fix: Set executor.on_failure to dlq when failed messages must be kept.
+    - cause: The final commit is skipped at every stop.
+      check: drakkar_drain_timeout_hit_total grows.
+      fix: Raise executor.drain_timeout within sources.kafka.max_poll_interval, or lower executor.task_timeout.
+  related:
+    - concept:failure-outcomes
+    - concept:dlq
+    - concept:sinks-and-delivery
+    - config:executor.on_failure
+    - config:executor.max_retries
+    - config:dlq.on_send_failure
+    - config:executor.drain_timeout

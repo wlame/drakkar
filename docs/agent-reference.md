@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `022383a8af1df459`.
+Registry version: `7b4fb444c63ad91d`.
 
 ## Concepts
 
@@ -17,10 +17,10 @@ A worker reads messages, turns them into tasks, runs the tasks as subprocesses, 
 A worker has one control loop. The steps of one message are:
 
 1. A source reads the message (the Kafka source or the HTTP source).
-2. The partition loop puts the message in a window.
-3. The `arrange` hook of the handler turns the window into tasks.
+2. The partition loop puts the message in a window, or, for a handler with `arrange_stream`, takes it alone.
+3. The handler turns the message into tasks: `arrange` returns one list for a window, or `arrange_stream` yields one group of tasks at a time.
 4. The executor pool runs each task as a subprocess, at most `executor.max_executors` at one time.
-5. The result hooks (`on_task_complete`, `on_message_complete`, `on_window_complete`) turn the output into sink payloads.
+5. The result hooks (`on_task_complete`, `on_group_complete`, `on_message_complete`, `on_window_complete`) turn the output into sink payloads.
 6. The sinks deliver the payloads. A failure goes to the DLQ or is skipped, by the sink policy.
 7. The worker commits the offset of the message when every task and delivery of the message is done.
 
@@ -31,7 +31,7 @@ The framework owns steps 1, 2, 4, 6 and 7. The handler owns steps 3 and 5. The w
 - The worker commits an offset only after the message is fully done.
 - Every limit of the pipeline is a config key; read the effective config before you change one.
 
-**Related:** `concept:window`, `concept:arrange`, `concept:task`, `concept:offsets`, `concept:sinks-and-delivery`, `concept:at-least-once`, `route:GET /api/v1/dashboard`
+**Related:** `concept:window`, `concept:arrange`, `concept:arrange-stream`, `concept:completion-hooks`, `concept:task`, `concept:offsets`, `concept:sinks-and-delivery`, `concept:at-least-once`, `route:GET /api/v1/dashboard`
 
 ### `concept:window`
 
@@ -41,11 +41,13 @@ Each partition loop takes messages from its queue into a window. The size of a w
 
 A partition loop does not wait for a window to finish before it takes the next one. Many windows of one partition can be in flight at one time. The offsets of a window are committed in order, so a slow message holds the commit of the messages after it.
 
+A handler with `arrange_stream` has no windows: it takes one message at a time, and `executor.window_size` has no effect. Each of its groups takes the next window id of the partition, so its `arranged` row and its annotations carry that id.
+
 **Principles:**
 - A window never holds messages of two partitions.
 - The window size is an upper bound, not a target; small windows are normal when the budget is nearly full.
 
-**Related:** `concept:pending-budget`, `concept:arrange`, `config:executor.window_size`, `metric:drakkar_window_messages`, `event:arranged`, `event:window_complete`
+**Related:** `concept:pending-budget`, `concept:arrange`, `concept:arrange-stream`, `config:executor.window_size`, `metric:drakkar_window_messages`, `event:arranged`, `event:window_complete`
 
 ### `concept:arrange`
 
@@ -55,11 +57,13 @@ The worker calls `arrange` once per window with the messages and a view of the t
 
 The time of the hook is in `drakkar_handler_duration_seconds{hook="arrange"}` and in the `arranged` event. A slow `arrange` slows the whole partition, and a blocking `arrange` stops the event loop.
 
+Every task of a window exists in memory when `arrange` returns, and the pending budget can admit one message at the least. A message that makes many thousands of tasks with a large stdin fits `arrange_stream` better: it yields the tasks in groups. A handler implements exactly one of the two hooks.
+
 **Principles:**
 - The arrange hook must not block; wait for I/O without blocking the worker, and move heavy CPU work into tasks or the offload pool.
 - Every task must name the source offsets it covers, or the offsets are committed before the work is done.
 
-**Related:** `concept:window`, `concept:task`, `metric:drakkar_handler_duration_seconds`, `event:arranged`
+**Related:** `concept:window`, `concept:task`, `concept:arrange-stream`, `recipe:choose-arrange-form`, `metric:drakkar_handler_duration_seconds`, `event:arranged`
 
 ### `concept:task`
 
@@ -109,19 +113,22 @@ On a revoke or a stop, the worker drains: it waits up to `executor.drain_timeout
 
 ### `concept:pending-budget`
 
-One budget per worker limits the pending tasks and the pending bytes; a partition loop takes a new window only when the budget has room.
+One budget per worker limits the pending tasks and the pending bytes; a partition loop takes a new window or group only when the budget has room.
 
 The budget counts the tasks that are created and not settled (waiting for a slot, running, or in their hooks and delivery), and the bytes they hold: task stdin plus the output of results that hooks or deliveries still use. The limits are `executor.max_pending_tasks` and `executor.max_pending_bytes`.
 
 A partition loop checks the room and reserves the estimate of its next window before it calls `arrange`. While the budget is full, loops wait in a first-in, first-out list; the wait is counted in `drakkar_window_admission_wait_seconds_total`. The HTTP source uses the same budget.
+
+For a handler with `arrange_stream` the unit is a group: the loop waits for room and reserves the average size of a group before each pull. Only "below the limits" is needed, so a group larger than the limits is still admitted when its turn comes. The limits are passed by at most one group for each message that streams.
 
 A full budget is the normal state of a busy worker. It is a problem only when the executor pool is not busy at the same time.
 
 **Principles:**
 - The budget bounds the memory of the worker; raising it raises the memory the worker can use.
 - A full budget with an idle executor pool means hooks or deliveries are slow, not the subprocesses.
+- With arrange_stream the size of the groups bounds the memory above the limits; keep groups small.
 
-**Related:** `concept:backpressure`, `config:executor.max_pending_tasks`, `config:executor.max_pending_bytes`, `metric:drakkar_pending_tasks`, `metric:drakkar_pending_bytes`, `metric:drakkar_window_admission_wait_seconds_total`, `rule:budget-saturated`
+**Related:** `concept:backpressure`, `concept:task-group`, `config:executor.max_pending_tasks`, `config:executor.max_pending_bytes`, `metric:drakkar_pending_tasks`, `metric:drakkar_pending_bytes`, `metric:drakkar_window_admission_wait_seconds_total`, `rule:budget-saturated`
 
 ### `concept:backpressure`
 
@@ -363,6 +370,87 @@ Start at the index, then call the diagnose route, then read the manual topics it
 - Every answer is bounded in size; ask for parts to keep it small.
 
 **Related:** `config:agent.enabled`, `config:agent.auth_token`, `config:agent.include_payloads`, `rule:agent-unauthenticated`, `route:GET /api/v1/agent`, `route:GET /api/v1/agent/diagnose`
+
+### `concept:arrange-stream`
+
+The arrange_stream hook is an async generator that yields groups of tasks for one message, so a message with thousands of tasks holds a bounded number in memory.
+
+A handler implements `arrange_stream(message)` instead of `arrange`. Each `yield` gives one non-empty list of tasks: one group. The framework starts the group at once and pulls the next group only when the pending budget has room. A bare `return` or the end of the function ends the stream. An empty list is ignored. A stream that yields nothing is a message with no tasks.
+
+Every task must have `source_offsets == [message.offset]`. The worker takes one message at a time; `executor.window_size` has no effect and `on_window_complete` is refused at startup. The partition takes the next message when the generator ends, while the last tasks of the message still run.
+
+The offset completes only when the whole message ends. A restart, a revoke or a DLQ replay runs the message from its start, and the sinks receive the finished groups again.
+
+The generator runs in one context for the whole stream, so a context variable it binds lives across yields. At a stop the pull in progress is cancelled and the generator is closed within 5 seconds: the handler sees `GeneratorExit` at a `yield` or `CancelledError` inside an `await`. Put cleanup in `try`/`finally`. A raise inside the generator is an error of the stream (`log:arrange_stream_failed`): the started groups finish, the message never completes, and the partition loop restarts once, then is dead.
+
+**Principles:**
+- Catch the errors of side API calls inside the generator when a retry there is possible; a raise fails the whole stream.
+- Keep groups small; the framework checks, labels and records a whole group in one step.
+- Sinks must accept results of a replayed message.
+
+**Related:** `concept:arrange`, `concept:task-group`, `concept:completion-hooks`, `concept:pending-budget`, `recipe:choose-arrange-form`, `metric:drakkar_stream_group_tasks`, `event:arranged`, `event:log:arrange_stream_failed`
+
+### `concept:task-group`
+
+A TaskGroup is the small object the framework makes for each list that arrange_stream yields; it holds counts and labels, never tasks or results.
+
+Fields: `index` (from 0), `source_message`, `task_count`, `succeeded`, `failed`, `replaced` (tasks that `on_error` replaced), `labels`, `skipped_deliveries` (per sink `<type>/<name>`, deliveries of the group that ended in `skip`), `notes`, `started_at` and `finished_at`.
+
+Each task gets `task.group`. A replacement task from `on_error` joins the group of the task it replaces and gets that task's source offsets. When the group ends, `succeeded + failed + replaced` is the number of tasks ever scheduled in it.
+
+`labels` holds, for each name of the handler class attribute `group_labels`, the values of that label on the yielded tasks in list order, one per task that has it (a list, so equal values stay). `notes` takes only `str`, `int`, `float` and `bool` values; another type is removed when the group ends, with one `log:group_notes_invalid` line.
+
+The group lives until `on_message_complete`, which gets every group in `MessageGroup.groups`. In stream mode `MessageGroup.tasks`, `results` and `errors` are empty and the counters are the sums over the groups.
+
+**Principles:**
+- Keep only small scalar values in notes; the group must never hold a task, a result or an output text.
+- Set group_labels on the handler class; it is checked at startup.
+
+**Related:** `concept:arrange-stream`, `concept:completion-hooks`, `event:group_complete`, `event:log:group_notes_invalid`
+
+### `concept:completion-hooks`
+
+The completion hooks turn outcomes into sink payloads at four grains (task, group, message, window); which ones run depends on the arrange form.
+
+| Hook | arrange (Kafka) | arrange_stream (Kafka) | HTTP request |
+|---|---|---|---|
+| `on_task_complete` | per task | per task | per task |
+| `on_group_complete` | refused at startup | per group | no |
+| `on_message_complete` | per message | per message, after every group hook | no |
+| `on_window_complete` | per window | refused at startup | no |
+| `on_http_request_complete` | no | no | per request |
+
+The framework keeps results and errors for a hook only when the handler class overrides it. A hook must be defined on the handler class; a function set on an instance is not seen. Kept output counts in `executor.max_pending_bytes` until the hook and its delivery end.
+
+A raise of `on_task_complete` is a task failure. A raise of `on_group_complete`, `on_message_complete` or `on_window_complete` is logged and ignored; the offset still completes. The results of a group hook and a message hook are delivered with the message context, so the sink failure policy and the DLQ apply to them.
+
+**Principles:**
+- Override only the hooks you need; each overridden aggregate hook keeps outcomes in memory.
+- The offset commits after on_message_complete and its delivery.
+
+**Related:** `concept:arrange-stream`, `concept:task-group`, `concept:sinks-and-delivery`, `event:task_complete`, `event:group_complete`, `event:message_complete`, `event:window_complete`
+
+### `concept:failure-outcomes`
+
+What can fail at each step of a message, which hook or config key decides, and what happens to the offset.
+
+| Step | Decided by | Outcomes |
+|---|---|---|
+| Parse | `sources.kafka.on_parse_error` | `skip` (the arrange hook gets the message with `payload` None), `dlq` (DLQ record, then commit), `raise` (the partition loop fails) |
+| Arrange (any form) | the hook raises | the loop restarts once, then the partition is dead; the offset stays pending; for a stream, started groups finish |
+| Task run | `executor.task_timeout`, `on_error`, `executor.max_retries`, `executor.on_failure` | retry, skip, replace, DLQ record |
+| Completion hook raises | which hook | a task failure for `on_task_complete`; logged and ignored for group, message and window hooks |
+| Sink delivery | `sinks.defaults` and each sink, `on_delivery_error`, the breaker, `depends_on` | retry, skip, DLQ record, not started |
+| DLQ write | `dlq.on_send_failure` | `drop` (commits), `stall` (offset held) |
+| Stop or revoke | `executor.drain_timeout` | drained and committed; cancelled and replayed; open stream closed and replayed |
+
+A DLQ record ends the message: no later delivery starts, the hooks still run without delivery, and the offset commits. For a stream it also closes the stream. At a stop, a message whose stream is still open is abandoned: its tasks are cancelled, no hook runs, and its offset stays uncommitted and is left out of the drain.
+
+**Principles:**
+- Every failure either commits with a record (DLQ, skip count, log line) or keeps the offset for a replay.
+- Choose the failure policy of each sink before you tune retries.
+
+**Related:** `concept:dlq`, `concept:sinks-and-delivery`, `concept:at-least-once`, `recipe:configure-failure-handling`, `config:sources.kafka.on_parse_error`, `config:executor.on_failure`, `config:dlq.on_send_failure`
 
 ## Config advice
 
@@ -900,14 +988,14 @@ Messages taken into one arrange window.
 
 Tasks in one group yielded by the arrange_stream hook.
 
-**Meaning:** Each group is admitted to the pending budget as a whole, so large groups need more room before they start.
+**Meaning:** Each group is admitted to the pending budget as a whole when there is any room, so a large group passes the limits by its own size.
 
 **Healthy:** Well below executor.max_pending_tasks.
 
 **PromQL:**
 - Average group size: `rate(drakkar_stream_group_tasks_sum{ {{worker}} }[5m]) / rate(drakkar_stream_group_tasks_count{ {{worker}} }[5m])`
 
-**Related:** `concept:arrange`, `concept:pending-budget`
+**Related:** `concept:arrange-stream`, `concept:task-group`, `concept:pending-budget`
 
 ### `metric:drakkar_queued_messages_dropped_at_stop_total`
 
@@ -2218,17 +2306,17 @@ The Kafka source took one message into the queue of its partition.
 
 ### `event:arranged`
 
-The arrange hook turned one window into tasks.
+The arrange hook turned one window into tasks, or arrange_stream yielded one group.
 
-**When:** Once per window, after the arrange hook returned.
+**When:** Once per window after the arrange hook returned, or once per group yielded by arrange_stream.
 
 **Fields:**
-- `duration`: Seconds the arrange hook took; for a group of arrange_stream, the time to prepare that group.
-- `metadata`: The offsets of the window, the task ids, the counts and the window id; group_index for a group of arrange_stream, one row for each group.
+- `duration`: Seconds the arrange hook took; for a group of arrange_stream, the time inside the pull that prepared that group, without the wait for room.
+- `metadata`: The offsets of the window, the task ids, the counts and the window id; for a group of arrange_stream, group_index, its own window id and message_count 1.
 
 **Action:** A long duration slows the partition; move slow work out of arrange.
 
-**Related:** `concept:arrange`, `concept:window`
+**Related:** `concept:arrange`, `concept:arrange-stream`, `concept:window`
 
 ### `event:assigned`
 
@@ -2296,14 +2384,14 @@ Every task of one source message ended and the on_message_complete hook ran.
 
 Every task of one group yielded by arrange_stream ended and the on_group_complete hook ran.
 
-**When:** Once per group, only when the handler overrides on_group_complete.
+**When:** Once per group, only when the handler overrides on_group_complete; also when the hook raised, then with output_message_count 0.
 
 **Fields:**
 - `duration`: Seconds the on_group_complete hook took.
 - `metadata`: The group index, the succeeded, failed and replaced counts, the window id, the task count and the output message count.
 - `offset`: The offset of the source message of the group.
 
-**Related:** `concept:arrange`, `concept:offsets`
+**Related:** `concept:task-group`, `concept:completion-hooks`, `concept:offsets`
 
 ### `event:window_complete`
 
@@ -2670,6 +2758,136 @@ A task finished after the drain of its partition timed out; its result was not d
 
 **Related:** `concept:at-least-once`, `metric:drakkar_suppressed_zombie_deliveries_total`
 
+### `event:log:arrange_stream_enabled`
+
+The handler implements arrange_stream, so executor.window_size has no effect on this worker.
+
+**When:** Once at startup of the Kafka source.
+
+**Fields:**
+- `hint`: The reason executor.window_size is not used.
+
+**Related:** `concept:arrange-stream`, `config:executor.window_size`
+
+### `event:log:arrange_stream_failed`
+
+The arrange_stream generator raised or yielded a value that breaks its rules; the stream ends and its message never completes.
+
+**When:** When a pull raises, or a yielded value is not a list of tasks, has a task with other source offsets, or repeats a task.
+
+**Fields:**
+- `error`: The error text.
+- `group_index`: The index of the group the pull was preparing.
+- `offset`: The offset of the message.
+
+**Action:** Fix the generator, or catch the errors of side calls inside it; the started groups finish, the offset stays pending and the partition loop restarts once, then is dead.
+
+**Related:** `concept:arrange-stream`, `event:log:partition_processor_died`, `recipe:partition-dead`
+
+### `event:log:arrange_stream_close_failed`
+
+Closing an arrange_stream generator raised or did not end within 5 seconds; a generator that ignores the cancellation is left running.
+
+**When:** When a stream is closed at a stop, a revoke, a DLQ outcome or after a stream error, and the close fails.
+
+**Fields:**
+- `error`: The error text, or timed out.
+- `offset`: The offset of the message.
+
+**Action:** Let the generator end on GeneratorExit and CancelledError; keep cleanup short and in try and finally.
+
+**Related:** `concept:arrange-stream`, `config:executor.drain_timeout`
+
+### `event:log:arrange_stream_abandoned`
+
+A stream was still open at a stop or a revoke; its tasks were cancelled and the next owner of the partition runs the message again.
+
+**When:** At a stop or a revoke, once per message whose stream was open.
+
+**Fields:**
+- `cancelled`: Tasks that were cancelled.
+- `groups_started`: Groups that had started.
+- `offset`: The offset of the message.
+
+**Action:** None needed; it is the normal end of an open stream at a stop. Sinks receive the finished groups again on the replay.
+
+**Related:** `concept:arrange-stream`, `concept:at-least-once`
+
+### `event:log:arrange_stream_tasks_cancelled`
+
+Tasks of streams that failed earlier were still running at a stop and were cancelled.
+
+**When:** At a stop or a revoke, when a failed stream still has running tasks.
+
+**Fields:**
+- `cancelled`: Tasks that were cancelled.
+- `offsets`: The offsets of the failed messages.
+
+**Action:** Read the arrange_stream_failed line of the same offset.
+
+**Related:** `concept:arrange-stream`, `event:log:arrange_stream_failed`
+
+### `event:log:on_group_complete_failed`
+
+The on_group_complete hook raised; the error is logged and ignored and the group counts as finished.
+
+**When:** Once per raising call of the hook.
+
+**Fields:**
+- `error`: The error text.
+- `group_index`: The index of the group.
+- `offset`: The offset of the message.
+
+**Action:** Fix the hook; the group result is not delivered, and the group_complete row has output_message_count 0.
+
+**Related:** `concept:completion-hooks`, `event:group_complete`
+
+### `event:log:on_group_complete_delivery_failed`
+
+The delivery of an on_group_complete result could not be confirmed; the offset of the message stalls when the message finishes.
+
+**When:** When a sink delivery of the group result ends unconfirmed.
+
+**Fields:**
+- `error`: The error text.
+- `group_index`: The index of the group.
+- `offset`: The offset of the message.
+
+**Action:** Follow the sink-failing recipe.
+
+**Related:** `concept:sinks-and-delivery`, `recipe:sink-failing`
+
+### `event:log:on_group_complete_sink_delivery_failed`
+
+The delivery of an on_group_complete result raised an unexpected error; dlq.on_send_failure decides whether the offset stalls or commits.
+
+**When:** When the delivery call of the group result raises an error that is not a delivery failure.
+
+**Fields:**
+- `error`: The error text.
+- `group_index`: The index of the group.
+- `offset`: The offset of the message.
+- `offset_action`: stall or commit.
+
+**Action:** Read the error; check the sinks and the DLQ.
+
+**Related:** `concept:sinks-and-delivery`, `config:dlq.on_send_failure`
+
+### `event:log:group_notes_invalid`
+
+A group note held a value that is not a str, int, float or bool; the note was removed.
+
+**When:** When a group ends, after on_group_complete or when its last task settled.
+
+**Fields:**
+- `group_index`: The index of the group.
+- `keys`: The removed note keys, sorted.
+- `offset`: The offset of the message.
+
+**Action:** Write only scalar values into group.notes.
+
+**Related:** `concept:task-group`
+
 ## Recipes
 
 ### `recipe:lag-growing`
@@ -2899,6 +3117,50 @@ Find out which files fill the disk of a worker or of the shared folder.
 - Task output is recorded. Check: recorder.capture.output is true and tasks write large output. Fix: Raise recorder.capture.min_output_duration or turn off recorder.capture.output.
 
 **Related:** `concept:archive`, `concept:own-folder`, `metric:drakkar_storage_free_bytes`
+
+### `recipe:choose-arrange-form`
+
+Choose between arrange and arrange_stream for the shape of the messages a worker reads.
+
+**Question:** Which arrange form fits my messages?
+
+**Steps:**
+1. Count the tasks one message makes and the stdin size of one task, for a usual message and for the largest one. Why: With arrange every task of a window exists in memory at once, and one message is the smallest unit the pending budget admits.
+2. Keep arrange when every message makes a bounded, small number of tasks. Why: Windows batch several messages into one call, on_window_complete is available, and the pending budget bounds the memory to about the limits plus one message.
+3. Use arrange_stream when one message can make thousands of tasks, or when finding the tasks needs slow side calls. Why: The first group starts while the generator prepares the rest, and the memory is bounded by the limits plus one group for each streaming message.
+4. Yield groups along independent parts of the message, each small compared to executor.max_pending_tasks. Why: A group is the unit of admission, of on_group_complete and of the group labels; a large group passes the limits by its own size.
+5. Set group_labels on the handler class and write small counters into group.notes when on_message_complete needs a total. Why: The group keeps counts and labels until the message ends; it never keeps tasks or results.
+6. Make the sinks accept a replay of the whole message. Why: The offset completes only when the message ends, so a restart or revoke runs every group again and the sinks receive finished groups again.
+
+**Causes:**
+- The worker runs out of memory on rare large messages with arrange. Check: drakkar_pending_bytes jumps far above executor.max_pending_bytes when such a message arrives. Fix: Move the handler to arrange_stream and yield the tasks in groups.
+- The first task of a large message starts late. Check: The duration of the arranged event of such a message is long. Fix: Use arrange_stream so that each group starts as soon as it is prepared.
+- The worker fails at startup after the change. Check: The startup error names both arrange and arrange_stream, or arrange_stream and on_window_complete. Fix: Keep exactly one of arrange and arrange_stream, and replace on_window_complete with on_group_complete or on_message_complete.
+- The pending gauges pass the limits by much. Check: The mean of drakkar_stream_group_tasks is a large part of executor.max_pending_tasks. Fix: Yield smaller groups.
+
+**Related:** `concept:arrange`, `concept:arrange-stream`, `concept:task-group`, `concept:pending-budget`, `metric:drakkar_stream_group_tasks`
+
+### `recipe:configure-failure-handling`
+
+Set timeouts, retries and failure policies so that they agree with each other and with the drain.
+
+**Question:** How do I configure what happens when a task or a delivery fails?
+
+**Steps:**
+1. Set executor.task_timeout above the slowest normal run of a task. Why: A timeout kills the process group and counts as a failure that on_error decides.
+2. Decide the end of a failed task with executor.on_failure (skip or dlq); implement on_error to retry, replace or decide per error, and bound its retries with executor.max_retries. Why: The default on_error returns executor.on_failure; a RETRY with no retries left, or a raising on_error, also applies it.
+3. Set sinks.defaults.on_failure (dlq or skip), max_retries and delivery_timeout, and override them on a sink that needs other values. Why: A failed delivery is retried up to max_retries, then the declared policy writes a DLQ record or skips the payloads.
+4. Choose dlq.on_send_failure, drop or stall. Why: It decides when no DLQ record can be written; drop loses the message and commits, stall holds the offset.
+5. Keep executor.drain_timeout below sources.kafka.max_poll_interval and check that executor.task_timeout times the retries fits the time a message may take. Why: A drain that times out cancels the work and skips the final commit of every partition; the messages run again on the next owner.
+6. With arrange_stream, catch the errors of side calls inside the generator and write cleanup in try and finally. Why: A raise ends the stream, keeps the offset pending and restarts the partition loop; at a stop the generator sees GeneratorExit or CancelledError.
+
+**Causes:**
+- Messages are lost without a record. Check: drakkar_dlq_dropped_payloads_total grows. Fix: Fix the DLQ topic, or set dlq.on_send_failure to stall.
+- A partition stops committing after a DLQ outage. Check: dlq.on_send_failure is stall and drakkar_delivery_stalled_offsets_total grew. Fix: Fix the DLQ topic; the stall is the chosen behaviour.
+- Failed tasks disappear without a DLQ record. Check: executor.on_failure is skip and drakkar_executor_tasks_total{status="failed"} grows. Fix: Set executor.on_failure to dlq when failed messages must be kept.
+- The final commit is skipped at every stop. Check: drakkar_drain_timeout_hit_total grows. Fix: Raise executor.drain_timeout within sources.kafka.max_poll_interval, or lower executor.task_timeout.
+
+**Related:** `concept:failure-outcomes`, `concept:dlq`, `concept:sinks-and-delivery`, `config:executor.on_failure`, `config:executor.max_retries`, `config:dlq.on_send_failure`, `config:executor.drain_timeout`
 
 ## Routes
 

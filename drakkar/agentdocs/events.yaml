@@ -11,14 +11,15 @@
     - metric:drakkar_messages_consumed_total
 
 - key: arranged
-  summary: The arrange hook turned one window into tasks.
-  when: Once per window, after the arrange hook returned.
+  summary: The arrange hook turned one window into tasks, or arrange_stream yielded one group.
+  when: Once per window after the arrange hook returned, or once per group yielded by arrange_stream.
   fields:
-    duration: Seconds the arrange hook took; for a group of arrange_stream, the time to prepare that group.
-    metadata: The offsets of the window, the task ids, the counts and the window id; group_index for a group of arrange_stream, one row for each group.
+    duration: Seconds the arrange hook took; for a group of arrange_stream, the time inside the pull that prepared that group, without the wait for room.
+    metadata: The offsets of the window, the task ids, the counts and the window id; for a group of arrange_stream, group_index, its own window id and message_count 1.
   action: A long duration slows the partition; move slow work out of arrange.
   related:
     - concept:arrange
+    - concept:arrange-stream
     - concept:window
 
 - key: assigned
@@ -73,13 +74,14 @@
 
 - key: group_complete
   summary: Every task of one group yielded by arrange_stream ended and the on_group_complete hook ran.
-  when: Once per group, only when the handler overrides on_group_complete.
+  when: Once per group, only when the handler overrides on_group_complete; also when the hook raised, then with output_message_count 0.
   fields:
     offset: The offset of the source message of the group.
     duration: Seconds the on_group_complete hook took.
     metadata: The group index, the succeeded, failed and replaced counts, the window id, the task count and the output message count.
   related:
-    - concept:arrange
+    - concept:task-group
+    - concept:completion-hooks
     - concept:offsets
 
 - key: window_complete
@@ -364,3 +366,107 @@
   related:
     - concept:at-least-once
     - metric:drakkar_suppressed_zombie_deliveries_total
+
+- key: log:arrange_stream_enabled
+  summary: The handler implements arrange_stream, so executor.window_size has no effect on this worker.
+  when: Once at startup of the Kafka source.
+  fields:
+    hint: The reason executor.window_size is not used.
+  related:
+    - concept:arrange-stream
+    - config:executor.window_size
+
+- key: log:arrange_stream_failed
+  summary: The arrange_stream generator raised or yielded a value that breaks its rules; the stream ends and its message never completes.
+  when: When a pull raises, or a yielded value is not a list of tasks, has a task with other source offsets, or repeats a task.
+  fields:
+    offset: The offset of the message.
+    group_index: The index of the group the pull was preparing.
+    error: The error text.
+  action: Fix the generator, or catch the errors of side calls inside it; the started groups finish, the offset stays pending and the partition loop restarts once, then is dead.
+  related:
+    - concept:arrange-stream
+    - event:log:partition_processor_died
+    - recipe:partition-dead
+
+- key: log:arrange_stream_close_failed
+  summary: Closing an arrange_stream generator raised or did not end within 5 seconds; a generator that ignores the cancellation is left running.
+  when: When a stream is closed at a stop, a revoke, a DLQ outcome or after a stream error, and the close fails.
+  fields:
+    offset: The offset of the message.
+    error: The error text, or timed out.
+  action: Let the generator end on GeneratorExit and CancelledError; keep cleanup short and in try and finally.
+  related:
+    - concept:arrange-stream
+    - config:executor.drain_timeout
+
+- key: log:arrange_stream_abandoned
+  summary: A stream was still open at a stop or a revoke; its tasks were cancelled and the next owner of the partition runs the message again.
+  when: At a stop or a revoke, once per message whose stream was open.
+  fields:
+    offset: The offset of the message.
+    groups_started: Groups that had started.
+    cancelled: Tasks that were cancelled.
+  action: None needed; it is the normal end of an open stream at a stop. Sinks receive the finished groups again on the replay.
+  related:
+    - concept:arrange-stream
+    - concept:at-least-once
+
+- key: log:arrange_stream_tasks_cancelled
+  summary: Tasks of streams that failed earlier were still running at a stop and were cancelled.
+  when: At a stop or a revoke, when a failed stream still has running tasks.
+  fields:
+    offsets: The offsets of the failed messages.
+    cancelled: Tasks that were cancelled.
+  action: Read the arrange_stream_failed line of the same offset.
+  related:
+    - concept:arrange-stream
+    - event:log:arrange_stream_failed
+
+- key: log:on_group_complete_failed
+  summary: The on_group_complete hook raised; the error is logged and ignored and the group counts as finished.
+  when: Once per raising call of the hook.
+  fields:
+    offset: The offset of the message.
+    group_index: The index of the group.
+    error: The error text.
+  action: Fix the hook; the group result is not delivered, and the group_complete row has output_message_count 0.
+  related:
+    - concept:completion-hooks
+    - event:group_complete
+
+- key: log:on_group_complete_delivery_failed
+  summary: The delivery of an on_group_complete result could not be confirmed; the offset of the message stalls when the message finishes.
+  when: When a sink delivery of the group result ends unconfirmed.
+  fields:
+    offset: The offset of the message.
+    group_index: The index of the group.
+    error: The error text.
+  action: Follow the sink-failing recipe.
+  related:
+    - concept:sinks-and-delivery
+    - recipe:sink-failing
+
+- key: log:on_group_complete_sink_delivery_failed
+  summary: The delivery of an on_group_complete result raised an unexpected error; dlq.on_send_failure decides whether the offset stalls or commits.
+  when: When the delivery call of the group result raises an error that is not a delivery failure.
+  fields:
+    offset: The offset of the message.
+    group_index: The index of the group.
+    error: The error text.
+    offset_action: stall or commit.
+  action: Read the error; check the sinks and the DLQ.
+  related:
+    - concept:sinks-and-delivery
+    - config:dlq.on_send_failure
+
+- key: log:group_notes_invalid
+  summary: A group note held a value that is not a str, int, float or bool; the note was removed.
+  when: When a group ends, after on_group_complete or when its last task settled.
+  fields:
+    offset: The offset of the message.
+    group_index: The index of the group.
+    keys: The removed note keys, sorted.
+  action: Write only scalar values into group.notes.
+  related:
+    - concept:task-group

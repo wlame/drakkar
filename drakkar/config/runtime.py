@@ -154,7 +154,7 @@ class ExecutorConfig(ConfigModel):
             'New windows wait while task stdin plus kept task output reach this size, at least 16MiB. '
             'Counts the stdin of pending tasks and the stdout and stderr of their results while '
             'on_task_complete, on_error and the sink delivery run, and while results are kept for '
-            'on_message_complete and on_window_complete, so large outputs slow admission. '
+            'on_group_complete, on_message_complete and on_window_complete, so large outputs slow admission. '
             'A soft limit, like max_pending_tasks. '
             'Size it to about a quarter of the container memory.'
         ),

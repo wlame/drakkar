@@ -229,8 +229,22 @@ The sink delivery and DLQ log events (category `sink`, except where noted):
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `drakkar_handler_duration_seconds` | Histogram | `hook` (`arrange`, `on_task_complete`, `on_message_complete`, `on_error`, `on_window_complete`, etc.) | Duration of user handler hook execution. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 30 |
+| `drakkar_handler_duration_seconds` | Histogram | `hook` (`arrange`, `arrange_stream`, `on_task_complete`, `on_group_complete`, `on_message_complete`, `on_error`, `on_window_complete`, etc.) | Duration of user handler hook execution; for `arrange_stream`, one sample for each pull that returned a group. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 30 |
 | `drakkar_handler_hook_errors_total` | Counter | `hook` | User hooks that raised instead of returning. The framework contains the failure and keeps the partition flowing, so this counter is the only signal that a handler is broken — **alert on any non-zero rate** |
+
+The log events of [`arrange_stream`](fan-out.md#streaming-a-large-message) and its groups:
+
+| Event | Level | Meaning |
+|-------|-------|---------|
+| `arrange_stream_enabled` | info | Category `lifecycle`. Once at startup of the Kafka source when the handler implements `arrange_stream`: `executor.window_size` has no effect. Field `hint`. |
+| `arrange_stream_failed` | error | Category `handler`. The generator raised, or yielded a value that breaks its rules. The started groups finish, the message never completes, and the partition loop restarts once, then is dead. Fields `partition`, `offset`, `group_index`, `error`, with the exception. |
+| `arrange_stream_close_failed` | error | Category `handler`. Closing the generator raised, or did not end within 5 seconds (`error` is `timed out`); a generator that ignores the cancellation is left running. Fields `partition`, `offset`, `error`. |
+| `arrange_stream_abandoned` | info | Category `partition`. A stream was open at a stop or a revoke: its tasks were cancelled and its offset stays uncommitted for the next owner. Fields `partition`, `offset`, `groups_started`, `cancelled`, `hint`. |
+| `arrange_stream_tasks_cancelled` | info | Category `partition`. At a stop or a revoke, tasks of streams that failed earlier were still running and were cancelled. Fields `partition`, `offsets`, `cancelled`, `hint`. |
+| `on_group_complete_failed` | error | Category `handler`. `on_group_complete` raised; logged and ignored, the group counts as finished. Fields `partition`, `offset`, `group_index`, `error`, with the exception. |
+| `on_group_complete_delivery_failed` | error | Category `sink`. The delivery of a group result could not be confirmed; the offset of the message stalls when the message finishes. Fields `partition`, `offset`, `group_index`, `error`. |
+| `on_group_complete_sink_delivery_failed` | error | Category `handler`. The delivery of a group result raised an unexpected error; `dlq.on_send_failure` decides (`offset_action` is `stall` or `commit`). Fields `partition`, `offset`, `group_index`, `error`, `offset_action`, with the exception. |
+| `group_notes_invalid` | error | Category `handler`. A group note held a value that is not a `str`, `int`, `float` or `bool`; the note was removed. Fields `partition`, `offset`, `group_index`, `keys` (sorted). |
 
 #### Periodic tasks
 
@@ -831,7 +845,7 @@ Real-time view of the processing pipeline, fed by WebSocket (`/ws`). Organized i
 
 - **Arrange** -- active [arrange()](handler.md#arrange-required) calls with partition, duration, and [message labels](handler.md#message_label).
 - **Executors** (the default tab) -- visual timeline of running, pending, and recently finished tasks. Slot-based layout matching `max_executors`. Tasks shorter than `ui.ws_min_duration` are hidden (except failures, which are always shown). See [Duration Thresholds](#duration-thresholds) for threshold tuning.
-- **Task Results**, **Message Results**, **Window Results** -- one row per call of `on_task_complete`, `on_message_complete` and `on_window_complete`. A tab appears only when the handler overrides that hook.
+- **Task Results**, **Group Results**, **Message Results**, **Window Results** -- one row per call of `on_task_complete`, `on_group_complete`, `on_message_complete` and `on_window_complete`. A tab appears only when the handler overrides that hook.
 - **Runtime** -- the runtime health and host sample of the worker. See [Runtime health](runtime-health.md).
 
 The page header shows the WebSocket state, the offload pool (`threads.offload`) and the executor pool: active, maximum and waiting slots. See [Live](ui-reference.md#live-live) for every value.
@@ -862,7 +876,7 @@ Multi-purpose debug page. Its tabs are Metrics, Periodic Tasks, Message Trace, M
 - **Postgres partitions** -- `GET /api/v1/debug/databases/postgres` answers the hour partitions of the recorder's Postgres table, the stored retention and the partitions the next upkeep would drop; `404` unless the provider is `postgres`, `503` when the read fails. See [The partitions of the table](recorder-postgres.md#the-partitions-of-the-table).
 - **Delete a merge result** -- `DELETE /api/v1/debug/files/merged/<name>.db` answers `204`; `403` while `ui.delete_enabled` is false (the default), `404` for any other path, `409` while this worker sends or merges the file. See [The Databases page](local-databases.md#the-databases-page).
 - **Autodiscover** -- `GET /api/v1/debug/autodiscover` answers the registry and its cards from memory; `GET /api/v1/debug/autodiscover/leases` answers who holds each cluster task's lease, read through a UI caller with a breaker of its own (`feature="ui"`, `op="holder"` in the provider metrics). See [The Autodiscover view](fleet.md#autodiscover-view).
-- **Message Probe** -- replay a single pasted message through the handler pipeline (`arrange` → executor → `on_task_complete` → `on_message_complete` → `on_window_complete`) with **zero footprint**: no sink writes, no offset commits, no event-recorder rows, no cache writes, nothing for peers to pull. The report shows every task's stdout/stderr/exit code, each hook's returned `CollectResult`, the payloads that *would have been* written to each sink, every cache call, a timeline waterfall, and any exceptions raised at any stage. Posts to `/api/v1/debug/probe` with a JSON body containing the message's `value` (and optional `key`, `partition`, `offset`, `topic`, `timestamp`, `use_cache`).
+- **Message Probe** -- replay a single pasted message through the handler pipeline (`arrange` → executor → `on_task_complete` → `on_message_complete` → `on_window_complete`) with **zero footprint**: no sink writes, no offset commits, no event-recorder rows, no cache writes, nothing for peers to pull. The report shows every task's stdout/stderr/exit code, each hook's returned `CollectResult`, the payloads that *would have been* written to each sink, every cache call, a timeline waterfall, and any exceptions raised at any stage. Posts to `/api/v1/debug/probe` with a JSON body containing the message's `value` (and optional `key`, `partition`, `offset`, `topic`, `timestamp`, `use_cache`). For a handler with `arrange_stream` the probe runs only the first 5 groups, calls `on_group_complete` right after the tasks of each group end, then `on_message_complete` with the groups that ran; the report lists the groups and sets `stream_truncated` when the stream had more.
 
 #### `/task/{id}` -- Task Detail
 

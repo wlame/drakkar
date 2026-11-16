@@ -132,8 +132,10 @@ executor:
   # Soft limits: passed by the admitted window's fan-out beyond its estimate
   # (normally one message; a jump in tasks per message passes them by that jump);
   # drakkar_pending_tasks / drakkar_pending_bytes show the real counts.
+  # A stream handler (arrange_stream) is admitted group by group instead: the limits
+  # are passed by at most one group for each message that streams.
   max_pending_tasks: 2000          # unsettled tasks (waiting, running, in on_task_complete). env: DK_EXECUTOR__MAX_PENDING_TASKS  · >= max_executors
-  max_pending_bytes: 1GiB          # task stdin + output in hooks and delivery or kept for the message / window hooks.
+  max_pending_bytes: 1GiB          # task stdin + output in hooks and delivery or kept for the group / message / window hooks.
                                    #   env: DK_EXECUTOR__MAX_PENDING_BYTES  · >= 16MiB; about a quarter of container memory
 
   # Subprocess environment.

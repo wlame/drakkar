@@ -297,7 +297,7 @@ and sizing.
 | Key | Default | What it bounds |
 |-----|---------|----------------|
 | `executor.max_pending_tasks` | `2000` | Tasks created and not yet settled (waiting for a slot, running, or in `on_task_complete` and its delivery). Must be at least `max_executors`. |
-| `executor.max_pending_bytes` | `1GiB` | The stdin of those tasks plus the stdout and stderr of their results while `on_task_complete`, `on_error` and the sink delivery run, and of results kept for `on_message_complete` and `on_window_complete`. Large outputs slow admission. At least `16MiB`. |
+| `executor.max_pending_bytes` | `1GiB` | The stdin of those tasks plus the stdout and stderr of their results while `on_task_complete`, `on_error` and the sink delivery run, and of results kept for `on_group_complete`, `on_message_complete` and `on_window_complete`. Large outputs slow admission. At least `16MiB`. |
 | `sources.kafka.max_queued_messages` | `1000` | Polled messages waiting in partition queues. Must be at least `max_poll_records`. |
 
 - A partition loop takes a new window only while both pending counts are

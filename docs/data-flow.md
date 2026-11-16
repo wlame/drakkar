@@ -246,7 +246,7 @@ The processor waits for messages from its queue:
 1. **Blocking wait for the first message**: `await asyncio.wait_for(queue.get(), timeout=1.0)`.
    - **If timeout (1 second, no messages)**: returns an empty list. The processor then attempts an offset commit for any previously completed work and loops back.
    - **If a message arrives**: it is held as the first message of the next window (it still counts as queued).
-2. **Wait for room in the pending budget**: one budget per worker counts the pending tasks (created and not settled) and pending bytes (their stdin plus the output of their results while `on_task_complete`, `on_error` and the sink delivery run, or while `on_message_complete` and `on_window_complete` keep it). While either reaches its limit (`executor.max_pending_tasks`, `executor.max_pending_bytes`), the loop waits in a first-in, first-out list; a release that makes room wakes the oldest waiter. Each wait lasts at most 1 second, then the loop retries a commit and comes back with its place kept. A stop ends the wait at once.
+2. **Wait for room in the pending budget**: one budget per worker counts the pending tasks (created and not settled) and pending bytes (their stdin plus the output of their results while `on_task_complete`, `on_error` and the sink delivery run, or while `on_group_complete`, `on_message_complete` and `on_window_complete` keep it). While either reaches its limit (`executor.max_pending_tasks`, `executor.max_pending_bytes`), the loop waits in a first-in, first-out list; a release that makes room wakes the oldest waiter. Each wait lasts at most 1 second, then the loop retries a commit and comes back with its place kept. A stop ends the wait at once.
 3. **Non-blocking drain**: calls `queue.get_nowait()` in a tight loop until:
    - The queue is empty, OR
    - The window reaches the admitted size. During the partition's warm-up (its first 3 windows, whether they created tasks or not) that is one message, and the window reserves all the free room. After it: `min(free tasks / tasks per message, free bytes / bytes per message)`, clamped to 1 .. `executor.window_size`. The per-message numbers are moving averages of tasks, stdin bytes and kept output bytes (the output of a task in its own hooks and delivery is charged but not estimated) (weight 0.5 for a larger sample, 0.05 for a smaller one), from the partition's own windows or, before it has one, from the whole worker, raised to a floor of `max_pending_tasks / window_size` tasks and `max_pending_bytes / window_size` bytes. A window whose `arrange()` created no tasks is not measured. Before the worker measured a window with tasks, one window of one message is arranged at a time. The free room excludes what other windows reserved.
@@ -305,6 +305,21 @@ For each window:
    - Track the async task handle in `_active_tasks` for cleanup.
 
    All tasks within a window are launched concurrently. The processor immediately returns to collecting the next window -- it does not wait for these tasks to finish.
+
+### 3.3 Streaming a Message (`arrange_stream`)
+
+A handler that implements [`arrange_stream()`](fan-out.md#streaming-a-large-message) instead of `arrange()` has no windows. The processor takes one message at a time:
+
+1. It registers the offset as pending, parses the message, gives it a request id and creates its message tracker in the "stream open" state.
+2. It calls `handler.arrange_stream(message)`. Then, for each group:
+   1. It waits for room in the pending budget, in the same first-in, first-out list, and reserves the average size of a group with no await in between. Only "below the limits" is needed, so a group larger than the limits is admitted when its turn comes.
+   2. It takes the next window id and pulls the next yielded list. The pull runs as an `asyncio.Task` in one context for the whole stream, so a stop can cancel it. Its time is recorded in `handler_duration{hook="arrange_stream"}` and in an `arranged` event with `group_index`.
+   3. It checks the list (a list of tasks, each with `source_offsets == [message.offset]`, none yielded before), creates the `TaskGroup`, sets `task.group` on each task, charges the real tasks and bytes out of the reservation and starts the tasks in chunks of 256. An empty list is skipped.
+3. When the generator ends, the stream is closed in the tracker and the processor takes the next message, while the last tasks of the streamed message still run.
+
+When every task of a group has a terminal outcome and its hooks and deliveries have ended, the group finishes: `on_group_complete` runs (only when overridden), its result is delivered with the message context, and the group's notes are checked. A message completes when its stream has ended, no task remains and no group is open; then `on_message_complete` runs with `MessageGroup.groups`.
+
+An error of the generator stops the pulls and closes the generator; the started groups finish, the message never completes, and the error reaches the supervisor of the loop (one restart, then dead). A DLQ outcome closes the stream: no further group is pulled, and the hooks still run without delivery.
 
 ---
 
@@ -506,7 +521,7 @@ Per-source-message aggregation and per-message offset commit. Fires before any w
 
 ### 7.1 Message Completion Check
 
-Each terminal outcome (success, SKIP, retry-exhaustion, replacement) decrements `tracker.remaining` for every message the task contributes to. When a tracker hits zero, the message's `MessageGroup` is ready to fire.
+Each terminal outcome (success, SKIP, retry-exhaustion, replacement) decrements `tracker.remaining` for every message the task contributes to. When a tracker hits zero, the message's `MessageGroup` is ready to fire. For a streamed message zero is not enough, because the count can be zero between two groups: the message is done when its stream has ended, no task remains and no group is open.
 
 A `MessageTracker.completion_fired` guard prevents double-firing in any pathological race.
 
@@ -730,6 +745,7 @@ follow describe what the **Kafka** source does inside its share of it.
 - Each processor drains by: dropping the queued messages that are not in a window (never arranged; their offsets were never registered, so the next owner reads them again; counted in `drakkar_queued_messages_dropped_at_stop_total`), waiting for in-flight tasks to complete, then doing a final commit.
 - If the timeout expires, logs a warning but continues shutdown. The flag that tracks a clean drain is used by the next step to decide whether committing final offsets is safe. The still-running tasks are suppressed and then cancelled, so they release their executor slots and subprocesses rather than holding them for the rest of the pod's grace period.
 - Processors whose loop has died are excluded: nothing will empty their queue or settle their pending offsets, so waiting on one would spend the whole budget and suppress every other partition's final commit with it.
+- A message whose `arrange_stream` generator is still open is abandoned: its tasks are cancelled first, then the pull in progress is cancelled and the generator closed (within 5 seconds), and no group hook, message hook or delivery runs for it. Its offset stays pending and is left out of the drain, like a stalled offset; the next owner runs the message again. The still-running tasks of a stream that failed earlier are cancelled too. A message whose stream has already ended drains as usual. When a stop and a DLQ outcome meet, the DLQ outcome decides and the stream is ended, not abandoned.
 
 ### Step 4: Final Offset Commits
 - **Only if Step 3 drained cleanly**, iterates processors and commits any remaining offsets via `committable()`.

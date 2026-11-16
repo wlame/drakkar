@@ -11,7 +11,9 @@ right time during the message-processing pipeline. See [Configuration](configura
 | `on_startup(config)` | Before any components are created | Once per worker lifetime | Modified `DrakkarConfig` |
 | `on_ready(config, db_pool)` | After sinks connected, before polling | Once per worker lifetime | `None` |
 | `arrange(messages, pending)` | A window of messages is ready to process | Once per window per partition | `list[`[`ExecutorTask`](executor.md#executortask)`]` |
+| `arrange_stream(message)` | Instead of `arrange`: one message is ready to process; an async generator | Once per message; one group per `yield` | yields `list[`[`ExecutorTask`](executor.md#executortask)`]` |
 | `on_task_complete(result)` | A single task completes successfully (exit 0) | Once per successful task | [`CollectResult`](sinks.md#collectresult) `\| None` |
+| `on_group_complete(group, results, errors)` | All tasks of one group of `arrange_stream` reached a terminal state, with their hooks and deliveries | Once per group (stream handlers only) | [`CollectResult`](sinks.md#collectresult) `\| None` |
 | `on_message_complete(group)` | All tasks derived from a single source message reached a terminal state | Once per source message | [`CollectResult`](sinks.md#collectresult) `\| None` |
 | `on_window_complete(results, source_messages)` | All tasks in a window finished | Once per window per partition | [`CollectResult`](sinks.md#collectresult) `\| None` |
 | `on_error(task, error)` | A single task fails (non-zero exit, timeout, crash) | Once per failed task | `ErrorAction \| list[`[`ExecutorTask`](executor.md#executortask)`]` |
@@ -27,7 +29,7 @@ right time during the message-processing pipeline. See [Configuration](configura
 | `on_http_request_complete(group)` | All tasks from one HTTP request reached a terminal state | Once per HTTP request (webapp only) | `HttpResponseT` (a Pydantic model) |
 | `http_request_label(req, request_id)` | Before logging each HTTP request | Once per HTTP request (webapp only) | `str` |
 
-**Which hooks are required follows the enabled [input sources](sources.md).** `arrange()` is required when `sources.kafka.enabled` is true; the four `*http*` hooks at the bottom are required when `sources.http.enabled` is true, together with concrete types in the `HttpRequestT` / `HttpResponseT` slots (see [Generic type parameters](#generic-type-parameters) below). A worker running both sources needs both sets. An HTTP-only worker implements only the HTTP hooks and may leave `arrange()` unimplemented; a Kafka-only worker is the mirror of that. Every other hook has a safe default.
+**Which hooks are required follows the enabled [input sources](sources.md).** Exactly one of `arrange()` and [`arrange_stream()`](#arrange_stream) is required when `sources.kafka.enabled` is true; the four `*http*` hooks at the bottom are required when `sources.http.enabled` is true, together with concrete types in the `HttpRequestT` / `HttpResponseT` slots (see [Generic type parameters](#generic-type-parameters) below). A worker running both sources needs both sets. An HTTP-only worker implements only the HTTP hooks and may leave `arrange()` unimplemented; a Kafka-only worker is the mirror of that. Every other hook has a safe default.
 
 ---
 
@@ -330,6 +332,67 @@ async def arrange(self, messages, pending):
 | Expensive subprocess that's rarely worth running | Direct fit — decide in `arrange()` |
 | Async I/O you don't want to do in `arrange()` | Less good — moves cache lookup into arrange's hot path; consider prefetching in `on_ready()` instead |
 
+### arrange_stream
+
+```python
+async def arrange_stream(self, message: SourceMessage) -> AsyncIterator[list[ExecutorTask]]
+```
+
+Optional, and the other way to the work of `arrange()`: a handler overrides
+exactly one of the two. Write it as an async generator. Each `yield` gives
+one non-empty list of tasks, a **group**; the framework starts the group at
+once and pulls the next one only when the pending budget has room, so a
+message with many thousands of tasks holds a bounded number of them in
+memory. A bare `return` or the end of the function ends the stream. An empty
+list is ignored.
+
+- Every task must have `source_offsets == [message.offset]`.
+- Each task gets `task.group`, its [TaskGroup](#taskgroup).
+- The worker takes one message at a time: `executor.window_size` has no
+  effect, and `on_window_complete` is refused at startup.
+- The offset completes only when the whole message ends; a replay runs
+  every group again.
+- A raise inside the generator fails the stream: the started groups finish,
+  the message never completes, and the partition loop restarts once, then
+  is dead. Catch the errors of side calls inside the generator.
+- At a stop the generator sees `GeneratorExit` at a `yield` or
+  `CancelledError` inside an `await`; put cleanup in `try`/`finally`.
+
+The full rules, the memory bound, the failure and stop behaviour and an
+example are on the [Fan-out](fan-out.md#streaming-a-large-message) page.
+
+#### group_labels
+
+```python
+class ImportHandler(dk.BaseDrakkarHandler):
+    group_labels = ('directory', 'file_size')
+```
+
+A class attribute: the label names whose values each group collects into
+`TaskGroup.labels`. Default empty. It must be a sequence of unique,
+non-empty strings, and it may be set only together with `arrange_stream()`;
+startup fails otherwise.
+
+#### Startup checks
+
+Startup fails with a `ConfigurationError` that names the handler class when:
+
+- the handler overrides both `arrange()` and `arrange_stream()`;
+- it overrides `arrange_stream()` and `on_window_complete()`;
+- `group_labels` is not a sequence of unique, non-empty strings;
+- it overrides `on_group_complete()` or sets `group_labels` without
+  `arrange_stream()`;
+- the Kafka source is on and it overrides neither `arrange()` nor
+  `arrange_stream()`.
+
+The exact messages are listed on the
+[Fan-out](fan-out.md#startup-checks) page. With `arrange_stream()` the
+worker logs one info line `arrange_stream_enabled` at startup: it says that
+`executor.window_size` has no effect.
+
+The framework finds every hook on the handler **class**. A function set on
+an instance (`handler.arrange_stream = ...`) is not seen.
+
 ### on_task_complete
 
 ```python
@@ -429,6 +492,56 @@ See the [Fan-out](fan-out.md) page for a complete walkthrough, the full
 replacement-chain tracing via `parent_task_id`, and offset commit
 ordering.
 
+### on_group_complete
+
+```python
+async def on_group_complete(
+    self,
+    group: TaskGroup,
+    results: list[ExecutorResult],
+    errors: list[ExecutorError],
+) -> CollectResult | None
+```
+
+Valid only with [`arrange_stream()`](#arrange_stream). Called once for each
+group, after every task of the group has a terminal outcome and the
+`on_task_complete` hook and delivery of each task have ended. `results`
+are the terminal successes in completion order, `errors` the terminal
+failures, as in `MessageGroup`; `result.task.stdin` is `None`.
+
+The framework keeps both lists only for a handler that overrides this hook,
+and drops them after the hook and its delivery end; their output counts in
+`executor.max_pending_bytes` until then. Write small scalar values into
+`group.notes` to keep them until `on_message_complete`.
+
+The returned `CollectResult` is delivered with the message context, so the
+sink failure policy and the DLQ apply. A raise is logged
+(`on_group_complete_failed`) and ignored; the group counts as finished.
+`on_message_complete` always fires after every group hook and its delivery.
+
+### TaskGroup
+
+The group of one list yielded by `arrange_stream()`. Reached as
+`task.group`, `result.task.group`, the first argument of
+`on_group_complete` and `MessageGroup.groups`. It never holds a task, a
+result or an output text.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `index` | `int` | order of the group in its message, from 0 |
+| `source_message` | `SourceMessage` | the message of the group |
+| `task_count` | `int` | tasks in the yielded list |
+| `succeeded`, `failed` | `int` | terminal outcomes so far |
+| `replaced` | `int` | tasks that `on_error` replaced |
+| `labels` | `dict[str, list[str]]` | values of each `group_labels` name on the yielded tasks, in list order |
+| `skipped_deliveries` | `dict[str, int]` | per sink `<type>/<name>`, deliveries of the group that ended in `skip` |
+| `notes` | `dict[str, str \| int \| float \| bool]` | small values the hooks keep; another type is removed when the group ends (`group_notes_invalid`) |
+| `started_at`, `finished_at` | `float` | monotonic times: received; last task settled |
+
+A deep copy of a task gets its own copy of the group, whose counters the
+framework never updates. See the
+[Fan-out](fan-out.md#the-group-object) page for every rule.
+
 ### MessageGroup
 
 Passed to `on_message_complete`. Contains every task scheduled for a
@@ -441,6 +554,11 @@ single source message, the terminal outcomes, and the wall-clock timing.
 | `results` | `list[ExecutorResult]` | terminal successes |
 | `errors` | `list[ExecutorError]` | terminal failures (SKIP / retries exhausted) |
 | `started_at`, `finished_at` | `float` | monotonic timestamps |
+| `groups` | `list[TaskGroup]` | the groups of a stream handler, in `index` order; empty for `arrange()` |
+
+In stream mode `tasks`, `results` and `errors` are empty; `succeeded`,
+`failed` and `replaced` are the sums over `groups`, and `total` is their
+sum.
 
 Convenience properties: `succeeded`, `failed`, `total`, `replaced`,
 `all_succeeded`, `any_failed`, `is_empty`, `duration_seconds`.

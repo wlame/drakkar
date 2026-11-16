@@ -359,7 +359,11 @@ class ExecutorTask(BaseModel):
         default=None,
         exclude=True,
         repr=False,
-        description='The group this task was yielded in by arrange_stream. None for a task from arrange().',
+        description=(
+            'The group this task was yielded in by arrange_stream. None for a task from arrange(). '
+            'A deep copy of the task gets its own copy of the group, whose counters and notes the '
+            'framework never updates; copy a task without deep=True to keep the group.'
+        ),
     )
 
 

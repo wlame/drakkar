@@ -6,7 +6,9 @@ split into many subprocess invocations, and the useful output is a
 one output per task.
 
 Drakkar supports this natively via the `on_message_complete` hook and
-the `MessageGroup` dataclass.
+the `MessageGroup` dataclass. When one message makes so many tasks that they
+should not all exist at once, the handler can yield them in groups with
+`arrange_stream()` instead (see [Streaming a large message](#streaming-a-large-message)).
 
 !!! info "When to use this page"
     If your pipeline is strictly 1-in / 1-out (one input → one subprocess
@@ -240,6 +242,7 @@ returns. This means:
 | 1 message → N tasks → **1 aggregate output** | `on_message_complete` only (return `None` from `on_task_complete`) |
 | 1 message → N tasks → N detail + 1 aggregate | BOTH `on_task_complete` and `on_message_complete` |
 | Multi-message batch metrics | `on_window_complete` (coarser than message-level) |
+| 1 message → thousands of tasks, in independent parts | `arrange_stream()` with `on_group_complete` per part and `on_message_complete` for the whole (see [Streaming a large message](#streaming-a-large-message)) |
 
 All three hooks coexist — they fire on the same underlying data but at
 different granularities. Which to use is a choice about what you want
@@ -433,6 +436,264 @@ the real numbers. See
 
 ---
 
+## Streaming a large message
+
+`arrange()` returns every task of a window at once. Two problems follow
+when one message makes many thousands of tasks with a large stdin:
+
+- The first task starts only after `arrange()` has built every task,
+  side calls included.
+- Every task and its stdin exist in memory at the same time. The pending
+  budget cannot prevent it: one message is the smallest unit it admits.
+
+`arrange_stream()` is the other way to turn a message into tasks. It is an
+async generator: each `yield` gives one list of tasks, a **group**. The
+framework starts the group at once and pulls the next group only when the
+pending budget has room. A handler implements exactly one of `arrange()`
+and `arrange_stream()`.
+
+```python
+import drakkar as dk
+
+
+class ImportHandler(dk.BaseDrakkarHandler):
+    group_labels = ('directory', 'file_size')
+
+    async def arrange_stream(self, message: dk.SourceMessage):
+        async for directory in list_directories(message.payload):
+            yield [
+                dk.ExecutorTask(
+                    task_id=dk.make_task_id('import'),
+                    args=[file.path],
+                    stdin=await load(file),
+                    source_offsets=[message.offset],
+                    labels={'directory': directory.name, 'file_size': str(file.size)},
+                )
+                for file in directory.files
+            ]
+
+    async def on_group_complete(self, group, results, errors) -> dk.CollectResult | None:
+        group.notes['bytes'] = sum(int(size) for size in group.labels['file_size'])
+        return dk.CollectResult(...)
+
+    async def on_message_complete(self, group: dk.MessageGroup) -> dk.CollectResult | None:
+        total = sum(g.notes.get('bytes', 0) for g in group.groups)
+        return dk.CollectResult(...)
+```
+
+### The rules of the generator
+
+- Each `yield` gives one `list[ExecutorTask]`. An empty list is ignored: no
+  group, no hook, no event.
+- A bare `return`, or the end of the function, ends the stream. A stream
+  that yields nothing is a message with no tasks: `on_message_complete`
+  fires with no groups and the offset completes.
+- Every task must have `source_offsets == [message.offset]`. A value that is
+  not a list of tasks, a task with other source offsets, or a task object
+  that was already yielded is an [error of the stream](#errors-of-the-stream).
+- There is no `pending` parameter. The generator lives as long as its message
+  streams; keep any state that avoids duplicate work inside the generator.
+- The worker takes one message at a time. `executor.window_size` has no
+  effect, and the worker logs `arrange_stream_enabled` at startup to say so.
+  The partition takes the next message as soon as the generator ends, while
+  the last tasks of the message still run.
+- A replacement task that `on_error` returns joins the group of the task it
+  replaces, and always gets the source offsets of that task.
+
+### The group object
+
+The framework creates one `TaskGroup` for each yielded list and sets
+`task.group` on each task of the list. The reference goes from the task to
+the group only. `task.group` is not serialized, and it is `None` for a task
+from `arrange()`. A deep copy of a task (`model_copy(deep=True)`,
+`copy.deepcopy`) gets its own copy of the group, whose counters the
+framework never updates.
+
+| Field | Type | Filled by | Meaning |
+|---|---|---|---|
+| `index` | `int` | framework | Order of the group in its message, from 0. |
+| `source_message` | `SourceMessage` | framework | The message of the group; the same object for every group of the message. |
+| `task_count` | `int` | framework | Number of tasks in the yielded list. It does not change. |
+| `succeeded`, `failed` | `int` | framework | Terminal outcomes so far. A replacement from `on_error` counts by its own outcome. |
+| `replaced` | `int` | framework | Tasks that `on_error` replaced with other tasks. When the group ends, `succeeded + failed + replaced` is the number of tasks ever scheduled in the group. |
+| `labels` | `dict[str, list[str]]` | framework | For each name in `group_labels`: the values of that label on the yielded tasks, in list order, one entry for each task that has the label. A name that no task has gives `[]`. Replacement tasks add nothing. |
+| `skipped_deliveries` | `dict[str, int]` | framework | For each sink `<type>/<name>`: how many deliveries of this group (task results and the group result) ended in `skip`. |
+| `notes` | `dict[str, str \| int \| float \| bool]` | handler | Small values the hooks keep until `on_message_complete`. |
+| `started_at`, `finished_at` | `float` | framework | Monotonic times: the group was received; its last task settled. |
+
+The group never holds a task, a result or an output text, so it can live
+until the message ends without keeping task payloads in memory.
+
+**`notes`.** Any hook that can reach the group may write it:
+`on_task_complete` (through `result.task.group`) and `on_group_complete`.
+Values must be `str`, `int`, `float` or `bool` (exactly these types, not a
+subclass). The framework checks the map when the group ends — after
+`on_group_complete` returns, or when the last task settles if the hook is
+not implemented. A value of another type is removed, and one error line
+`group_notes_invalid` names the keys.
+
+**`group_labels`.** A class attribute of the handler: a tuple of label
+names, default empty. Startup fails when it is not a sequence of unique,
+non-empty strings, or when it is set on a handler without
+`arrange_stream()`. The values are a list, not a set, because a set loses
+equal values (two files of the same size) and a sum needs them. Call
+`set(...)` when you want unique values.
+
+### `on_group_complete` and `on_message_complete`
+
+`on_group_complete(group, results, errors)` fires once for each group, when
+every task of the group has a terminal outcome and the `on_task_complete`
+hook and delivery of each task have ended. `results` are the terminal
+successes in completion order and `errors` the terminal failures. A task is
+reachable through `result.task`; its stdin is already `None`. The returned
+`CollectResult` is delivered with the message context, so the sink failure
+policy and the DLQ apply as for a task result. A raise is logged
+(`on_group_complete_failed`) and ignored; the group counts as finished.
+
+The framework keeps `results` and `errors`, and their output in
+`executor.max_pending_bytes`, only when the handler class overrides the
+hook, and drops both lists after the hook and its delivery end.
+
+`on_message_complete(group)` fires once, after the stream has ended and
+every group has finished its hook and delivery, so its sinks always come
+after the sinks of the group hooks. In stream mode `group.groups` holds the
+groups in `index` order, and `group.tasks`, `group.results` and
+`group.errors` are empty. `group.succeeded`, `group.failed` and
+`group.replaced` are the sums over the groups, and `group.total` is their
+sum. The offset completes after it, as for `arrange()`.
+
+!!! warning "Define hooks on the handler class"
+    The framework finds `arrange_stream`, `on_group_complete` and the other
+    completion hooks on the handler class. A function set on an instance
+    (`handler.on_group_complete = ...`) is not seen.
+
+### Memory and admission
+
+Before each pull the partition loop waits for room in the pending budget,
+reserves the average size of a group (tasks, stdin bytes, kept output),
+pulls the next group, charges its real tasks and bytes, and starts its tasks
+in chunks. Admission needs only "below the limits", not "the group fits": a
+group larger than the limits is admitted when its turn comes, so a stream
+never waits for ever.
+
+**You bound the memory by the size of your groups.** The pending limits
+are passed by at most one group for each message that streams. Keep groups
+small compared to `executor.max_pending_tasks`: the framework checks, labels
+and records a whole group in one step before it starts the tasks in chunks.
+`drakkar_stream_group_tasks` shows the group sizes. The output of a group
+kept for `on_group_complete` stays charged until the hook and its delivery
+end. See [Performance: Backpressure](performance.md#streaming-groups).
+
+### Replays
+
+The offset completes only when the whole message ends. A restart, a revoke
+or a DLQ replay runs the message from its start again, and the sinks receive
+the finished groups again. Make the sinks accept repeated results (upserts,
+keys).
+
+### Errors of the stream
+
+A raise inside the generator, and each broken rule above, is an error of
+the stream:
+
+- The framework stops pulling and closes the generator.
+- The groups that already started run to their end, with their hooks and
+  deliveries.
+- The message never completes: `on_message_complete` does not fire and the
+  offset stays pending.
+- The error is logged as `arrange_stream_failed` and then handled as a
+  raise of `arrange()`: the partition loop restarts once, then the
+  partition is dead and `/readyz` shows it.
+
+So catch the errors of side API calls inside the generator when a retry
+there is possible.
+
+### A DLQ outcome
+
+A DLQ record ends the message, as for `arrange()`. It also closes the
+stream: no further group is pulled, and a pull in progress is cancelled.
+Groups that are running finish; `on_group_complete` and
+`on_message_complete` still fire, and their results are not delivered
+(`sink_not_started`, reason `message_dlq`). The offset completes.
+
+### Stop and revoke
+
+A message whose stream has already ended drains as usual: its offset can
+still complete, so the drain waits for it.
+
+A message whose stream is still open is **abandoned**
+(`arrange_stream_abandoned`). Its tasks are cancelled first, then the
+generator is closed; its group hooks, its message hook and their deliveries
+do not run, because the next owner of the partition runs the message from
+its start. The cancelled tasks give back their budget charges. Its offset
+stays pending and the drain does not wait for it. The still-running tasks
+of a stream that failed earlier are cancelled too
+(`arrange_stream_tasks_cancelled`): that offset can never complete in this
+process. When a stop and a DLQ outcome meet, the DLQ outcome decides: the
+stream is ended, not abandoned, so the next owner writes no second DLQ
+record.
+
+### Cleanup in the generator
+
+A pull can wait a long time inside a side call, so the framework runs each
+pull as a task it can cancel. At a stop, a revoke or a DLQ outcome it
+cancels the pull and then closes the generator. The generator therefore
+sees one of two things: `GeneratorExit` at a `yield`, or `CancelledError`
+inside an `await`. A `try`/`finally` block covers both:
+
+```python
+async def arrange_stream(self, message):
+    client = await open_client()
+    try:
+        async for part in client.parts(message.payload):
+            yield make_tasks(part, message)
+    finally:
+        await client.close()
+```
+
+The generator runs in one context for the whole stream, so a context
+variable or a log field it binds lives across its yields. Closing has a
+bound of 5 seconds. A generator that catches the cancellation and keeps
+running is left behind after it, with one error line
+`arrange_stream_close_failed`. With `executor.drain_timeout` below about 6
+seconds such a generator can make the drain time out.
+
+### Startup checks
+
+Startup fails, with a message that names the handler class, when:
+
+| Condition | Message |
+|---|---|
+| both `arrange()` and `arrange_stream()` are overridden | `<Handler> overrides both arrange() and arrange_stream(); a handler has one of them` |
+| `arrange_stream()` and `on_window_complete()` are overridden | `<Handler> overrides arrange_stream() and on_window_complete(); a stream handler has no windows, use on_group_complete() or on_message_complete()` |
+| `group_labels` is not a sequence of unique, non-empty strings | `<Handler>.group_labels must be a sequence of unique, non-empty label names` |
+| `on_group_complete()` without `arrange_stream()` | `<Handler> overrides on_group_complete() without arrange_stream(); groups exist only for a stream handler` |
+| `group_labels` set without `arrange_stream()` | `<Handler> sets group_labels without arrange_stream(); groups exist only for a stream handler` |
+| the Kafka source is on and neither hook is overridden | `sources.kafka.enabled=true but <Handler> does not override arrange() or arrange_stream() — implement one of them or disable sources.kafka` |
+
+### What the recorder and the metrics show
+
+- `arranged`: one row for each group. `message_count` is 1; `duration` is
+  the time inside the pull (the preparation of that group, without the wait
+  for room); the metadata has `group_index`. Each group takes its own
+  `window_id`.
+- `group_complete`: one row for each group, only when the handler overrides
+  `on_group_complete` (also when the hook raised, then with
+  `output_message_count` 0).
+- `message_complete`: the metadata has `group_count`.
+- No `window_complete` rows.
+- `drakkar_handler_duration_seconds{hook="arrange_stream"}` has one sample
+  for each pull; `{hook="on_group_complete"}` one for each hook call.
+
+The [Message Probe](observability.md#debug-debug-tools) runs a stream
+handler too, but only its first 5 groups; it reports a flag
+`stream_truncated` when the stream had more.
+
+The HTTP source does not stream: `arrange_http_request()` keeps its list
+form.
+
+---
+
 ## Multi-message tasks (fan-IN)
 
 If a task has `source_offsets = [a, b, c]` (one task represents work for
@@ -612,13 +873,16 @@ the three stages apart:
 | Event | Fires after | Grain |
 |---|---|---|
 | `task_complete` | `on_task_complete()` returns | per task |
+| `group_complete` | `on_group_complete()` returns (or raises) | per group of `arrange_stream()` |
 | `message_complete` | `on_message_complete()` returns | per source message |
 | `window_complete` | `on_window_complete()` returns | per arrange() window |
 
 Each event carries `duration`, `output_message_count`, and stage-specific
 fields (`task_id` on `task_complete`; `offset` + `task_count` +
-`succeeded` + `failed` + `replaced` on `message_complete`; `window_id`
-+ `task_count` on `window_complete`). Use these to build per-stage
+`succeeded` + `failed` + `replaced` on `message_complete`, plus
+`group_count` for a stream; `group_index` + `succeeded` + `failed` +
+`replaced` + `task_count` on `group_complete`; `window_id` + `task_count`
+on `window_complete`). Use these to build per-stage
 dashboards ("how often do my requests fail entirely?") or to hunt slow
 hooks.
 
