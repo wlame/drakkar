@@ -1,13 +1,14 @@
 """Per-partition processor for Drakkar framework."""
 
 import asyncio
+import contextvars
 import functools
 import inspect
 import math
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
@@ -156,6 +157,12 @@ class _StreamEnd:
 
 
 _STREAM_END = _StreamEnd()
+
+
+def _retrieve_task_outcome(task: asyncio.Task) -> None:
+    """Read the outcome of a task nobody awaits, so asyncio does not log an unread exception."""
+    if not task.cancelled():
+        task.exception()
 
 
 @dataclass
@@ -422,6 +429,12 @@ class PartitionProcessor:
         # The running task coroutines of each stream message, by offset, so an
         # abandoned stream cancels only its own tasks.
         self._stream_runs: dict[int, set[asyncio.Task]] = {}
+        # The stream runs whose coroutine has started (see ``_end_stream_run``).
+        self._started_runs: set[asyncio.Task] = set()
+        # The context of the open stream: every pull and the close run in it.
+        self._stream_context: contextvars.Context | None = None
+        # The index of the group the stream is making now, for its error line.
+        self._stream_group_index = 0
         # The optional run-time hook, or None when the handler keeps the
         # default — asked once for the same reason, so a handler without it
         # pays nothing per task.
@@ -1368,35 +1381,50 @@ class PartitionProcessor:
         tracker = MessageTracker(source_message=message, started_at=started_at, stream_open=True)
         self._message_trackers[message.offset] = tracker
 
+        # One context for the whole stream, copied from the loop's: every pull
+        # and the close run in it, so a context variable the generator sets
+        # (a bound log field, a tracing span) lives across its yields, and a
+        # token it took before a yield can be reset after it.
+        self._stream_context = contextvars.copy_context()
+        self._stream_group_index = 0
         stream: AsyncIterator[list[ExecutorTask]] | None = None
         try:
-            stream = self._open_stream(message)
-            ended = await self._pull_groups(stream, tracker)
-        except asyncio.CancelledError:
-            # The loop itself is cancelled (a stop that ran out of time): no
-            # time is left to close the generator, but the pull must not
-            # outlive the loop.
-            if self._pull_task is not None:
-                self._pull_task.cancel()
-                self._pull_task = None
-            raise
-        except Exception as e:
-            await self._fail_stream(stream, tracker, e)
-            raise
+            try:
+                stream = self._open_stream(message)
+                ended = await self._pull_groups(stream, tracker)
+            except asyncio.CancelledError:
+                # The loop itself is cancelled (a stop that ran out of time):
+                # no time is left to close the generator, but the pull must
+                # not outlive the loop.
+                if self._pull_task is not None:
+                    self._pull_task.cancel()
+                    self._pull_task = None
+                raise
+            except Exception as e:
+                await self._fail_stream(stream, tracker, e)
+                raise
 
-        if not ended and self._stopping:
-            await self._abandon_stream(stream, tracker)
-            return
-        if not ended:
-            # A DLQ outcome ended the message: no group is pulled any more.
-            await self._close_stream(stream, tracker)
-        tracker.stream_open = False
-        if self._message_is_done(tracker):
-            await self._finalize_message_tracker(tracker)
+            if not ended and not self._has_dlq_outcome(tracker):
+                # A stop with the stream open. A DLQ outcome seen together
+                # with the stop wins: its message is ended, and abandoning it
+                # would let the next owner write a second DLQ record.
+                await self._abandon_stream(stream, tracker)
+                return
+            if not ended:
+                # A DLQ outcome ended the message: no group is pulled any more.
+                await self._close_stream(stream, tracker)
+            tracker.stream_open = False
+            if self._message_is_done(tracker):
+                await self._finalize_message_tracker(tracker)
+        finally:
+            self._stream_context = None
 
     async def _pull_groups(self, stream: AsyncIterator[list[ExecutorTask]], tracker: MessageTracker) -> bool:
         """Admit, pull and start the groups of the stream; true when the generator ended, false at a stop or a DLQ outcome."""
         while True:
+            # The index of the group this turn makes, for the error line of
+            # a pull or a group start that raises.
+            self._stream_group_index = len(tracker.groups)
             await self._yield_after_a_chunk_of_stream_work()
             if self._stream_must_end(tracker) or not await self._admit_next_group(tracker):
                 return False
@@ -1431,7 +1459,12 @@ class PartitionProcessor:
 
     def _stream_must_end(self, tracker: MessageTracker) -> bool:
         """Whether the stream of ``tracker`` must stop pulling: a stop came, or its message has a DLQ outcome."""
-        return self._stopping or tracker.dlq.dlq_written or tracker.dlq.dlq_lost
+        return self._stopping or self._has_dlq_outcome(tracker)
+
+    @staticmethod
+    def _has_dlq_outcome(tracker: MessageTracker) -> bool:
+        """Whether the message of ``tracker`` has a DLQ outcome: its record was written, or its loss counted."""
+        return tracker.dlq.dlq_written or tracker.dlq.dlq_lost
 
     async def _fail_stream(
         self, stream: AsyncIterator[list[ExecutorTask]] | None, tracker: MessageTracker, error: Exception
@@ -1443,7 +1476,7 @@ class PartitionProcessor:
             category='handler',
             partition=self._partition_id,
             offset=offset,
-            group_index=len(tracker.groups),
+            group_index=self._stream_group_index,
             error=str(error),
             exc_info=error,
         )
@@ -1463,6 +1496,7 @@ class PartitionProcessor:
         """
         deadline = time.monotonic() + STREAM_CLOSE_TIMEOUT
         pull, self._pull_task = self._pull_task, None
+        context = self._stream_context
         try:
             if pull is not None:
                 pull.cancel()
@@ -1477,7 +1511,8 @@ class PartitionProcessor:
             aclose = getattr(stream, 'aclose', None)
             if aclose is None:
                 return
-            closing = asyncio.create_task(self._await_close(aclose))
+            closing = asyncio.create_task(self._await_close(aclose), context=context)
+            closing.add_done_callback(_retrieve_task_outcome)
             await asyncio.wait({closing}, timeout=max(0.0, deadline - time.monotonic()))
             if not closing.done():
                 closing.cancel()
@@ -1513,9 +1548,12 @@ class PartitionProcessor:
         costs every partition of the worker its final commit.
         """
         offset = tracker.source_message.offset
-        await self._close_stream(stream, tracker)
+        # The tasks first: a close can take up to STREAM_CLOSE_TIMEOUT, and a
+        # task that ended meanwhile would run its hooks, its delivery and its
+        # DLQ write for a message the next owner runs again.
         self._abandoned_offsets.add(offset)
         cancelled = await self._cancel_stream_runs(offset)
+        await self._close_stream(stream, tracker)
         for window in tracker.open_windows.values():
             # The group hook will not run, so its kept outcomes have no reader.
             if self._account is not None and window.kept_bytes:
@@ -1546,11 +1584,36 @@ class PartitionProcessor:
 
     async def _cancel_runs_of_abandoned_streams(self) -> None:
         """At a stop, cancel the tasks still running for failed streams; their messages never complete here."""
-        for offset in list(self._abandoned_offsets):
-            await self._cancel_stream_runs(offset)
+        cancelled = 0
+        offsets = sorted(offset for offset in self._abandoned_offsets if offset in self._stream_runs)
+        for offset in offsets:
+            cancelled += await self._cancel_stream_runs(offset)
+        if not cancelled:
+            return
+        await logger.ainfo(
+            'arrange_stream_tasks_cancelled',
+            category='partition',
+            partition=self._partition_id,
+            offsets=offsets,
+            cancelled=cancelled,
+            hint='tasks of a failed stream were still running at a stop; the offset stays '
+            'uncommitted and the next owner of the partition runs the message again',
+        )
 
-    def _forget_stream_run(self, offset: int, run: asyncio.Task) -> None:
-        """Drop a finished task coroutine from its message's set, and the set when it is empty."""
+    def _end_stream_run(self, offset: int, task: ExecutorTask, run: asyncio.Task) -> None:
+        """Drop a finished run from its message's set; settle a run that was cancelled before it started.
+
+        An abandon can cancel a run that the fan-out has just created: its
+        coroutine then never starts, so the ``finally`` of
+        ``_execute_and_track`` never gives back its in-flight slot, its
+        pending entry and its budget charge. They are given back here.
+        """
+        if run in self._started_runs:
+            self._started_runs.discard(run)
+        else:
+            self._pending_tasks.pop(task.task_id, None)
+            self._inflight_count -= 1
+            self._settle_task(task)
         # Present: the set leaves only when its last run is dropped.
         runs = self._stream_runs[offset]
         runs.discard(run)
@@ -1584,11 +1647,28 @@ class PartitionProcessor:
         if self._account is None:
             return True
         while not await self._wait_for_room():
-            if not self._running or (tracker is not None and self._stream_must_end(tracker)):
+            if not self._running:
+                return False
+            if tracker is not None and self._has_dlq_outcome(tracker):
+                self._leave_room_queue()
                 return False
             await self._note_commit_due()
+        if tracker is not None and self._has_dlq_outcome(tracker):
+            # The outcome came while the stream waited: the room it was given
+            # goes to the next waiting loop, and no further step of the
+            # generator (a side call, maybe) runs for nothing.
+            self._account.budget.wake_next()
+            return False
         self._reserve_window(1)
         return True
+
+    def _leave_room_queue(self) -> None:
+        """Give up this loop's place in the budget's FIFO list, and pass a wake-up it may have taken."""
+        assert self._account is not None
+        waiter, self._room_waiter = self._room_waiter, None
+        if waiter is not None and not waiter.done():
+            waiter.set_result(False)
+        self._account.budget.wake_next()
 
     def _open_stream(self, message: SourceMessage) -> AsyncIterator[list[ExecutorTask]]:
         """Call ``arrange_stream`` and return its async iterator; any other result is a stream error."""
@@ -1622,23 +1702,19 @@ class PartitionProcessor:
         message = tracker.source_message
         self._window_counter += 1
         window_id = self._window_counter
-        offsets = [message.offset]
-        bind_contextvars(partition=self._partition_id, hook='arrange_stream', window_id=window_id, offsets=offsets)
-        request_id_tokens = self._request_ids.bind([message.request_id])
-        hook_token = bind_hook_context(
-            hook='arrange_stream',
-            partition=self._partition_id,
-            window_id=window_id,
-            offsets=tuple(offsets),
-        )
+        context = self._stream_context
+        assert context is not None
+        # The binds of this pull go into the stream's context, where the
+        # generator runs; the loop's own context is left as it is.
+        tokens = context.run(self._bind_pull_context, message, window_id)
         self._arranging = True
         self._arrange_start = time.monotonic()
         self._arrange_labels = [self._handler.message_label(message)]
+        pull = asyncio.create_task(self._next_item(stream), context=context)
+        # A pull left behind by a stop must not log an unread exception.
+        pull.add_done_callback(_retrieve_task_outcome)
+        self._pull_task = pull
         try:
-            # Created after the binds above: the task copies the context, so
-            # the generator's log lines and hook context carry them.
-            pull = asyncio.create_task(self._next_item(stream))
-            self._pull_task = pull
             while True:
                 done, _ = await asyncio.wait({pull}, timeout=IDLE_POLL_TIMEOUT)
                 if self._stream_must_end(tracker):
@@ -1654,9 +1730,10 @@ class PartitionProcessor:
             self._arranging = False
             arrange_labels = self._arrange_labels
             self._arrange_labels = []
-            unbind_contextvars('hook', 'window_id', 'offsets')
-            reset_request_id(request_id_tokens)
-            clear_hook_context(hook_token)
+            if pull.done():
+                # A pull still running holds the context: its binds stay, and
+                # the stream is closed next anyway.
+                context.run(self._reset_pull_context, tokens)
         pull_duration = time.monotonic() - self._arrange_start
         tasks = check_stream_item(item, message)
         if not tasks:
@@ -1674,6 +1751,27 @@ class PartitionProcessor:
             )
         stream_group_tasks.observe(len(tasks))
         return tasks
+
+    def _bind_pull_context(self, message: SourceMessage, window_id: int) -> tuple[Any, Any]:
+        """Bind the log fields, request id and hook context of one pull; run inside the stream's context."""
+        offsets = [message.offset]
+        bind_contextvars(partition=self._partition_id, hook='arrange_stream', window_id=window_id, offsets=offsets)
+        request_id_tokens = self._request_ids.bind([message.request_id])
+        hook_token = bind_hook_context(
+            hook='arrange_stream',
+            partition=self._partition_id,
+            window_id=window_id,
+            offsets=tuple(offsets),
+        )
+        return request_id_tokens, hook_token
+
+    @staticmethod
+    def _reset_pull_context(tokens: tuple[Any, Any]) -> None:
+        """Put back what ``_bind_pull_context`` bound; run inside the stream's context."""
+        request_id_tokens, hook_token = tokens
+        unbind_contextvars('hook', 'window_id', 'offsets')
+        reset_request_id(request_id_tokens)
+        clear_hook_context(hook_token)
 
     @staticmethod
     async def _next_item(stream: AsyncIterator[list[ExecutorTask]]) -> Any:
@@ -1927,6 +2025,9 @@ class PartitionProcessor:
         with it to the window.
         """
         # Bind partition context for this async task — inherited by all user hooks called within
+        if window.group is not None:
+            # This run has started: its own ``finally`` settles it.
+            self._started_runs.add(cast(asyncio.Task, asyncio.current_task()))
         bind_contextvars(partition=self._partition_id, window_id=window.window_id)
         # This coroutine's own context: no reset needed when it ends.
         self._request_ids.bind(self._request_ids_of(task.source_offsets))
@@ -2092,7 +2193,7 @@ class PartitionProcessor:
             # stream cancels only its own runs.
             offset = window.group.source_message.offset
             self._stream_runs.setdefault(offset, set()).add(t)
-            t.add_done_callback(functools.partial(self._forget_stream_run, offset))
+            t.add_done_callback(functools.partial(self._end_stream_run, offset, task))
 
     def _note_task_completed(self, task: ExecutorTask, result: ExecutorResult) -> None:
         """Count and record a run that ended with exit code 0."""
@@ -2458,16 +2559,25 @@ class PartitionProcessor:
         # Present: a tracker leaves only when its message finishes, and that
         # waits for this group (``open_groups``).
         tracker = self._message_trackers[message.offset]
-        tracker.open_windows.pop(window.window_id, None)
         with self._request_ids.scope([message.request_id]):
             group.finished_at = time.monotonic()
             # A stream still open at a stop is about to be abandoned: its
             # message is run again by the next owner, so its group result is
-            # not made or delivered here.
-            abandoning = tracker.stream_open and self._stopping
-            if self._keep_group_results and not abandoning:
-                collect_result = await self._call_on_group_complete(window, group)
-                await self._deliver_group_collect(group, collect_result, tracker)
+            # not made or delivered here. With a DLQ outcome the message is
+            # ended instead, and its hooks run.
+            abandoning = tracker.stream_open and self._stopping and not self._has_dlq_outcome(tracker)
+            try:
+                if self._keep_group_results and not abandoning:
+                    collect_result = await self._call_on_group_complete(window, group)
+                    await self._deliver_group_collect(group, collect_result, tracker)
+            finally:
+                # The hook and its delivery have ended, or an abandon cancelled
+                # them: the kept outcomes have no reader left, and nothing of
+                # them stays charged.
+                tracker.open_windows.pop(window.window_id, None)
+                self._release_kept_bytes(window)
+                window.results.clear()
+                window.errors.clear()
             invalid = drop_invalid_notes(group)
             if invalid:
                 logger.error(
@@ -2478,11 +2588,6 @@ class PartitionProcessor:
                     group_index=group.index,
                     keys=invalid,
                 )
-            # The hook and its delivery have ended: the kept outcomes have no
-            # reader left.
-            self._release_kept_bytes(window)
-            window.results.clear()
-            window.errors.clear()
             tracker.open_groups -= 1
             if self._message_is_done(tracker) and not tracker.completion_fired:
                 await self._finish_message(tracker)

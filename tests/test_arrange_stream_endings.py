@@ -6,9 +6,12 @@ cancelled, and its offset stays pending without holding the drain.
 """
 
 import asyncio
+import contextvars
 import time
 from unittest.mock import AsyncMock
 
+import pytest
+import structlog
 from structlog.testing import capture_logs
 
 from drakkar import partition as partition_module
@@ -21,6 +24,7 @@ from tests.stream_helpers import (
     RecordingStreamHandler,
     WithGroupHook,
     make_msg,
+    run_until_settled,
     stream_processor,
 )
 
@@ -131,10 +135,11 @@ class DLQOnDelivery(RecordingCollect):
     """An ``on_collect`` double whose delivery of a task result writes the message's DLQ record."""
 
     async def __call__(self, result, partition_id, message_context=None):
-        answer = await super().__call__(result, partition_id, message_context)
+        # The outcome is set before the delivery is logged, so a test that
+        # waits for the log line sees the outcome too.
         if any(payload.data.v.startswith('task-') for payload in result.kafka):
             message_context.states[0].dlq_written = True
-        return answer
+        return await super().__call__(result, partition_id, message_context)
 
 
 class TaskResultsHandler(OpenAfterFirstGroupWithHook):
@@ -223,12 +228,16 @@ async def test_stop_while_waiting_for_room_abandons_the_stream_at_once():
     assert proc._pull_task is None
 
     started = time.monotonic()
-    await proc.stop()
+    proc.signal_stop()
+    await wait_for(lambda: proc._loop_ended)
 
     assert time.monotonic() - started < QUICK_STOP_SECONDS
+    # Read before stop() closes the account, so a leak cannot hide.
+    assert budget.tasks == 0 and budget.bytes == 0 and budget.reserved_tasks == 0
+    assert budget.waiting_loops == 0
     assert handler.log == ['pull:0:0']
     assert proc.offset_tracker.has_pending()
-    assert budget.tasks == 0 and budget.reserved_tasks == 0
+    await proc.stop()
 
 
 async def test_stop_with_an_open_stream_cancels_its_tasks_and_gives_back_the_budget():
@@ -467,3 +476,218 @@ async def test_a_cancelled_loop_cancels_the_pull_in_progress():
     assert proc._pull_task is None
     assert handler.finally_ran
     await wait_for(lambda: proc.inflight_count == 0)
+
+
+async def test_tasks_of_an_abandoned_stream_are_cancelled_before_its_slow_close():
+    budget = PendingBudget(max_tasks=1, max_bytes=1 << 40)
+    closing = asyncio.Event()
+
+    class SlowClose(WithGroupHook):
+        async def arrange_stream(self, message):
+            try:
+                yield self.make_group(message, 0, 1)
+                yield self.make_group(message, 1, 1)
+            finally:
+                closing.set()
+                await asyncio.sleep(0.2)
+
+        async def on_task_complete(self, result):
+            await super().on_task_complete(result)
+            return CollectResult(kafka=[KafkaPayload(data=Out(v=f'task-{result.task.task_id}'))])
+
+    handler = SlowClose()
+    proc = stream_processor(handler, budget=budget, on_collect=RecordingCollect(handler.log))
+    release = asyncio.Event()
+    block_offsets(proc, {0}, release)
+    proc.enqueue(make_msg(0))
+    proc.start()
+    # The generator waits at its first yield; the stream waits for room.
+    await wait_for(lambda: budget.waiting_loops == 1 and proc.inflight_count == 1)
+
+    proc.signal_stop()
+    await asyncio.wait_for(closing.wait(), timeout=QUICK_STOP_SECONDS)
+    # The task could end now, while the close is slow.
+    release.set()
+    await wait_for(lambda: proc._loop_ended)
+
+    assert not any(entry.startswith(('task:', 'deliver:', 'group:', 'message:')) for entry in handler.log)
+    assert budget.tasks == 0 and budget.bytes == 0
+    await proc.stop()
+
+
+async def test_a_context_variable_token_taken_before_a_yield_resets_after_it():
+    marker: contextvars.ContextVar[str] = contextvars.ContextVar('marker', default='')
+    seen: list[str] = []
+
+    class HoldsAToken(RecordingStreamHandler):
+        async def arrange_stream(self, message):
+            token = marker.set('held')
+            yield self.make_group(message, 0, 1)
+            seen.append(marker.get())
+            yield self.make_group(message, 1, 1)
+            seen.append(marker.get())
+            marker.reset(token)
+
+    handler = HoldsAToken()
+    proc = stream_processor(handler)
+    proc.enqueue(make_msg(0))
+    with capture_logs() as cap:
+        await run_until_settled(proc)
+    assert seen == ['held', 'held']
+    assert len(handler.message_groups) == 1
+    assert events(cap, 'arrange_stream_failed') == []
+    assert marker.get() == ''
+
+
+async def test_bound_contextvars_across_yields_completes_the_stream():
+    class BindsAcrossYields(RecordingStreamHandler):
+        async def arrange_stream(self, message):
+            with structlog.contextvars.bound_contextvars(job='nightly'):
+                yield self.make_group(message, 0, 1)
+                self.log.append(f'job:{structlog.contextvars.get_contextvars().get("job")}')
+                yield self.make_group(message, 1, 1)
+
+    handler = BindsAcrossYields()
+    proc = stream_processor(handler)
+    proc.enqueue(make_msg(0))
+    with capture_logs() as cap:
+        await run_until_settled(proc)
+    assert 'job:nightly' in handler.log
+    assert len(handler.message_groups) == 1
+    assert events(cap, 'arrange_stream_failed') == []
+    assert 'job' not in structlog.contextvars.get_contextvars()
+
+
+async def test_stop_between_a_fan_out_and_the_next_admission_abandons_the_stream():
+    handler = RecordingStreamHandler([2, 2])
+    proc = stream_processor(handler)
+    release = asyncio.Event()
+    block_offsets(proc, {0}, release)
+    note_shape = proc._note_window_shape
+
+    def stop_after_the_fan_out(message_count, task_count, stdin_bytes):
+        # Called right after a group's fan-out, before the next admission.
+        note_shape(message_count, task_count, stdin_bytes)
+        proc.signal_stop()
+
+    proc._note_window_shape = stop_after_the_fan_out
+    proc.enqueue(make_msg(0))
+    proc.start()
+    await wait_for(lambda: proc._loop_ended)
+
+    assert handler.log == ['pull:0:0']
+    assert proc.inflight_count == 0
+    assert proc._abandoned_offsets == {0}
+    assert proc.offset_tracker.has_pending()
+    await proc.stop()
+
+
+async def test_a_failed_stream_with_tasks_still_running_does_not_hold_the_stop():
+    class FailsWithTasksRunning(RecordingStreamHandler):
+        async def arrange_stream(self, message):
+            yield self.make_group(message, 0, 3)
+            raise RuntimeError('side api down')
+
+    handler = FailsWithTasksRunning()
+    proc = stream_processor(handler)
+    release = asyncio.Event()
+    block_offsets(proc, {0}, release)
+    proc.enqueue(make_msg(0))
+    with capture_logs() as cap:
+        proc.start()
+        await wait_for(lambda: events(cap, 'partition_processor_restarting') and proc.inflight_count == 3)
+        started = time.monotonic()
+        await proc.stop()
+
+    assert time.monotonic() - started < QUICK_STOP_SECONDS
+    assert proc.inflight_count == 0
+    assert not any(entry.startswith('task:') for entry in handler.log)
+    [cancelled] = events(cap, 'arrange_stream_tasks_cancelled')
+    assert cancelled['cancelled'] == 3 and cancelled['offsets'] == [0]
+
+
+async def test_group_index_of_a_failed_group_start_names_that_group():
+    handler = RecordingStreamHandler([1, 2])
+    proc = stream_processor(handler)
+    start_group = proc._start_group
+
+    async def start_group_then_fail(tracker, tasks, window):
+        await start_group(tracker, tasks, window)
+        if len(tracker.groups) == 2:
+            raise RuntimeError('fan-out broke')
+
+    proc._start_group = start_group_then_fail
+    with capture_logs() as cap, pytest.raises(RuntimeError, match='fan-out broke'):
+        await proc._process_stream_message(make_msg(0))
+    [failed] = events(cap, 'arrange_stream_failed')
+    assert failed['group_index'] == 1
+    await wait_for(lambda: proc.inflight_count == 0)
+
+
+async def test_cancelled_group_hook_gives_back_the_kept_bytes():
+    budget = PendingBudget(max_tasks=1000, max_bytes=1 << 40)
+    hook_entered = asyncio.Event()
+
+    class SlowGroupHook(OpenAfterFirstGroupWithHook):
+        async def on_group_complete(self, group, results, errors):
+            hook_entered.set()
+            await asyncio.Event().wait()
+
+    handler = SlowGroupHook([2])
+    proc = stream_processor(handler, budget=budget)
+    proc.enqueue(make_msg(0))
+    proc.start()
+    await asyncio.wait_for(hook_entered.wait(), timeout=QUICK_STOP_SECONDS)
+    assert budget.bytes > 0
+
+    proc.signal_stop()
+    await wait_for(lambda: proc._loop_ended)
+
+    assert budget.tasks == 0 and budget.bytes == 0
+    assert proc._message_trackers[0].open_windows == {}
+    await proc.stop()
+
+
+async def test_dlq_outcome_while_waiting_gives_up_the_room_and_pulls_nothing():
+    budget = PendingBudget(max_tasks=1, max_bytes=1 << 40)
+    budget.charge(1, 0)
+    proc = stream_processor(RecordingStreamHandler(), budget=budget)
+    proc._running = True
+    tracker = partition_module.MessageTracker(source_message=make_msg(0), stream_open=True)
+
+    # The outcome comes while the stream waits and the budget stays full.
+    waiting = asyncio.create_task(proc._admit_next_group(tracker))
+    await wait_for(lambda: budget.waiting_loops == 1)
+    tracker.dlq.dlq_written = True
+    assert await asyncio.wait_for(waiting, timeout=QUICK_STOP_SECONDS) is False
+    assert proc._room_waiter is None and budget.waiting_loops == 0
+
+    # The outcome comes while the stream waits, and then the room opens.
+    tracker.dlq.dlq_written = False
+    waiting = asyncio.create_task(proc._admit_next_group(tracker))
+    await wait_for(lambda: budget.waiting_loops == 1)
+    tracker.dlq.dlq_written = True
+    budget.release(1, 0)
+    budget.wake_next()
+    assert await asyncio.wait_for(waiting, timeout=QUICK_STOP_SECONDS) is False
+    assert budget.reserved_tasks == 0 and not budget.unmeasured_window_open
+
+
+async def test_stop_and_dlq_outcome_together_end_the_message_and_do_not_abandon_it(monkeypatch):
+    # A long wake-up: only the stop's cancel of the pull wakes the stream,
+    # so it sees the outcome and the stop at the same check.
+    monkeypatch.setattr(partition_module, 'IDLE_POLL_TIMEOUT', 5.0)
+    handler = TaskResultsHandler()
+    proc = stream_processor(handler, on_collect=DLQOnDelivery(handler.log))
+    proc.enqueue(make_msg(0))
+    proc.start()
+    await wait_for(lambda: handler.pulls == 2 and proc._message_trackers[0].dlq.dlq_written)
+    await wait_for(lambda: proc.inflight_count == 0)
+
+    proc.signal_stop()
+    await asyncio.wait_for(proc.drain(), timeout=QUICK_STOP_SECONDS)
+
+    assert proc._abandoned_offsets == set()
+    assert handler.log.count('message:0') == 1
+    assert not proc.offset_tracker.has_pending()
+    await proc.stop()
