@@ -337,3 +337,19 @@ async def test_a_raising_pull_gives_back_its_reservation():
         await proc._process_stream_message(make_msg(0))
     assert budget.reserved_tasks == 0 and budget.reserved_bytes == 0
     assert not budget.unmeasured_window_open
+
+
+async def test_a_stop_while_the_stream_waits_leaves_its_message_open():
+    budget = PendingBudget(max_tasks=1, max_bytes=1 << 40)
+    budget.charge(1, 0)
+    handler = GatedStream(groups=2, size=1)
+    proc = budget_processor(handler, budget)
+    proc._running = True
+    streaming = asyncio.create_task(proc._process_stream_message(make_msg(0)))
+    await wait_for(lambda: budget.waiting_loops == 1)
+    proc.signal_stop()
+    await asyncio.wait_for(streaming, timeout=2)
+    assert handler.pulls == 0
+    assert proc._message_trackers[0].stream_open
+    assert proc.offset_tracker.has_pending()
+    budget.release(1, 0)
