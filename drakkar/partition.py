@@ -1305,19 +1305,51 @@ class PartitionProcessor:
 
         stream = self._open_stream(message)
         while True:
-            tasks = await self._pull_group(stream, tracker)
-            if tasks is None:
-                break
-            if not tasks:
-                # An empty list is no group: no hook, no event, and its
-                # window_id is simply not used again.
-                continue
-            window = Window(window_id=self._window_counter, source_messages=[message], start_time=time.monotonic())
-            await self._start_group(tracker, tasks, window)
+            if not await self._admit_next_group():
+                # A stop while the stream waited for room: the message
+                # stays open, so its offset stays pending.
+                return
+            try:
+                tasks = await self._pull_group(stream, tracker)
+                if tasks is None:
+                    break
+                # Each admitted group is a step of the warm-up, with tasks or
+                # without, as a window is.
+                self._windows_seen += 1
+                if not tasks:
+                    # An empty list is no group: no hook, no event, and its
+                    # window_id is simply not used again.
+                    continue
+                window = Window(window_id=self._window_counter, source_messages=[message], start_time=time.monotonic())
+                await self._start_group(tracker, tasks, window)
+            finally:
+                # The group has fanned out, or the pull ended the stream or
+                # raised: what was reserved and not charged goes back.
+                self._end_window_reservation()
 
         tracker.stream_open = False
         if self._message_is_done(tracker):
             await self._finalize_message_tracker(tracker)
+
+    async def _admit_next_group(self) -> bool:
+        """Wait for room in the pending budget, then reserve one group's estimate; false after a stop.
+
+        Only "below the limits" is needed, not "the group fits": a group
+        larger than the limits is admitted when its turn comes, so a stream
+        never waits for ever, and the limits are passed by at most one group
+        for each streaming message. Each one-second wake-up retries a due
+        commit. From the room check to the reservation there is no await, so
+        no other loop can pass on the same room. Without a budget there is
+        nothing to wait for.
+        """
+        if self._account is None:
+            return True
+        while not await self._wait_for_room():
+            if not self._running:
+                return False
+            await self._note_commit_due()
+        self._reserve_window(1)
+        return True
 
     def _open_stream(self, message: SourceMessage) -> AsyncIterator[list[ExecutorTask]]:
         """Call ``arrange_stream`` and return its async iterator; any other result is a stream error."""
