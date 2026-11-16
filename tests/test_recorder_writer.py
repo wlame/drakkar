@@ -128,6 +128,93 @@ class TestRowShapes:
         assert writer.last['event'] == 'periodic_run'
         assert writer.last['metadata'] == '{"scope":"cluster","slot":1800000030,"status":"ok"}'
 
+    def test_record_arranged_without_group_index_keeps_its_metadata_keys(self, writer):
+        writer.record_arranged(0, [make_message(offset=10)], [make_task(source_offsets=[10])], window_id=3)
+
+        assert set(writer.last_metadata()) == {
+            'offsets',
+            'task_ids',
+            'task_count',
+            'message_count',
+            'message_labels',
+            'window_id',
+        }
+
+    def test_record_arranged_with_group_index_adds_it_to_the_metadata(self, writer):
+        writer.record_arranged(
+            0,
+            [make_message(offset=10)],
+            [make_task(source_offsets=[10])],
+            window_id=3,
+            group_index=4,
+        )
+
+        assert writer.last_metadata()['group_index'] == 4
+
+    def test_record_group_complete_writes_the_group_row(self, writer):
+        writer.record_group_complete(
+            partition=2,
+            offset=55,
+            window_id=9,
+            group_index=1,
+            duration=0.123456,
+            task_count=40,
+            succeeded=37,
+            failed=2,
+            replaced=1,
+            output_message_count=5,
+        )
+
+        row = writer.last
+        assert row['event'] == 'group_complete'
+        assert row['partition'] == 2
+        assert row['offset'] == 55
+        assert row['duration'] == 0.1235
+        assert writer.last_metadata() == {
+            'group_index': 1,
+            'succeeded': 37,
+            'failed': 2,
+            'replaced': 1,
+            'window_id': 9,
+            'task_count': 40,
+            'output_message_count': 5,
+        }
+
+    def test_record_message_complete_without_group_count_keeps_its_metadata_keys(self, writer):
+        writer.record_message_complete(
+            partition=0,
+            offset=10,
+            duration=0.5,
+            task_count=3,
+            succeeded=3,
+            failed=0,
+            replaced=0,
+            output_message_count=1,
+        )
+
+        assert set(writer.last_metadata()) == {
+            'task_count',
+            'succeeded',
+            'failed',
+            'replaced',
+            'output_message_count',
+        }
+
+    def test_record_message_complete_with_group_count_adds_it_to_the_metadata(self, writer):
+        writer.record_message_complete(
+            partition=0,
+            offset=10,
+            duration=0.5,
+            task_count=3,
+            succeeded=3,
+            failed=0,
+            replaced=0,
+            output_message_count=1,
+            group_count=3,
+        )
+
+        assert writer.last_metadata()['group_count'] == 3
+
     def test_record_periodic_run_without_slot_keeps_its_bytes(self, writer):
         writer.record_periodic_run('refresh_rates', duration=1.5, status='ok')
 

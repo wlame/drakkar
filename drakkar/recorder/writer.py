@@ -207,7 +207,28 @@ class EventWriter:
         duration: float = 0.0,
         message_labels: list[str] | None = None,
         window_id: int | None = None,
+        group_index: int | None = None,
     ) -> None:
+        """Record one ``arranged`` row: a window, or one group of a stream.
+
+        ``group_index`` is given only for a group yielded by
+        ``arrange_stream``; its presence in the metadata marks a stream group,
+        so a window row keeps exactly the keys it always had.
+        """
+        metadata: dict[str, object] = {
+            'offsets': [m.offset for m in messages],
+            'task_ids': [t.task_id for t in tasks],
+            'task_count': len(tasks),
+            'message_count': len(messages),
+            'message_labels': message_labels or [],
+            # Lets the UI group an ``arranged`` row with the
+            # window-scoped annotations emitted from the same
+            # ``arrange()`` call. Per-partition monotonic and
+            # reset on restart — never a global identifier.
+            'window_id': window_id,
+        }
+        if group_index is not None:
+            metadata['group_index'] = group_index
         self._record(
             {
                 'ts': time.time(),
@@ -217,20 +238,7 @@ class EventWriter:
                 'message_count': len(messages),
                 'task_count': len(tasks),
                 'message_labels': message_labels or [],
-                'metadata': encode_json_str(
-                    {
-                        'offsets': [m.offset for m in messages],
-                        'task_ids': [t.task_id for t in tasks],
-                        'task_count': len(tasks),
-                        'message_count': len(messages),
-                        'message_labels': message_labels or [],
-                        # Lets the UI group an ``arranged`` row with the
-                        # window-scoped annotations emitted from the same
-                        # ``arrange()`` call. Per-partition monotonic and
-                        # reset on restart — never a global identifier.
-                        'window_id': window_id,
-                    }
-                ),
+                'metadata': encode_json_str(metadata),
             }
         )
 
@@ -568,13 +576,24 @@ class EventWriter:
         failed: int,
         replaced: int,
         output_message_count: int,
+        group_count: int | None = None,
     ) -> None:
         """Record that on_message_complete() finished for one source message.
 
         Fires once per source message, after every task derived from it
         has reached a terminal state. The event corresponds 1:1 with a
-        handler ``on_message_complete`` call.
+        handler ``on_message_complete`` call. ``group_count`` is given only
+        for a message arranged by ``arrange_stream``.
         """
+        metadata: dict[str, object] = {
+            'task_count': task_count,
+            'succeeded': succeeded,
+            'failed': failed,
+            'replaced': replaced,
+            'output_message_count': output_message_count,
+        }
+        if group_count is not None:
+            metadata['group_count'] = group_count
         self._record(
             {
                 'ts': time.time(),
@@ -582,12 +601,45 @@ class EventWriter:
                 'partition': partition,
                 'offset': offset,
                 'duration': round(duration, 4),
+                'metadata': encode_json_str(metadata),
+            }
+        )
+
+    def record_group_complete(
+        self,
+        *,
+        partition: int,
+        offset: int,
+        window_id: int,
+        group_index: int,
+        duration: float,
+        task_count: int,
+        succeeded: int,
+        failed: int,
+        replaced: int,
+        output_message_count: int,
+    ) -> None:
+        """Record that on_group_complete() finished for one group of a stream.
+
+        Written only when the handler overrides ``on_group_complete``. The
+        row is anchored to the group's source message; ``duration`` is the
+        time the hook took.
+        """
+        self._record(
+            {
+                'ts': time.time(),
+                'event': EventType.GROUP_COMPLETE,
+                'partition': partition,
+                'offset': offset,
+                'duration': round(duration, 4),
                 'metadata': encode_json_str(
                     {
-                        'task_count': task_count,
+                        'group_index': group_index,
                         'succeeded': succeeded,
                         'failed': failed,
                         'replaced': replaced,
+                        'window_id': window_id,
+                        'task_count': task_count,
                         'output_message_count': output_message_count,
                     }
                 ),

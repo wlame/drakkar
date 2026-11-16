@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `628b58b14c3606fa`.
+Registry version: `022383a8af1df459`.
 
 ## Concepts
 
@@ -895,6 +895,19 @@ Messages taken into one arrange window.
 - Average window size: `rate(drakkar_window_messages_sum{ {{worker}} }[5m]) / rate(drakkar_window_messages_count{ {{worker}} }[5m])`
 
 **Related:** `concept:window`
+
+### `metric:drakkar_stream_group_tasks`
+
+Tasks in one group yielded by the arrange_stream hook.
+
+**Meaning:** Each group is admitted to the pending budget as a whole, so large groups need more room before they start.
+
+**Healthy:** Well below executor.max_pending_tasks.
+
+**PromQL:**
+- Average group size: `rate(drakkar_stream_group_tasks_sum{ {{worker}} }[5m]) / rate(drakkar_stream_group_tasks_count{ {{worker}} }[5m])`
+
+**Related:** `concept:arrange`, `concept:pending-budget`
 
 ### `metric:drakkar_queued_messages_dropped_at_stop_total`
 
@@ -2210,8 +2223,8 @@ The arrange hook turned one window into tasks.
 **When:** Once per window, after the arrange hook returned.
 
 **Fields:**
-- `duration`: Seconds the arrange hook took.
-- `metadata`: The offsets of the window, the task ids, the counts and the window id.
+- `duration`: Seconds the arrange hook took; for a group of arrange_stream, the time to prepare that group.
+- `metadata`: The offsets of the window, the task ids, the counts and the window id; group_index for a group of arrange_stream, one row for each group.
 
 **Action:** A long duration slows the partition; move slow work out of arrange.
 
@@ -2274,10 +2287,23 @@ Every task of one source message ended and the on_message_complete hook ran.
 
 **Fields:**
 - `duration`: Seconds from the first task start to the end of the last task.
-- `metadata`: The task count, the succeeded, failed and replaced counts and the output message count.
+- `metadata`: The task count, the succeeded, failed and replaced counts and the output message count; group_count for a message arranged by arrange_stream.
 - `offset`: The offset of the message.
 
 **Related:** `concept:offsets`
+
+### `event:group_complete`
+
+Every task of one group yielded by arrange_stream ended and the on_group_complete hook ran.
+
+**When:** Once per group, only when the handler overrides on_group_complete.
+
+**Fields:**
+- `duration`: Seconds the on_group_complete hook took.
+- `metadata`: The group index, the succeeded, failed and replaced counts, the window id, the task count and the output message count.
+- `offset`: The offset of the source message of the group.
+
+**Related:** `concept:arrange`, `concept:offsets`
 
 ### `event:window_complete`
 

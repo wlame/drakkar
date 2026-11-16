@@ -1024,3 +1024,37 @@ def test_gauges_that_can_be_unknown_export_no_sample_until_known(attribute, name
 
     assert isinstance(gauge, metrics_module.UnknownUntilSetGauge)
     assert [family.name for family in gauge.describe()] == [name]
+
+
+def test_stream_group_tasks_histogram_has_its_name_help_and_buckets():
+    from prometheus_client import Histogram
+
+    from drakkar.metrics import stream_group_tasks
+
+    assert isinstance(stream_group_tasks, Histogram)
+    assert stream_group_tasks._name == 'drakkar_stream_group_tasks'
+    assert stream_group_tasks._labelnames == ()
+    assert stream_group_tasks._documentation == 'Tasks in one group yielded by arrange_stream'
+    assert stream_group_tasks._upper_bounds == [
+        1,
+        2,
+        5,
+        10,
+        25,
+        50,
+        100,
+        250,
+        500,
+        1000,
+        2500,
+        5000,
+        float('inf'),
+    ]
+
+
+def test_pending_bytes_help_names_every_hook_that_keeps_output():
+    from drakkar.metrics import pending_bytes
+
+    assert pending_bytes._documentation.endswith(
+        'or kept for on_group_complete, on_message_complete and on_window_complete'
+    )

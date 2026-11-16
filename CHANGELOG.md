@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - The handler surface of the streaming arrange hook: the model `TaskGroup` (`ExecutorTask.group`, `MessageGroup.groups`), the hooks `arrange_stream` and `on_group_complete`, the class attribute `group_labels`, and their startup checks. The worker does not call the new hooks yet. A handler class that has no method of a completion hook now reads as not implementing it, and `hook_flags` of the live overview has the key `group_complete`.
+- The recorder event `group_complete` (the vocabulary has 32 names), `group_index` in the `arranged` metadata and `group_count` in the `message_complete` metadata for a stream, and the histogram `drakkar_stream_group_tasks`. The help text of `drakkar_pending_bytes` now names `on_group_complete`. Nothing writes the new event or observes the new metric yet.
 
 ### Changed
 

@@ -1263,7 +1263,7 @@ def test_backpressure_metrics_names_and_help_texts():
             'drakkar_pending_bytes',
             (),
             'Bytes held for pending tasks and their results: task stdin plus stdout and stderr '
-            'of results in hooks and delivery or kept for on_message_complete and on_window_complete',
+            'of results in hooks and delivery or kept for on_group_complete, on_message_complete and on_window_complete',
         ),
         (
             window_admission_wait,

@@ -1,8 +1,9 @@
 """Ambient per-invocation context for framework-invoked user hooks.
 
-Every user hook the framework calls — ``arrange``, ``on_task_complete``,
-``on_error``, ``on_message_complete``, ``on_window_complete``, and the two
-webapp hooks — runs with a :class:`HookContext` bound to a
+Every user hook the framework calls — ``arrange``, ``arrange_stream``,
+``on_task_complete``, ``on_error``, ``on_group_complete``,
+``on_message_complete``, ``on_window_complete``, and the two webapp hooks —
+runs with a :class:`HookContext` bound to a
 :class:`~contextvars.ContextVar`. The context names the pipeline entity the
 hook is working on (partition, window, message offset, task id) so
 handler-facing APIs can resolve those coordinates without the user passing

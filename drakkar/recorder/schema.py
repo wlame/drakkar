@@ -68,6 +68,7 @@ class EventType(StrEnum):
     PARTITION_STALLED = 'partition_stalled'
     MESSAGE_COMPLETE = 'message_complete'
     WINDOW_COMPLETE = 'window_complete'
+    GROUP_COMPLETE = 'group_complete'
 
     # --- Task lifecycle (subprocess pool) ---
     TASK_STARTED = 'task_started'

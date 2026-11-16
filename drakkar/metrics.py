@@ -327,7 +327,7 @@ pending_tasks = Gauge(
 pending_bytes = Gauge(
     'drakkar_pending_bytes',
     'Bytes held for pending tasks and their results: task stdin plus stdout and stderr '
-    'of results in hooks and delivery or kept for on_message_complete and on_window_complete',
+    'of results in hooks and delivery or kept for on_group_complete, on_message_complete and on_window_complete',
 )
 
 window_admission_wait = Counter(
@@ -341,6 +341,12 @@ window_messages = Histogram(
     'drakkar_window_messages',
     'Messages taken into one arrange() window',
     buckets=(1, 2, 5, 10, 20, 50, 100, 200, 500, 1000),
+)
+
+stream_group_tasks = Histogram(
+    'drakkar_stream_group_tasks',
+    'Tasks in one group yielded by arrange_stream',
+    buckets=(1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000),
 )
 
 queued_messages_dropped_at_stop = Counter(

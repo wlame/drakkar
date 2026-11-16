@@ -14,8 +14,8 @@
   summary: The arrange hook turned one window into tasks.
   when: Once per window, after the arrange hook returned.
   fields:
-    duration: Seconds the arrange hook took.
-    metadata: The offsets of the window, the task ids, the counts and the window id.
+    duration: Seconds the arrange hook took; for a group of arrange_stream, the time to prepare that group.
+    metadata: The offsets of the window, the task ids, the counts and the window id; group_index for a group of arrange_stream, one row for each group.
   action: A long duration slows the partition; move slow work out of arrange.
   related:
     - concept:arrange
@@ -67,8 +67,19 @@
   fields:
     offset: The offset of the message.
     duration: Seconds from the first task start to the end of the last task.
-    metadata: The task count, the succeeded, failed and replaced counts and the output message count.
+    metadata: The task count, the succeeded, failed and replaced counts and the output message count; group_count for a message arranged by arrange_stream.
   related:
+    - concept:offsets
+
+- key: group_complete
+  summary: Every task of one group yielded by arrange_stream ended and the on_group_complete hook ran.
+  when: Once per group, only when the handler overrides on_group_complete.
+  fields:
+    offset: The offset of the source message of the group.
+    duration: Seconds the on_group_complete hook took.
+    metadata: The group index, the succeeded, failed and replaced counts, the window id, the task count and the output message count.
+  related:
+    - concept:arrange
     - concept:offsets
 
 - key: window_complete

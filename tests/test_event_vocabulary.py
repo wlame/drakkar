@@ -29,6 +29,13 @@ def test_vocabulary_matches_the_shared_fixture() -> None:
     assert fixture['events'] == sorted(member.value for member in EventType)
 
 
+def test_vocabulary_has_32_names_with_group_complete() -> None:
+    """Growing the vocabulary is a contract change; the count makes it visible."""
+    fixture = json.loads(FIXTURE.read_text())
+    assert len(fixture['events']) == 32
+    assert 'group_complete' in fixture['events']
+
+
 def test_docs_table_documents_every_stored_event() -> None:
     """The observability page's event table is part of the vocabulary contract.
 

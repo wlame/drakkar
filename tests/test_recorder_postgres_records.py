@@ -217,6 +217,18 @@ def _record_calls() -> dict:
         'record_task_complete': lambda w: w.record_task_complete('t1', 0, 0.1, 1),
         'record_message_complete': lambda w: w.record_message_complete(0, 10, 0.1, 1, 1, 0, 0, 1),
         'record_window_complete': lambda w: w.record_window_complete(0, 3, 0.1, 1, 1),
+        'record_group_complete': lambda w: w.record_group_complete(
+            partition=0,
+            offset=10,
+            window_id=3,
+            group_index=0,
+            duration=0.1,
+            task_count=1,
+            succeeded=1,
+            failed=0,
+            replaced=0,
+            output_message_count=1,
+        ),
         'record_runtime_health': lambda w: w.record_runtime_health('loop', 'ok', 1.0, 1),
         'record_runtime_stall': lambda w: w.record_runtime_stall(10.0, [], 0, 1),
         'record_runtime_lag_episode': lambda w: w.record_runtime_lag_episode(

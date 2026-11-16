@@ -56,11 +56,11 @@ self.annotate(None, 'window_summary', {'deduplicated': 12})
 |---|---|
 | a `SourceMessage` | that message's trace |
 | an `ExecutorTask` | that task, and the trace of every message that produced it |
-| `None` | the whole hook invocation — for `arrange()` and `on_window_complete`, every message in the window |
+| `None` | the whole hook invocation — for `arrange()` and `on_window_complete`, every message in the window; for `arrange_stream`, the one message of the group being prepared |
 
 Annotations work from every hook the framework calls: `arrange`,
-`on_task_complete`, `on_error`, `on_message_complete`, `on_window_complete`,
-and the two webapp hooks.
+`arrange_stream`, `on_task_complete`, `on_error`, `on_group_complete`,
+`on_message_complete`, `on_window_complete`, and the two webapp hooks.
 
 !!! warning "Only inside hooks"
     Calling `annotate()` from a periodic task, a background coroutine, or

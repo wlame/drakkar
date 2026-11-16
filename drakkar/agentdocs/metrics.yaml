@@ -169,6 +169,17 @@
   related:
     - concept:window
 
+- key: drakkar_stream_group_tasks
+  summary: Tasks in one group yielded by the arrange_stream hook.
+  meaning: Each group is admitted to the pending budget as a whole, so large groups need more room before they start.
+  healthy: Well below executor.max_pending_tasks.
+  promql:
+    - title: Average group size
+      query: 'rate(drakkar_stream_group_tasks_sum{ {{worker}} }[5m]) / rate(drakkar_stream_group_tasks_count{ {{worker}} }[5m])'
+  related:
+    - concept:arrange
+    - concept:pending-budget
+
 - key: drakkar_queued_messages_dropped_at_stop_total
   summary: Polled messages left out of a window at a stop or revoke.
   meaning: Their offsets were never registered, so the next owner reads them again; no data is lost.

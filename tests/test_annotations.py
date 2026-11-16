@@ -419,3 +419,41 @@ async def test_annotations_reach_the_recorder_db_through_the_real_pipeline(tmp_p
     assert by_kind['task_note']['task_id'] == 'task-7'
     assert by_kind['window_note']['offset'] is None
     assert json.loads(by_kind['window_note']['metadata'])['offsets'] == [7]
+
+
+def test_emit_inside_arrange_stream_with_no_target_is_window_scoped(annotator: Annotator, recorder: FakeRecorder):
+    token = bind_hook_context(hook='arrange_stream', partition=2, window_id=12, offsets=(40,))
+    try:
+        annotator.emit(None, 'group_note', {'size': 3})
+    finally:
+        clear_hook_context(token)
+
+    meta = recorder.calls[0]['metadata']
+    assert meta['scope'] == 'window'
+    assert meta['hook'] == 'arrange_stream'
+    assert meta['window_id'] == 12
+    assert meta['offsets'] == [40]
+    assert recorder.calls[0]['offset'] is None
+    assert recorder.calls[0]['task_id'] is None
+
+
+def test_emit_inside_on_group_complete_is_message_scoped_with_the_group_window_id(
+    annotator: Annotator, recorder: FakeRecorder, source_message: SourceMessage
+):
+    token = bind_hook_context(
+        hook='on_group_complete',
+        partition=source_message.partition,
+        window_id=13,
+        offset=source_message.offset,
+    )
+    try:
+        annotator.emit(source_message, 'group_result', {'failed': 0})
+    finally:
+        clear_hook_context(token)
+
+    call = recorder.calls[0]
+    assert call['offset'] == source_message.offset
+    assert call['metadata']['scope'] == 'message'
+    assert call['metadata']['hook'] == 'on_group_complete'
+    assert call['metadata']['window_id'] == 13
+    assert call['metadata']['offsets'] == []
