@@ -107,6 +107,38 @@ async def test_group_hook_gets_results_and_errors_and_the_group_keeps_none():
     assert refs and all(ref() is None for ref in refs)
 
 
+async def test_group_results_are_freed_after_the_group_hook_while_the_message_is_open():
+    refs: list[weakref.ref] = []
+    gate = asyncio.Event()
+    hook_ended = asyncio.Event()
+
+    class HoldsTheStream(RecordingStreamHandler):
+        async def arrange_stream(self, message):
+            yield self.make_group(message, 0, 3)
+            await gate.wait()
+            yield self.make_group(message, 1, 1)
+
+        async def on_group_complete(self, group, results, errors):
+            refs.extend(weakref.ref(result) for result in results)
+            if group.index == 0:
+                hook_ended.set()
+            return None
+
+    handler = HoldsTheStream()
+    proc = stream_processor(handler)
+    proc.enqueue(make_msg(0))
+    proc.start()
+    await asyncio.wait_for(hook_ended.wait(), timeout=2)
+    tracker = proc._message_trackers[0]
+    await wait_for(lambda: tracker.open_groups == 0)
+    gc.collect()
+    assert tracker.stream_open
+    assert len(refs) == 3 and all(ref() is None for ref in refs)
+    gate.set()
+    await wait_for(lambda: not proc.offset_tracker.has_pending())
+    await proc.stop()
+
+
 async def test_message_hook_fires_once_after_every_group_hook_and_delivery():
     class Noting(WithGroupHook):
         async def on_group_complete(self, group, results, errors):
@@ -149,8 +181,10 @@ async def test_offset_completes_only_after_the_stream_ends():
     proc.enqueue(make_msg(0))
     proc.start()
     await wait_for(lambda: handler.log.count('task:m0-g0-t0') == 1 and handler.log.count('task:m0-g0-t1') == 1)
-    await wait_for(lambda: proc.inflight_count == 0)
-    await asyncio.sleep(0.02)
+    tracker = proc._message_trackers[0]
+    # Every task settled and the only group finished: the stream alone keeps the message open.
+    await wait_for(lambda: tracker.remaining == 0 and tracker.open_groups == 0)
+    assert tracker.stream_open
     assert proc.offset_tracker.has_pending()
     assert handler.message_groups == []
     gate.set()
@@ -217,6 +251,25 @@ async def test_replacement_tasks_join_the_group_and_count_as_replaced():
     assert (group.succeeded, group.failed, group.replaced) == (2, 0, 1)
     assert handler.task_groups == [group, group]
     assert handler.message_groups[0].total == 3
+
+
+async def test_replacement_with_another_offset_still_settles_its_own_message_and_group():
+    class ReplacingElsewhere(RecordingStreamHandler):
+        async def on_error(self, task, error):
+            return [stream_task(f'{task.task_id}-r0', offset=99)]
+
+    recorder = MagicMock()
+    handler = ReplacingElsewhere([2, 1], exit_code=lambda task_id: 1 if task_id == 'm0-g0-t0' else 0)
+    proc = stream_processor(handler, recorder=recorder)
+    proc.enqueue(make_msg(0))
+    await run_until_settled(proc)
+
+    first = handler.message_groups[0].groups[0]
+    assert (first.succeeded, first.failed, first.replaced) == (2, 0, 1)
+    assert handler.task_groups.count(first) == 2
+    # The tracker counters agree with the group counters.
+    completed = recorder.record_message_complete.call_args.kwargs
+    assert (completed['task_count'], completed['succeeded'], completed['replaced']) == (4, 3, 1)
 
 
 async def test_skipped_sink_is_counted_on_the_group():

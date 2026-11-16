@@ -1992,6 +1992,11 @@ class PartitionProcessor:
             # A replacement joins the group of the task it replaces (it also
             # shares that task's window); it adds nothing to the group's labels.
             new_task.group = task.group
+            if self._stream_mode:
+                # A stream task covers only its message: the replacement
+                # settles the same message as the task it replaces, so the
+                # message counters and the group counters always agree.
+                new_task.source_offsets = list(task.source_offsets)
             new_held = text_bytes(new_task.stdin)
             if self._account is not None:
                 self._account.charge(1, new_held)
