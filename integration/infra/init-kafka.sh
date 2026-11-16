@@ -19,6 +19,16 @@ for topic in \
         --replication-factor 1
 done
 
+# The stream worker's topics have one partition each: its messages stream
+# one after the other, and a reader sees its records in delivery order.
+for topic in stream-requests stream-records; do
+    /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+        --create --if-not-exists \
+        --topic "$topic" \
+        --partitions 1 \
+        --replication-factor 1
+done
+
 echo "Topics created successfully"
 
 /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list

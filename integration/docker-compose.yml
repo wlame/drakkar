@@ -633,6 +633,37 @@ services:
       - ..:/project:ro
       - ./shared:/shared
 
+  # --- Stream worker (profile stream) ---
+  #
+  # A handler with arrange_stream(): one request message turns into many
+  # groups of tasks (integration/stream-worker/). Its own topics
+  # (stream-requests, stream-records, one partition each), consumer group
+  # and cluster, so it takes no message of the other clusters.
+  # scenario-arrange-stream.sh starts it, restarts it in the middle of a
+  # message and removes it; a plain `just integration-up` does not start it.
+  stream-worker:
+    profiles: ["stream"]
+    build:
+      context: ..
+      dockerfile: integration/stream-worker/Dockerfile
+      args:
+        PYTHON_IMAGE: ${HARNESS_PYTHON_IMAGE:-python:3.13-slim}
+        EXTRA_APT: ${HARNESS_EXTRA_APT:-}
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      WORKER_ID: stream-worker
+      DK_CONFIG: /app/drakkar.yaml
+      DK_METRICS__PORT: "9101"
+      DK_API__PORT: "8095"
+      # The pending task limit of the stream; scenario-arrange-stream.sh
+      # reads it from here.
+      DK_EXECUTOR__MAX_PENDING_TASKS: "40"
+    ports:
+      - "9101:9101"
+      - "8095:8095"
+
   # --- HTTP-only worker (http cluster) ---
   #
   # Runs the ripgrep pipeline with the Kafka source disabled. The producer

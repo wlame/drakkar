@@ -18,7 +18,8 @@ docker-compose up --build -d
 
 This starts 23 services, including six workers in three clusters. (A
 twenty-fourth, `load_generator_tenant_a`, is gated behind the `tenant` Compose
-profile.) First run pulls images and builds workers (~2 minutes).
+profile, and the scenarios start the workers of the `twin`, `headless` and
+`stream` profiles themselves.) First run pulls images and builds workers (~2 minutes).
 Subsequent runs start in seconds.
 
 To stop everything:
@@ -104,6 +105,24 @@ starts with every provider.
 |--------|----------|---------|--------|
 | fast-worker-1 | [localhost:8084](http://localhost:8084) | [localhost:9094](http://localhost:9094/metrics) | 2 executors, Kafka-only sink |
 | fast-worker-2 | [localhost:8085](http://localhost:8085) | [localhost:9095](http://localhost:9095/metrics) | 2 executors, Kafka-only sink |
+
+### Stream Worker (profile `stream`)
+
+One worker with a handler that implements
+[`arrange_stream()`](fan-out.md#streaming-a-large-message)
+(`integration/stream-worker/`), in the cluster `stream cluster` with the
+consumer group `drakkar-stream`. It reads its own topic, `stream-requests`,
+and writes to `stream-records`; both have one partition. A request names a
+number of groups and of tasks per group; the handler yields the groups one
+at a time and labels each task with its group's name. `on_group_complete()`
+writes `notes['done']` and sends one `group` record, and
+`on_message_complete()` sends one `final` record with the sum of the notes.
+`scenario-arrange-stream.sh` starts and removes it; `just integration-up`
+does not start it.
+
+| Worker | API | Metrics | Config |
+|--------|-----|---------|--------|
+| stream-worker | [localhost:8095](http://localhost:8095/readyz) | [localhost:9101](http://localhost:9101/metrics) | 4 executors, `executor.max_pending_tasks: 40`, one Kafka sink, no UI, no recorder, DLQ off |
 
 ### HTTP Cluster (the same search, over HTTP)
 
@@ -442,6 +461,8 @@ list. Each icon opens that page in a drawer beside the live view.
 | `search-requests_dlq` | 50 | main cluster (DLQ) | -- |
 | `symbol-counts` | 50 | fast cluster | -- |
 | `search-results-http` | 50 | http cluster | -- |
+| `stream-requests` | 1 | `scenario-arrange-stream.sh` | stream worker |
+| `stream-records` | 1 | stream worker | -- |
 
 Browse topics in the [Kafka UI](http://localhost:8088).
 
@@ -559,12 +580,13 @@ is a pass/fail gate, not an invitation to read three dashboards.
 
 ## Provider outage scenarios
 
-Twelve scripts check how the main cluster's registry and cluster tasks
+Fourteen scripts check how the main cluster's registry and cluster tasks
 behave when their provider, the network or a worker fails, how the
 recorder memory store works with and without a recorder file, what the
 DLQ record of a message that cannot be parsed holds, whether the
 backpressure caps hold under load, whether a twin worker name is refused,
-and whether the routes of the Databases view answer. Start the harness with a
+whether the routes of the Databases view answer, and how a stream handler
+holds its pending tasks and runs a message again after a restart. Start the harness with a
 provider, wait until the workers are healthy, then run the scenarios with
 the same provider:
 
@@ -574,7 +596,7 @@ just integration-scenarios provider=redis
 just integration-down
 ```
 
-`just integration-scenarios` runs the thirteen scripts in the order below and
+`just integration-scenarios` runs the fourteen scripts in the order below and
 stops at the first failure. Each script prints one `VERDICT` line and
 exits 0 on a pass (or when it does not apply to the provider) and 1 on a
 failure. You can also run one script alone, for example
@@ -610,6 +632,7 @@ the restart of worker-2 for its leftover).
 | `scenario-databases-view.sh` | Reads the routes of the [Databases view](databases-view.md): `/api/v1/debug/databases?parts=own,storage,recorder` and `?parts=bogus` on worker-2, a slice of worker-2's last 15 minutes (at most 1000 rows), `/api/v1/debug/autodiscover` on worker-1, `/api/v1/debug/autodiscover/leases` on worker-2, and `/api/v1/debug/databases/postgres` on fast-worker-1. | worker-2 answers the `worker`, `own`, `storage` and `recorder` blocks and no `history`; its own folder is `main_cluster/worker-2`, its provider `sqlite`, it has a live row, and its siblings include worker-1 and worker-3. An unknown part answers `400` with the unknown-part message. The slice answers `200` as `application/x-sqlite3` with `X-Drakkar-Slice-Rows` above 0, and the file opens as SQLite with that many events and the `slice` and `slice_sources` tables. The registry header names the provider of the run and lists worker-2 and worker-3; worker-2 has a lease row for `history.archive`; fast-worker-1 lists at least one partition of its recorder table. Runs with every provider. |
 | `scenario-headless.sh` | Starts two workers of the profile `headless` in a cluster of their own: `headless-recorder` (no UI, the recorder on) and `headless-no-api` (no API, no UI, no recorder). It produces messages into the source topic, then stops and removes both. | headless-recorder answers `/healthz` and `404` on a UI route; both workers deliver the messages (their sink counters rise); both exit with code 0, headless-recorder sealed a recorder file into the history folder, and headless-no-api left none. Runs with every provider. |
 | `scenario-agent.sh` | Reads the [agent routes](agent.md) on worker-1 (`agent.enabled` true, with a token), on worker-2 (the default, off) and on `headless-recorder` (no UI, the agent on), which it starts and removes. | worker-2 answers `404` with the surface-off message; worker-1 answers `401` with no token and with a wrong one; with the token the index has schema 1, the worker name and the five agent routes; `manual?topic=concept:pipeline` answers the pipeline concept; `state?parts=budget,partitions` answers the budget numbers and a partition list; `diagnose` lists every framework rule in `checked` and none in `failed`; `config?parts=connections` and `config?parts=agent` show the DSN, the Consul token and the agent token masked and hold no password. headless-recorder answers `/api/v1/agent` with its token and `404` on `/api/v1/identity`. Runs with every provider. |
+| `scenario-arrange-stream.sh` | Starts `stream-worker` (profile `stream`) and produces 3 requests of 30 groups of 10 tasks of 0.3 s into `stream-requests`. Until their 93 records are delivered and no task is pending, it samples `drakkar_pending_tasks` every 0.25 s (a peak shorter than that can be missed). Then it reads `stream-records`. It produces a fourth request, stops the worker once at least 8 of its group records arrived and before its final record, starts it again, and waits for that request's final record. It removes the worker at the end. | Every sample is at most the limit plus one group (50), and the peak reaches the limit (40); `drakkar_window_admission_wait_seconds_total{limit="tasks"}` is above 0. `stream-records` holds 90 group records (each group of each request once, 10 succeeded tasks, every task labelled with its group) and 3 final records (30 groups, done total 300), each final after the 30 group records of its request; `drakkar_stream_group_tasks_count` is 90 and its `_sum` 900. The stop logs `arrange_stream_abandoned`. The fourth request has records of two runs: the first run delivered group records and no final record, and the second run delivered each of the 30 groups once (every group of the first run again, so the message ran from its first group), then one final record. The first 3 requests did not run again. Runs with every provider. |
 
 The scenarios change the harness (a killed and restarted worker, a paused
 service), so run `just integration-down` before the next run.
@@ -691,7 +714,7 @@ For `filesystem`, `postgres`, `redis` and `consul`, in this order, the recipe
 clears `integration/shared/` (except `README.md`; it is a bind mount that
 `integration-down` does not clear) from inside a container, so the Docker VM
 of a macOS host sees the delete at once, starts the harness with
-`integration-up`, waits with `wait-ready.sh`, runs the thirteen scenarios and
+`integration-up`, waits with `wait-ready.sh`, runs the fourteen scenarios and
 `verify-after-drain.sh`, and runs `integration-down`, also after a failure. It
 goes on after a failing step, prints a table with PASS, FAIL or N/A for each
 provider and step, and exits non-zero when any step failed. `N/A` means the

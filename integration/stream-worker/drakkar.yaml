@@ -1,0 +1,64 @@
+# Stream worker config: arrange_stream() turns one message into many groups
+# of tasks. Its own source topic and consumer group, so it takes no message
+# of the other clusters.
+
+worker:
+  name_env: "WORKER_ID"
+cluster:
+  name: "stream cluster"
+
+connections:
+  kafka:
+    main:
+      brokers: "kafka:9092"
+
+sources:
+  kafka:
+    enabled: true
+    # One partition: the messages stream one after the other, so the pending
+    # tasks pass executor.max_pending_tasks by at most one group.
+    topic: "stream-requests"
+    consumer_group: "drakkar-stream"
+
+executor:
+  binary_path: "/usr/local/bin/stream-task"
+  max_executors: 4
+  task_timeout: 30s
+  max_retries: 0
+  drain_timeout: 30s
+  # Four groups of 10 tasks: the stream pulls a group only when the pending
+  # tasks are below this limit.
+  max_pending_tasks: 40
+  max_pending_bytes: 16MiB
+
+sinks:
+  kafka:
+    # User-chosen instance name; the handler names it in KafkaPayload(sink=...).
+    stream_records:
+      # One partition: a reader sees the records in the order they were
+      # delivered.
+      topic: "stream-records"
+
+dlq:
+  enabled: false
+
+metrics:
+  enabled: true
+  port: 9090
+
+logging:
+  level: "INFO"
+  format: "json"
+
+api:
+  host: "0.0.0.0"
+  port: 8080
+
+ui:
+  enabled: false
+
+recorder:
+  enabled: false
+
+autodiscover:
+  enabled: false
