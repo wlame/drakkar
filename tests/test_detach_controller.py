@@ -582,14 +582,17 @@ async def test_an_attach_while_attaching_answers_at_once_and_starts_no_second_re
     assert worker.calls.count('join_group') == 3
 
 
-async def test_a_detach_while_attaching_answers_already_detached(worker):
+async def test_a_detach_while_attaching_answers_join_failed(worker):
     await worker.detach()
     worker.source.join_answers = [False]
     await worker.controller.attach(cause='operator')
+    before = counted('handler', 'join_failed')
 
     result = await worker.detach()
 
-    assert result == DetachResult(detached=True, reason='already_detached', until=None)
+    assert result == DetachResult(detached=False, reason='join_failed', until=None)
+    assert counted('handler', 'join_failed') == before + 1
+    assert worker.controller.wire_state()['last_request']['outcome'] == 'join_failed'
 
 
 async def test_a_stop_during_the_join_retries_releases_the_slot(worker, clock):

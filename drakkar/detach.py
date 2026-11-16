@@ -78,6 +78,8 @@ REFUSED_LEAVE_FAILED = 'leave_failed'
 REFUSED_HELD_BY_OPERATOR = 'held_by_operator'
 # An attach answer: the worker is still outside its group, and the join is tried again every 5 s.
 REFUSED_JOIN_FAILED = 'join_failed'
+# The answer of the handler API inside a Message Probe run; it never reaches the controller.
+REFUSED_PROBE = 'probe'
 
 # The causes of an attach (the ``cause`` of ``worker_attached``).
 CAUSE_HANDLER = 'handler'
@@ -422,8 +424,8 @@ class DetachController:
         if state.state == STATE_DETACHED:
             return self._detach_again(state, origin=origin, seconds=seconds, reason=reason)
         if state.state == STATE_ATTACHING:
-            # A join retry is in progress: the worker is outside its group, with no deadline.
-            return DetachResult(detached=True, reason=REFUSED_ALREADY_DETACHED, until=None)
+            # A join retry is in progress: the worker is returning to its group, and the attach ends first.
+            return self._refused(REFUSED_JOIN_FAILED)
         if state.state != STATE_ATTACHED:
             return self._refused(REFUSED_STOPPING)
         now = self._clock.time()

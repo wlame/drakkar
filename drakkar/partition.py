@@ -418,6 +418,9 @@ class PartitionProcessor:
         # The pull in progress, run as a task so a stop or a DLQ outcome can
         # cancel it: ``aclose()`` cannot run while a pull is running.
         self._pull_task: asyncio.Task | None = None
+        # The pipeline hook scope of a pull that was left running (a stop or an
+        # early end of the message); it ends when the stream is given up.
+        self._left_pull_scope: PipelineHookScope | None = None
         # The running task coroutines of each stream message, by offset, so an
         # abandoned stream cancels only its own tasks.
         self._stream_runs: dict[int, set[asyncio.Task]] = {}
@@ -1418,6 +1421,7 @@ class PartitionProcessor:
                 await self._finalize_message_tracker(tracker)
         finally:
             self._stream_context = None
+            self._end_left_pull_scope()
 
     async def _pull_groups(self, stream: AsyncIterator[list[ExecutorTask]], tracker: MessageTracker) -> bool:
         """Admit, pull and start the groups of the stream; true when the generator ended, false at a stop or an early end."""
@@ -1741,9 +1745,13 @@ class PartitionProcessor:
             arrange_labels = self._arrange_labels
             self._arrange_labels = []
             if pull.done():
-                # A pull still running holds the context: its binds stay, and
-                # the stream is closed next anyway.
                 context.run(self._reset_pull_context, tokens)
+            else:
+                # A pull still running holds the context: its binds stay, and
+                # the stream is closed next anyway. Its scope ends when the
+                # stream is given up, so a task the generator started may
+                # detach afterwards.
+                self._left_pull_scope = tokens[2]
         pull_duration = time.monotonic() - self._arrange_start
         tasks = check_stream_item(item, message)
         if not tasks:
@@ -1761,6 +1769,13 @@ class PartitionProcessor:
             )
         stream_group_tasks.observe(len(tasks))
         return tasks
+
+    def _end_left_pull_scope(self) -> None:
+        """End the scope of a pull that was left running; the stream it belonged to is closed or given up."""
+        scope, self._left_pull_scope = self._left_pull_scope, None
+        if scope is not None:
+            # Only marked: the stream's context, where its token was set, is dropped.
+            scope.ended = True
 
     def _bind_pull_context(self, message: SourceMessage, window_id: int) -> tuple[Any, Any, PipelineHookScope]:
         """Bind the log fields, request id, hook context and pipeline hook scope of one pull; run in the stream's context.

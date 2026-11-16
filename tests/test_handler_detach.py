@@ -13,16 +13,19 @@ from drakkar import cluster_tasks, detach_slots
 from drakkar import detach as detach_module
 from drakkar.app import DrakkarApp
 from drakkar.config import DrakkarConfig
-from drakkar.detach import ATTACHED_STATE, AttachResult, DetachOrigin, DetachResult
+from drakkar.detach import ATTACHED_STATE, STATE_DETACHED, AttachResult, DetachOrigin, DetachResult
+from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.hook_scope import inside_pipeline_hook, pipeline_hook
 from drakkar.models import CollectResult, DeliveryAction, ErrorAction, ExecutorTask, KafkaPayload, PrecomputedResult
 from drakkar.periodic import run_periodic_task
+from drakkar.uiserver.runner import DebugRunner, ProbeInput
 from tests.clocks import VirtualClock
 from tests.conftest import kafka_connections, wait_for
 from tests.fleet_fakes import RecordingLogger
 from tests.stream_helpers import Out, RecordingStreamHandler, make_msg, stream_processor, stream_task
 from tests.test_detach_controller import NOW, Harness, peer
+from tests.test_lifecycle_sources import StubSource, _app
 from tests.test_sources_kafka import _source_with_fake_consumer
 from tests.test_sources_validation import KafkaOnlyHandler
 
@@ -420,3 +423,167 @@ async def test_the_result_types_are_exported_from_the_package():
     assert drakkar.AttachResult is AttachResult
     assert drakkar.DetachOrigin is DetachOrigin
     assert drakkar.DetachState is detach_module.DetachState
+
+
+# --- a pull left running ------------------------------------------------------------
+
+
+async def test_a_task_started_by_a_pull_left_running_may_detach_after_the_stream_was_given_up(monkeypatch):
+    # The loop notices the stop at its next turn; a short turn keeps the test fast.
+    monkeypatch.setattr('drakkar.partition.IDLE_POLL_TIMEOUT', 0.05)
+    release = asyncio.Event()
+    started: list[asyncio.Task] = []
+
+    async def background() -> bool:
+        await release.wait()
+        return inside_pipeline_hook()
+
+    class Hanging(RecordingStreamHandler):
+        async def arrange_stream(self, message):
+            yield [stream_task('first', message.offset)]
+            started.append(asyncio.create_task(background()))
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # The stop's cancel is ignored once, so the pull is still
+                # running when the loop gives the stream up; the close cancels it again.
+                await asyncio.Event().wait()
+            yield []
+
+    proc = stream_processor(Hanging())
+    proc.enqueue(make_msg(0))
+    proc.start()
+    await wait_for(lambda: bool(started))
+    await proc.stop()
+    release.set()
+
+    assert await started[0] is False
+
+
+# --- the Message Probe ----------------------------------------------------------------
+
+
+class ProbeCalls:
+    """What each hook got from detach, attach and request_stop, by hook name."""
+
+    def __init__(self) -> None:
+        self.answers: dict[str, tuple[Any, ...]] = {}
+
+    async def call_all(self, handler: BaseDrakkarHandler, hook: str) -> None:
+        detached = await handler.detach(duration=3600, reason='probe')
+        (gathered,) = await asyncio.gather(handler.attach(reason='probe'))
+        await handler.offload(handler.request_stop, 'from a thread', 2)
+        handler.request_stop(reason='from the hook', exit_code=3)
+        self.answers[hook] = (detached, gathered)
+
+
+def probe_task(task_id: str, exit_code: int) -> ExecutorTask:
+    return ExecutorTask(
+        task_id=task_id,
+        source_offsets=[0],
+        precomputed=PrecomputedResult(stdout='out', exit_code=exit_code),
+    )
+
+
+class ProbedListHandler(KafkaOnlyHandler):
+    def __init__(self, calls: ProbeCalls) -> None:
+        super().__init__()
+        self.calls = calls
+
+    async def arrange(self, messages, pending):
+        await self.calls.call_all(self, 'arrange')
+        return [probe_task('ok', 0), probe_task('bad', 1)]
+
+    async def on_task_complete(self, result):
+        await self.calls.call_all(self, 'on_task_complete')
+
+    async def on_error(self, task, error):
+        await self.calls.call_all(self, 'on_error')
+        return ErrorAction.SKIP
+
+    async def on_message_complete(self, group):
+        await self.calls.call_all(self, 'on_message_complete')
+
+    async def on_window_complete(self, results, source_messages):
+        await self.calls.call_all(self, 'on_window_complete')
+
+
+class ProbedStreamHandler(KafkaOnlyHandler):
+    def __init__(self, calls: ProbeCalls) -> None:
+        super().__init__()
+        self.calls = calls
+
+    async def arrange_stream(self, message):
+        await self.calls.call_all(self, 'arrange_stream')
+        yield [probe_task('s0', 0)]
+
+    async def on_group_complete(self, group, results, errors):
+        await self.calls.call_all(self, 'on_group_complete')
+
+
+PROBE_DETACH = DetachResult(detached=False, reason='probe', until=None)
+PROBE_ATTACH = AttachResult(attached=False, reason='probe')
+
+
+@pytest.mark.parametrize(
+    ('handler_class', 'hooks'),
+    [
+        (
+            ProbedListHandler,
+            {'arrange', 'on_task_complete', 'on_error', 'on_message_complete', 'on_window_complete'},
+        ),
+        (ProbedStreamHandler, {'arrange_stream', 'on_group_complete'}),
+    ],
+)
+async def test_detach_attach_and_request_stop_have_no_effect_in_a_message_probe(worker, handler_class, hooks):
+    calls = ProbeCalls()
+    handler = handler_class(calls)
+    worker.app._handler = handler
+    worker.app._lifecycle._wire_detach_front()
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=ExecutorPool(binary_path='/nonexistent', max_executors=2, task_timeout_seconds=5),
+        app_config=worker.app.config,
+    )
+    state_before = worker.controller.state
+
+    with capture_logs() as captured:
+        await runner.run(ProbeInput(value='{}', partition=0, offset=0, topic='in'))
+
+    assert set(calls.answers) == hooks
+    for hook, answers in calls.answers.items():
+        assert answers == (PROBE_DETACH, PROBE_ATTACH), hook
+    assert sum(worker.provider.calls.values()) == 0
+    assert worker.controller.state == state_before
+    assert worker.app._stop_exit_code is None
+    assert worker.source._stop_requested is False
+    suppressed = [line for line in captured if line['event'] == 'stop_request_suppressed']
+    assert len(suppressed) == 2 * len(hooks)
+    assert suppressed[0]['category'] == 'debug'
+    assert {(line['reason'], line['exit_code']) for line in suppressed} == {('from a thread', 2), ('from the hook', 3)}
+    assert not [line for line in captured if line['event'] == 'stop_requested']
+
+    # The flag does not leak out of the probe.
+    result = await handler.detach(duration=3600, reason='after the probe')
+    assert result.detached is True
+    assert worker.controller.state.state == STATE_DETACHED
+
+
+# --- request_stop from on_startup -----------------------------------------------------
+
+
+def test_request_stop_in_on_startup_ends_the_run_with_its_exit_code(monkeypatch):
+    class StopsAtStartup(KafkaOnlyHandler):
+        async def on_startup(self, config):
+            self.request_stop(reason='x', exit_code=3)
+            return config
+
+    source = StubSource('kafka')
+    app = _app(monkeypatch, source, handler=StopsAtStartup())
+    monkeypatch.setattr('drakkar.app.setup_logging', lambda *args, **kwargs: None)
+
+    with pytest.raises(SystemExit) as exit_info:
+        app.run()
+
+    assert exit_info.value.code == 3
+    assert 'stop' in source.calls

@@ -22,7 +22,7 @@ from pydantic import BaseModel, ValidationError
 # heavy module, so there is no circular-import risk.
 from drakkar.annotations import AnnotatorLike
 from drakkar.cache.protocol import CacheLike
-from drakkar.hook_scope import inside_pipeline_hook
+from drakkar.hook_scope import inside_message_probe, inside_pipeline_hook
 from drakkar.offload import OffloaderLike
 from drakkar.timeline_events import NoOpTimelineEventEmitter, TimelineEventEmitter, TimelineMatch
 
@@ -852,9 +852,21 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         ``inside_pipeline_hook`` at once: the drain would wait for the call
         itself.
 
+        A task started in one hook and first run after that hook returned
+        may detach, even when a later hook awaits it; that detach then waits
+        for the drain, which waits for the later hook, until the leave bound
+        answers ``leave_failed``.
+
+        Inside a Message Probe run the call has no effect and answers
+        ``probe``.
+
         Raises:
             ValueError: ``duration`` is below 10 seconds or above ``max_duration``.
         """
+        if inside_message_probe():
+            from drakkar.detach import REFUSED_PROBE, DetachResult
+
+            return DetachResult(detached=False, reason=REFUSED_PROBE, until=None)
         # Read in the caller's context before any await: a task that the
         # call starts inherits the context, so this is the hook's own scope.
         in_pipeline_hook = inside_pipeline_hook()
@@ -865,8 +877,13 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
 
         Returns when the join was sent and the budget slot was given back. It
         does not wait for an assignment. An operator detach answers
-        ``held_by_operator``.
+        ``held_by_operator``. Inside a Message Probe run the call has no
+        effect and answers ``probe``.
         """
+        if inside_message_probe():
+            from drakkar.detach import REFUSED_PROBE, AttachResult
+
+            return AttachResult(attached=False, reason=REFUSED_PROBE)
         return await self._detach_front.attach(reason=reason)
 
     @property
@@ -879,12 +896,16 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
 
         Returns at once; safe to call from a hook and from a thread (a
         function run through :meth:`offload`). The first call wins: a later
-        call changes nothing. Before the worker runs it does nothing.
+        call changes nothing. Before the worker runs it does nothing. Inside
+        a Message Probe run it only logs ``stop_request_suppressed``.
 
         Raises:
             ValueError: ``exit_code`` is not a whole number from 0 to 255.
         """
         check_exit_code(exit_code)
+        if inside_message_probe():
+            logger.info('stop_request_suppressed', category='debug', reason=reason, exit_code=exit_code)
+            return
         self._detach_front.request_stop(reason=reason, exit_code=exit_code)
 
     # ------------------------------------------------------------------

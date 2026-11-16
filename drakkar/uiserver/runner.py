@@ -66,6 +66,7 @@ from drakkar.groups import (
     retrieve_task_outcome,
 )
 from drakkar.handler import overridden_completion_hooks, uses_arrange_stream
+from drakkar.hook_scope import message_probe_run
 from drakkar.models import (
     CollectResult,
     ErrorAction,
@@ -877,7 +878,9 @@ class DebugRunner:
             )
             details_token = probe_module._active_state.set(state.details_state)
         try:
-            await self._run_stages(state=state, msg=msg)
+            # The handler's detach, attach and request_stop have no effect in a probe.
+            with message_probe_run():
+                await self._run_stages(state=state, msg=msg)
         finally:
             # Reset the contextvar before restoring the cache so a probe
             # that raises mid-run never leaves details state bound for

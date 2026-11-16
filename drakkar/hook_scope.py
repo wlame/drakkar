@@ -1,4 +1,4 @@
-"""Mark the handler calls that run as part of a Kafka partition's work.
+"""Mark the handler calls that run as part of a Kafka partition's work, and the Message Probe runs.
 
 A detach waits for the revoke drain, and the drain waits for the in-flight
 work of every partition. A ``detach()`` awaited inside that work would wait
@@ -13,6 +13,8 @@ runs after that sees an ended scope.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from types import TracebackType
 
@@ -78,3 +80,25 @@ def inside_pipeline_hook() -> bool:
     """Whether the current code runs inside a handler call that is part of a partition's work."""
     scope = _current_scope.get()
     return scope is not None and scope.is_open
+
+
+# True while a Message Probe run calls handler code. A probe must not change
+# the worker, so the handler's detach, attach and request_stop have no effect
+# there. Tasks and threads that the probe starts copy the context, so they see
+# the flag too. The pipeline never sets it.
+_probe_run: ContextVar[bool] = ContextVar('drakkar_message_probe_run', default=False)
+
+
+@contextmanager
+def message_probe_run() -> Iterator[None]:
+    """Mark the code inside as part of a Message Probe run."""
+    token = _probe_run.set(True)
+    try:
+        yield
+    finally:
+        _probe_run.reset(token)
+
+
+def inside_message_probe() -> bool:
+    """Whether the current code runs as part of a Message Probe run."""
+    return _probe_run.get()
