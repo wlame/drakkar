@@ -54,7 +54,7 @@ from drakkar.sinks.dlq import DLQSink
 from drakkar.sinks.filesystem import FileSink
 from drakkar.sinks.http import HttpSink
 from drakkar.sinks.kafka import KafkaSink
-from drakkar.sinks.manager import DeliveryOutcome, MessageContext, SinkManager
+from drakkar.sinks.manager import DeliveryOutcome, MessageContext, SinkKey, SinkManager
 from drakkar.sinks.mongo import MongoSink
 from drakkar.sinks.postgres import PostgresSink
 from drakkar.sinks.redis import RedisSink
@@ -857,8 +857,8 @@ class DrakkarApp:
         result: CollectResult,
         partition_id: int,
         message_context: MessageContext | None = None,
-    ) -> None:
-        """Deliver CollectResult payloads to configured sinks.
+    ) -> dict[SinkKey, DeliveryOutcome]:
+        """Deliver CollectResult payloads to configured sinks; return the outcome of each sink.
 
         Validates that all payload sink types are configured, then delivers
         via SinkManager, which asks the handler's on_delivery_error hook
@@ -866,10 +866,12 @@ class DrakkarApp:
         ends in ``dlq``. ``message_context`` names the source messages of a
         task or message result, or is ``MessageContext.window()`` for a
         window result. ``None`` means no context (fail closed): a ``dlq``
-        outcome then follows ``dlq.on_send_failure``.
+        outcome then follows ``dlq.on_send_failure``. The answer lets the
+        partition count the ``skip`` outcomes of a stream handler's groups;
+        a result with no outputs reaches no sink and answers an empty map.
         """
         if not result.has_outputs:
-            return
+            return {}
 
         self._sink_manager.validate_collect(result)
 
@@ -894,3 +896,4 @@ class DrakkarApp:
                 kafka_sink = self._sink_manager.resolve_sink('kafka', payload.sink)
                 if outcomes.get((kafka_sink.sink_type, kafka_sink.name)) == DeliveryOutcome.DELIVERED:
                     self._recorder.record_produced(payload, source_partition=partition_id)
+        return outcomes

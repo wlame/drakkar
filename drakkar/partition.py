@@ -1,9 +1,10 @@
 """Per-partition processor for Drakkar framework."""
 
 import asyncio
+import inspect
 import math
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -13,7 +14,13 @@ from structlog.contextvars import bind_contextvars, unbind_contextvars
 from drakkar import taskflow
 from drakkar.budget import TASKS_LIMIT, BudgetAccount, MessageShape, PendingBudget, output_bytes, text_bytes
 from drakkar.executor import ExecutorPool, ExecutorTaskError
-from drakkar.handler import BaseDrakkarHandler, overridden_completion_hooks, task_run_seconds_hook
+from drakkar.groups import ArrangeStreamError, check_stream_item, drop_invalid_notes, new_task_group
+from drakkar.handler import (
+    BaseDrakkarHandler,
+    overridden_completion_hooks,
+    task_run_seconds_hook,
+    uses_arrange_stream,
+)
 from drakkar.hookctx import bind_hook_context, clear_hook_context
 from drakkar.metrics import (
     batch_duration,
@@ -32,6 +39,7 @@ from drakkar.metrics import (
     partition_processor_deaths,
     partition_queue_size,
     queued_messages_dropped_at_stop,
+    stream_group_tasks,
     suppressed_zombie_deliveries,
     task_retries,
     window_admission_wait,
@@ -48,13 +56,14 @@ from drakkar.models import (
     PendingContext,
     SinkDeliveryFailedError,
     SourceMessage,
+    TaskGroup,
 )
 from drakkar.offsets import OffsetTracker
 from drakkar.recorder import EventRecorder
 from drakkar.reported_run import reported_run_seconds
 from drakkar.request_ids import RequestIdResolver, reset_request_id
 from drakkar.sinks.dlq_record import DLQRecord
-from drakkar.sinks.manager import CollectCallback, MessageContext, MessageDLQState
+from drakkar.sinks.manager import CollectCallback, DeliveryOutcome, MessageContext, MessageDLQState, sink_ref
 
 logger = structlog.get_logger()
 
@@ -194,9 +203,14 @@ class Window:
     completed_count: int = 0
     total_tasks: int = 0
     start_time: float = 0.0
-    # Bytes of the stdout and stderr in ``results``, charged to the pending
-    # budget until on_window_complete has run.
+    # Bytes of the stdout and stderr in ``results`` (and ``errors``), charged
+    # to the pending budget until the window's or group's hook has run.
     kept_bytes: int = 0
+    # Set for one group of a stream handler. The window then tracks that
+    # group: ``results`` holds its terminal successes and ``errors`` its
+    # terminal failures, both kept only for on_group_complete.
+    group: TaskGroup | None = None
+    errors: list[ExecutorError] = field(default_factory=list)
 
     @property
     def is_complete(self) -> bool:
@@ -262,6 +276,14 @@ class MessageTracker:
     # Bytes of the stdout and stderr in ``results`` and ``errors``, charged to
     # the pending budget until on_message_complete has run.
     kept_bytes: int = 0
+    # Stream handlers only. Between two groups ``remaining`` can be 0, so a
+    # message is done only when its stream has ended and every group has
+    # finished its hook and delivery (see ``_message_is_done``).
+    stream_open: bool = False
+    open_groups: int = 0
+    # The group objects, in index order. They hold counters, labels and
+    # notes, never a task or a result.
+    groups: list[TaskGroup] = field(default_factory=list)
 
 
 class PartitionProcessor:
@@ -352,8 +374,16 @@ class PartitionProcessor:
         # here rather than per task: the answer is a property of the
         # handler's class and cannot change while the processor runs.
         implemented = overridden_completion_hooks(handler)
+        # A stream handler turns one message at a time into groups of tasks
+        # (arrange_stream) instead of a window into one task list.
+        self._stream_mode = uses_arrange_stream(handler)
         self._keep_window_results = implemented['window_complete']
-        self._keep_message_details = implemented['message_complete']
+        # A stream message can have many thousands of tasks, so its tracker
+        # never keeps tasks, results or errors; its groups do, for
+        # on_group_complete only, and only until that hook has run.
+        self._keep_message_details = implemented['message_complete'] and not self._stream_mode
+        self._keep_group_results = self._stream_mode and implemented['group_complete']
+        self._group_label_names: tuple[str, ...] = tuple(getattr(handler, 'group_labels', ()))
         # The optional run-time hook, or None when the handler keeps the
         # default — asked once for the same reason, so a handler without it
         # pays nothing per task.
@@ -636,20 +666,10 @@ class PartitionProcessor:
         await log.ainfo('partition_processor_started')
 
         try:
-            while self._running:
-                messages = await self._collect_window()
-                if not messages:
-                    # retry any uncommitted offsets on idle iterations
-                    await self._note_commit_due()
-                    continue
-
-                try:
-                    await self._process_window(messages)
-                finally:
-                    # The window has fanned out (or failed): what it reserved
-                    # and did not charge goes back, and the next waiting loop
-                    # may take the room.
-                    self._end_window_reservation()
+            if self._stream_mode:
+                await self._run_stream_loop()
+            else:
+                await self._run_window_loop()
 
             # Queued messages that are not in a window are dropped, not
             # arranged: only in-flight work drains. Their offsets were never
@@ -682,6 +702,40 @@ class PartitionProcessor:
         # handling. Swallowing it at this level would make a dead loop
         # invisible — the task would complete successfully, so nothing
         # would restart it and nothing would report it.
+
+    async def _run_window_loop(self) -> None:
+        """Take windows of messages and arrange each one until a stop."""
+        while self._running:
+            messages = await self._collect_window()
+            if not messages:
+                # retry any uncommitted offsets on idle iterations
+                await self._note_commit_due()
+                continue
+
+            try:
+                await self._process_window(messages)
+            finally:
+                # The window has fanned out (or failed): what it reserved
+                # and did not charge goes back, and the next waiting loop
+                # may take the room.
+                self._end_window_reservation()
+
+    async def _run_stream_loop(self) -> None:
+        """Take one message at a time and stream its groups until a stop.
+
+        The next message is taken only after the stream of the previous one
+        has ended; the last tasks of a message still run while the next one
+        streams.
+        """
+        while self._running:
+            try:
+                message = await asyncio.wait_for(self._queue.get(), timeout=IDLE_POLL_TIMEOUT)
+            except TimeoutError:
+                # retry any uncommitted offsets on idle iterations
+                await self._note_commit_due()
+                continue
+            partition_queue_size.labels(partition=str(self._partition_id)).set(self._queue.qsize())
+            await self._process_stream_message(message)
 
     async def _supervise(self) -> None:
         """Run the processing loop, restarting it once if it dies unexpectedly.
@@ -1234,6 +1288,129 @@ class PartitionProcessor:
                 await asyncio.sleep(0)
         return window_stdin_bytes
 
+    async def _process_stream_message(self, message: SourceMessage) -> None:
+        """Accept one message, then pull and start its groups until its stream ends.
+
+        The message is accepted exactly as a window accepts it (offset
+        registered, parsed, request id, parse-error policy). An error of the
+        stream propagates unchanged; the groups already started run to their
+        end, and the message stays open, so its offset stays pending.
+        """
+        started_at = time.monotonic()
+        if not await self._accept_messages([message]):
+            await self._note_commit_due()
+            return
+        tracker = MessageTracker(source_message=message, started_at=started_at, stream_open=True)
+        self._message_trackers[message.offset] = tracker
+
+        stream = self._open_stream(message)
+        while True:
+            tasks = await self._pull_group(stream, tracker)
+            if tasks is None:
+                break
+            if not tasks:
+                # An empty list is no group: no hook, no event, and its
+                # window_id is simply not used again.
+                continue
+            window = Window(window_id=self._window_counter, source_messages=[message], start_time=time.monotonic())
+            await self._start_group(tracker, tasks, window)
+
+        tracker.stream_open = False
+        if self._message_is_done(tracker):
+            await self._finalize_message_tracker(tracker)
+
+    def _open_stream(self, message: SourceMessage) -> AsyncIterator[list[ExecutorTask]]:
+        """Call ``arrange_stream`` and return its async iterator; any other result is a stream error."""
+        result = self._handler.arrange_stream(message)
+        if not hasattr(result, '__aiter__'):
+            if inspect.iscoroutine(result):
+                # An ``async def`` without a yield: close it so it does not
+                # warn that it was never awaited.
+                result.close()
+            raise ArrangeStreamError(f'arrange_stream must be an async generator, got {type(result).__name__}')
+        return result.__aiter__()
+
+    async def _pull_group(
+        self, stream: AsyncIterator[list[ExecutorTask]], tracker: MessageTracker
+    ) -> list[ExecutorTask] | None:
+        """Pull the next yielded list of the stream, checked; ``None`` when the stream ended.
+
+        The pull takes the next ``window_id`` before it starts, so the
+        ``arranged`` row of the group and the annotations emitted while the
+        handler prepared it carry the same id. Only a pull that returned a
+        group is timed into the metrics and recorded.
+        """
+        message = tracker.source_message
+        self._window_counter += 1
+        window_id = self._window_counter
+        offsets = [message.offset]
+        bind_contextvars(partition=self._partition_id, hook='arrange_stream', window_id=window_id, offsets=offsets)
+        request_id_tokens = self._request_ids.bind([message.request_id])
+        hook_token = bind_hook_context(
+            hook='arrange_stream',
+            partition=self._partition_id,
+            window_id=window_id,
+            offsets=tuple(offsets),
+        )
+        self._arranging = True
+        self._arrange_start = time.monotonic()
+        self._arrange_labels = [self._handler.message_label(message)]
+        try:
+            item = await anext(stream)
+        except StopAsyncIteration:
+            return None
+        finally:
+            self._arranging = False
+            arrange_labels = self._arrange_labels
+            self._arrange_labels = []
+            unbind_contextvars('hook', 'window_id', 'offsets')
+            reset_request_id(request_id_tokens)
+            clear_hook_context(hook_token)
+        pull_duration = time.monotonic() - self._arrange_start
+        tasks = check_stream_item(item, message)
+        if not tasks:
+            return tasks
+        handler_duration.labels(hook='arrange_stream').observe(pull_duration)
+        if self._recorder:
+            self._recorder.record_arranged(
+                self._partition_id,
+                [message],
+                tasks,
+                duration=pull_duration,
+                message_labels=arrange_labels,
+                window_id=window_id,
+                group_index=len(tracker.groups),
+            )
+        stream_group_tasks.observe(len(tasks))
+        return tasks
+
+    async def _start_group(self, tracker: MessageTracker, tasks: list[ExecutorTask], window: Window) -> None:
+        """Make the group of ``tasks``, count it on the tracker, then charge and start its tasks in chunks."""
+        group = new_task_group(
+            index=len(tracker.groups),
+            source_message=tracker.source_message,
+            tasks=tasks,
+            label_names=self._group_label_names,
+            started_at=time.monotonic(),
+        )
+        window.group = group
+        window.task_ids = [task.task_id for task in tasks]
+        # Set for the whole list before the first chunk starts, so a task
+        # that settles mid-fan-out cannot complete the group early.
+        window.total_tasks = len(tasks)
+        self._stamp_request_ids(tasks)
+        tracker.groups.append(group)
+        tracker.open_groups += 1
+        tracker.scheduled_count += len(tasks)
+        tracker.remaining += len(tasks)
+        stdin_bytes = await self._fan_out(window, tasks)
+        # One group is one admission unit of a stream handler.
+        self._note_window_shape(1, len(tasks), stdin_bytes)
+
+    def _message_is_done(self, tracker: MessageTracker) -> bool:
+        """Whether the message may finish: no task remains, its stream ended and every group finished."""
+        return tracker.remaining == 0 and not tracker.stream_open and tracker.open_groups == 0
+
     async def _signal_stall(self) -> None:
         """Notify the lifecycle (once) that this partition has stalled.
 
@@ -1486,7 +1663,7 @@ class PartitionProcessor:
             collect_result = await self._call_on_task_complete(task, window, result)
             await self._deliver_task_collect(task, collect_result, log)
 
-            if self._keep_window_results:
+            if self._keeps_outcomes(window):
                 window.results.append(result)
                 self._move_output_charge(window, charged_output)
                 charged_output = 0
@@ -1526,8 +1703,11 @@ class PartitionProcessor:
                     # delivery of its messages starts, and the message
                     # result of on_message_complete is not delivered.
                     await self._send_execute_dlq(task, e.error, attempts=retry_count + 1)
-                if self._keep_window_results:
-                    window.results.append(e.result)
+                if self._keeps_outcomes(window):
+                    if window.group is None:
+                        window.results.append(e.result)
+                    else:
+                        window.errors.append(e.error)
                     self._move_output_charge(window, charged_output)
                     charged_output = 0
                 task_error = e.error
@@ -1539,9 +1719,13 @@ class PartitionProcessor:
             # terminal failure for this task (the group treats unexpected
             # exceptions like retries-exhausted failures).
             synthesized_result, task_error = taskflow.synthesize_internal_failure(task, e)
-            if self._keep_window_results:
-                window.results.append(synthesized_result)
-                self._keep_bytes(window, synthesized_result)
+            if self._keeps_outcomes(window):
+                if window.group is None:
+                    window.results.append(synthesized_result)
+                    self._keep_bytes(window, synthesized_result)
+                else:
+                    window.errors.append(task_error)
+                    self._keep_bytes(window, task_error)
 
         finally:
             # Released on every path; a retry charges its own outcome when it ends.
@@ -1569,10 +1753,34 @@ class PartitionProcessor:
             # message trackers and window.completed_count when it finishes.
             return
 
+        if window.group is not None:
+            self._count_group_outcome(window.group, task_result, task_error)
         await self._settle_message_trackers(task, task_result, task_error)
         window.completed_count += 1
-        if window.is_complete:
+        if not window.is_complete:
+            return
+        if window.group is not None:
+            await self._complete_group(window)
+        else:
             await self._complete_window(window)
+
+    def _keeps_outcomes(self, window: Window) -> bool:
+        """Whether a hook will read the outcomes of this window: on_window_complete, or on_group_complete for a group."""
+        if window.group is not None:
+            return self._keep_group_results
+        return self._keep_window_results
+
+    @staticmethod
+    def _count_group_outcome(
+        group: TaskGroup, task_result: ExecutorResult | None, task_error: ExecutorError | None
+    ) -> None:
+        """Move one counter of the group: succeeded, failed, or replaced when the run ended with neither."""
+        if task_result is not None:
+            group.succeeded += 1
+        elif task_error is not None:
+            group.failed += 1
+        else:
+            group.replaced += 1
 
     def _spawn_run(self, task: ExecutorTask, window: Window, retry_count: int = 0) -> None:
         """Start one run of ``task`` as a tracked background task."""
@@ -1637,11 +1845,12 @@ class PartitionProcessor:
             self._note_suppressed_delivery('on_task_complete')
         elif collect_result and self._on_collect:
             try:
-                await self._on_collect(
+                outcomes = await self._on_collect(
                     collect_result,
                     self._partition_id,
                     message_context=self._message_context(task.source_offsets),
                 )
+                self._count_skipped_deliveries(task.group, outcomes)
             except SinkDeliveryFailedError as e:
                 # Delivery (including the DLQ fallback) could not be
                 # confirmed. Mark every affected message tracker so
@@ -1686,6 +1895,20 @@ class PartitionProcessor:
                     offset_action='stall' if self._on_dlq_failure == 'stall' else 'commit',
                 )
                 raise
+
+    @staticmethod
+    def _count_skipped_deliveries(group: TaskGroup | None, outcomes: object) -> None:
+        """Count on ``group`` each sink whose delivery of one result ended in ``skip``.
+
+        ``outcomes`` is what the collect callback answered: the outcome of
+        each sink, or anything else from a callback that reports none.
+        """
+        if group is None or not isinstance(outcomes, dict):
+            return
+        for key, outcome in outcomes.items():
+            if outcome == DeliveryOutcome.SKIPPED:
+                ref = sink_ref(key)
+                group.skipped_deliveries[ref] = group.skipped_deliveries.get(ref, 0) + 1
 
     def _note_task_failed(self, task: ExecutorTask, e: ExecutorTaskError, log: Any) -> None:
         """Count, record and log a run that ended in an executor failure."""
@@ -1766,6 +1989,9 @@ class PartitionProcessor:
         takes a slot of its own.
         """
         for new_task in taskflow.link_replacements(task, list(replacements)):
+            # A replacement joins the group of the task it replaces (it also
+            # shares that task's window); it adds nothing to the group's labels.
+            new_task.group = task.group
             new_held = text_bytes(new_task.stdin)
             if self._account is not None:
                 self._account.charge(1, new_held)
@@ -1814,7 +2040,7 @@ class PartitionProcessor:
             # replaced_by path: neither results nor errors is appended.
             # The replacements will eventually report their own outcomes
             # through this same loop and settle the tracker.
-            if tracker.remaining == 0 and not tracker.completion_fired:
+            if self._message_is_done(tracker) and not tracker.completion_fired:
                 await self._finalize_message_tracker(tracker)
 
     async def _complete_window(self, window: Window) -> None:
@@ -1908,6 +2134,136 @@ class PartitionProcessor:
             offset_lag.labels(partition=str(self._partition_id)).set(self._offset_tracker.pending_count)
             await self._note_commit_due()
 
+    async def _complete_group(self, window: Window) -> None:
+        """Finish a group whose tasks all ended: its hook and delivery, its note check, then maybe its message.
+
+        The hook runs only when the handler overrides it, and only then are
+        the group's results kept. The group's message finishes here when this
+        was its last open group and its stream has ended.
+        """
+        group = window.group
+        assert group is not None
+        message = group.source_message
+        # Present: a tracker leaves only when its message finishes, and that
+        # waits for this group (``open_groups``).
+        tracker = self._message_trackers[message.offset]
+        with self._request_ids.scope([message.request_id]):
+            group.finished_at = time.monotonic()
+            if self._keep_group_results:
+                collect_result = await self._call_on_group_complete(window, group)
+                await self._deliver_group_collect(group, collect_result, tracker)
+            invalid = drop_invalid_notes(group)
+            if invalid:
+                logger.error(
+                    'group_notes_invalid',
+                    category='handler',
+                    partition=self._partition_id,
+                    offset=message.offset,
+                    group_index=group.index,
+                    keys=invalid,
+                )
+            # The hook and its delivery have ended: the kept outcomes have no
+            # reader left.
+            self._release_kept_bytes(window)
+            window.results.clear()
+            window.errors.clear()
+            tracker.open_groups -= 1
+            if self._message_is_done(tracker) and not tracker.completion_fired:
+                await self._finish_message(tracker)
+
+    async def _call_on_group_complete(self, window: Window, group: TaskGroup) -> CollectResult | None:
+        """Call ``on_group_complete`` with its hook context, time it and record it; a raise is logged."""
+        offset = group.source_message.offset
+        bind_contextvars(hook='on_group_complete', offset=offset, window_id=window.window_id)
+        hook_token = bind_hook_context(
+            hook='on_group_complete',
+            partition=self._partition_id,
+            window_id=window.window_id,
+            offset=offset,
+            offsets=(offset,),
+        )
+        started = time.monotonic()
+        try:
+            collect_result = await self._handler.on_group_complete(group, window.results, window.errors)
+        except Exception as e:
+            # Log and move on, as for on_message_complete: the group counts as
+            # finished, so a handler bug cannot hold its message open.
+            logger.error(
+                'on_group_complete_failed',
+                category='handler',
+                partition=self._partition_id,
+                offset=offset,
+                group_index=group.index,
+                error=str(e),
+                exc_info=True,
+            )
+            collect_result = None
+        finally:
+            unbind_contextvars('hook', 'offset', 'window_id')
+            clear_hook_context(hook_token)
+        duration = time.monotonic() - started
+        handler_duration.labels(hook='on_group_complete').observe(duration)
+        if self._recorder:
+            self._recorder.record_group_complete(
+                partition=self._partition_id,
+                offset=offset,
+                window_id=window.window_id,
+                group_index=group.index,
+                duration=duration,
+                task_count=group.task_count,
+                succeeded=group.succeeded,
+                failed=group.failed,
+                replaced=group.replaced,
+                output_message_count=len(collect_result.kafka) if collect_result else 0,
+            )
+        return collect_result
+
+    async def _deliver_group_collect(
+        self, group: TaskGroup, collect_result: CollectResult | None, tracker: MessageTracker
+    ) -> None:
+        """Deliver what ``on_group_complete`` returned with the message context; a lost delivery may stall the offset.
+
+        The rules are those of the message result: an unconfirmed delivery
+        marks the message, so its offset stalls when the message finishes;
+        any other error follows ``dlq.on_send_failure``.
+        """
+        if not collect_result or self._on_collect is None:
+            return
+        if self._deliveries_suppressed:
+            self._note_suppressed_delivery('on_group_complete')
+            return
+        offset = tracker.source_message.offset
+        try:
+            outcomes = await self._on_collect(
+                collect_result,
+                self._partition_id,
+                message_context=MessageContext(source_messages=[tracker.source_message], states=[tracker.dlq]),
+            )
+            self._count_skipped_deliveries(group, outcomes)
+        except SinkDeliveryFailedError as e:
+            tracker.delivery_failed = True
+            logger.error(
+                'on_group_complete_delivery_failed',
+                category='sink',
+                partition=self._partition_id,
+                offset=offset,
+                group_index=group.index,
+                error=str(e),
+            )
+        except Exception as e:
+            if self._on_dlq_failure == 'stall':
+                tracker.delivery_failed = True
+            logger.error(
+                'on_group_complete_sink_delivery_failed',
+                category='handler',
+                partition=self._partition_id,
+                offset=offset,
+                group_index=group.index,
+                error=str(e),
+                offset_action='stall' if self._on_dlq_failure == 'stall' else 'commit',
+                exc_info=True,
+            )
+
     async def _finalize_message_tracker(self, tracker: MessageTracker) -> None:
         """Finish a message (see :meth:`_finish_message`) with its request id in the log context."""
         with self._request_ids.scope([tracker.source_message.request_id]):
@@ -1945,6 +2301,7 @@ class PartitionProcessor:
             errors=list(tracker.errors),
             started_at=tracker.started_at,
             finished_at=tracker.finished_at,
+            groups=list(tracker.groups),
         )
 
         bind_contextvars(
@@ -2002,6 +2359,7 @@ class PartitionProcessor:
                 failed=tracker.failed_count,
                 replaced=replaced,
                 output_message_count=len(on_complete_result.kafka) if on_complete_result else 0,
+                group_count=len(tracker.groups) if self._stream_mode else None,
             )
 
         delivery_failed = tracker.delivery_failed

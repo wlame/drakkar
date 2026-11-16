@@ -14,6 +14,7 @@ import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar.consumer import KafkaConsumer
+from drakkar.handler import uses_arrange_stream
 from drakkar.metrics import (
     assigned_partitions,
     backpressure_active,
@@ -135,6 +136,13 @@ class KafkaSource:
             )
             slept = await wait_for_aligned_startup(min_wait, interval)
             await log.ainfo('startup_align_done', category='lifecycle', slept_seconds=round(slept, 3))
+
+        if uses_arrange_stream(ctx.handler):
+            await log.ainfo(
+                'arrange_stream_enabled',
+                category='lifecycle',
+                hint='executor.window_size has no effect: a stream handler takes one message at a time',
+            )
 
         self.consumer = KafkaConsumer(
             connection=config.declared_connection('sources.kafka.connection', 'kafka', config.sources.kafka.connection),

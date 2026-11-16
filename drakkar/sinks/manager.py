@@ -210,6 +210,8 @@ class CollectCallback(Protocol):
     ``MessageContext.window()`` marks a window result, which has no source
     message. ``None`` means no context (fail closed): a ``dlq`` outcome then
     follows ``dlq.on_send_failure`` (see ``SinkManager.deliver_all``).
+    The answer is the outcome of each sink, or ``None`` from a callback that
+    reports none.
     """
 
     def __call__(
@@ -217,7 +219,7 @@ class CollectCallback(Protocol):
         result: CollectResult,
         partition_id: int,
         message_context: MessageContext | None = None,
-    ) -> Awaitable[None]: ...
+    ) -> Awaitable[dict[SinkKey, DeliveryOutcome] | None]: ...
 
 
 @dataclass

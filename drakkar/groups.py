@@ -15,6 +15,31 @@ class ArrangeStreamError(Exception):
     """A value that ``arrange_stream`` produced breaks the rules of the hook."""
 
 
+def check_stream_item(item: object, message: SourceMessage) -> list[ExecutorTask]:
+    """Return ``item`` as the task list of one group, or raise ``ArrangeStreamError``.
+
+    The item must be a list of tasks, each covering only ``message``, and no
+    task may belong to a group already: the same task object in two groups
+    (or twice in one list) would count its outcome twice.
+    """
+    if not isinstance(item, list):
+        raise ArrangeStreamError(f'arrange_stream must yield a list of ExecutorTask, got {type(item).__name__}')
+    expected_offsets = [message.offset]
+    seen: set[int] = set()
+    for task in item:
+        if not isinstance(task, ExecutorTask):
+            raise ArrangeStreamError(f'arrange_stream must yield a list of ExecutorTask, got {type(task).__name__}')
+        if task.source_offsets != expected_offsets:
+            raise ArrangeStreamError(
+                f'arrange_stream yielded task {task.task_id} with source_offsets {task.source_offsets}; '
+                f'a stream task covers only its message, offset {message.offset}'
+            )
+        if task.group is not None or id(task) in seen:
+            raise ArrangeStreamError(f'arrange_stream yielded task {task.task_id} twice; a task belongs to one group')
+        seen.add(id(task))
+    return item
+
+
 def collect_group_labels(tasks: list[ExecutorTask], names: Sequence[str]) -> dict[str, list[str]]:
     """Return, for each declared label name, the values of that label on the tasks.
 
