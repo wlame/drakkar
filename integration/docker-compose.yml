@@ -284,6 +284,17 @@ services:
       # it). Set on all three workers of the main cluster, because any of
       # them may own the partition of that message.
       DK_SOURCES__KAFKA__ON_PARSE_ERROR: "dlq"
+      # Detach is on for the three workers of the main cluster, with the
+      # operator routes, so scenario-detach.sh can take worker-2 and
+      # worker-3 out of the consumer group and bring them back. The lease
+      # is the shortest allowed (40 s), so a slot that a killed worker held
+      # is free again within 40 s; no cooldown, so the scenario can ask for
+      # a handler detach right after an attach. With max_detached 1 (the
+      # default) at most one of the three is away at a time.
+      DK_SOURCES__KAFKA__DETACH__ENABLED: "true"
+      DK_SOURCES__KAFKA__DETACH__LEASE: "40s"
+      DK_SOURCES__KAFKA__DETACH__COOLDOWN: "0"
+      DK_UI__DETACH_ENABLED: "true"
       # HTTP source is enabled ONLY on worker-1. Worker-2 and worker-3
       # leave sources.http.enabled=false (the shared yaml default) — proving
       # the load-balancer caveat documented in docs/webapp.md: the
@@ -375,6 +386,11 @@ services:
       DK_CONNECTIONS__CONSUL__MAIN__TOKEN: "6a1f3c2e-0d4b-4c8e-9a7f-2b5e8d1c4f90"
       # Same parse-error policy as worker-1 (see there).
       DK_SOURCES__KAFKA__ON_PARSE_ERROR: "dlq"
+      # Same detach settings as worker-1 (see there).
+      DK_SOURCES__KAFKA__DETACH__ENABLED: "true"
+      DK_SOURCES__KAFKA__DETACH__LEASE: "40s"
+      DK_SOURCES__KAFKA__DETACH__COOLDOWN: "0"
+      DK_UI__DETACH_ENABLED: "true"
       # App-config demo (docs/app-config.md): override one field of the
       # handler-declared AppConfig via the handler's OWN env prefix —
       # never DK_APP__* (the framework rejects that). Only worker-2, so
@@ -424,6 +440,11 @@ services:
       DK_CONNECTIONS__CONSUL__MAIN__TOKEN: "6a1f3c2e-0d4b-4c8e-9a7f-2b5e8d1c4f90"
       # Same parse-error policy as worker-1 (see there).
       DK_SOURCES__KAFKA__ON_PARSE_ERROR: "dlq"
+      # Same detach settings as worker-1 (see there).
+      DK_SOURCES__KAFKA__DETACH__ENABLED: "true"
+      DK_SOURCES__KAFKA__DETACH__LEASE: "40s"
+      DK_SOURCES__KAFKA__DETACH__COOLDOWN: "0"
+      DK_UI__DETACH_ENABLED: "true"
     ports:
       - "9093:9093"
       - "8083:8083"

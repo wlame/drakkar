@@ -9,6 +9,7 @@ the ``drakkar`` package itself): these pin the harness worker's own
 behaviour so any implementation of it stays provably identical.
 """
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -123,6 +124,62 @@ def test_ripgrep_handler_declares_a_cluster_tick_every_30_seconds() -> None:
     assert meta.scope == 'cluster'
     assert meta.lease_seconds is None
     assert meta.on_error == 'continue'
+
+
+class _FakeDetach:
+    """Stands in for ``BaseDrakkarHandler.detach``: records each call and
+    answers a success, so the periodic task runs with no Kafka source."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def __call__(self, duration: float | None = None, reason: str = '') -> dk.DetachResult:
+        self.calls.append({'duration': duration, 'reason': reason})
+        return dk.DetachResult(detached=True, reason='', until=datetime(2026, 1, 1, tzinfo=UTC))
+
+
+def test_ripgrep_handler_declares_detach_on_request_every_2_seconds_on_each_worker() -> None:
+    meta = getattr(RipgrepHandler.detach_on_request, PERIODIC_ATTR)
+
+    assert meta.interval == 2
+    assert meta.scope == 'worker'
+
+
+async def test_detach_on_request_with_a_request_file_detaches_for_20_seconds_and_removes_the_file(
+    tmp_path: Path,
+) -> None:
+    handler = RipgrepHandler()
+    fake_detach = _FakeDetach()
+    handler.detach = fake_detach  # type: ignore[method-assign]
+    request_file = tmp_path / 'detach-request-worker-3'
+    request_file.touch()
+    handler.detach_request_file = request_file
+
+    await handler.detach_on_request()
+
+    assert fake_detach.calls == [{'duration': 20, 'reason': 'harness request'}]
+    assert not request_file.exists()
+
+
+async def test_detach_on_request_without_a_request_file_does_not_detach(tmp_path: Path) -> None:
+    handler = RipgrepHandler()
+    fake_detach = _FakeDetach()
+    handler.detach = fake_detach  # type: ignore[method-assign]
+    handler.detach_request_file = tmp_path / 'detach-request-worker-3'
+
+    await handler.detach_on_request()
+
+    assert fake_detach.calls == []
+
+
+async def test_detach_on_request_before_on_startup_does_not_detach() -> None:
+    handler = RipgrepHandler()
+    fake_detach = _FakeDetach()
+    handler.detach = fake_detach  # type: ignore[method-assign]
+
+    await handler.detach_on_request()
+
+    assert fake_detach.calls == []
 
 
 def test_http_search_handler_declares_search_request_and_response_http_types() -> None:

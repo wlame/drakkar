@@ -26,6 +26,7 @@ import os
 import random
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import structlog
 from metrics import (
@@ -74,6 +75,22 @@ HTTP_FILE_PATH = '/tmp/search-corpus'
 
 # Seconds between two slots of the harness cluster task (harness_cluster_tick).
 CLUSTER_TICK_INTERVAL_SECONDS = 30
+
+# The detach example (detach_on_request): how often the task looks for a
+# request file, and how long a requested detach lasts.
+DETACH_REQUEST_CHECK_SECONDS = 2
+DETACH_SECONDS = 20
+
+
+def _take_request_file(path: Path) -> bool:
+    """Remove the file at ``path``; true when it was there. One call, so a
+    request is taken once even when the task runs again at once."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
 
 # ui.timeline demo: byte thresholds for the human-readable file_size label,
 # largest first so the first unit the count clears wins the suffix.
@@ -277,6 +294,9 @@ class RipgrepHandler(
             if isinstance(self.app_config, AppConfig)
             else None,
         )
+        # The request file of the detach example: one per worker, in the
+        # folder that every worker of the harness shares.
+        self.detach_request_file = Path(config.storage.shared_dir) / f'detach-request-{config.worker.resolved_name()}'
         return config
 
     async def on_ready(self, config: dk.DrakkarConfig, db_pool: object) -> None:
@@ -331,6 +351,38 @@ class RipgrepHandler(
             'harness_cluster_tick',
             category='periodic',
             slot=int(time.time()) // CLUSTER_TICK_INTERVAL_SECONDS * CLUSTER_TICK_INTERVAL_SECONDS,
+        )
+
+    # -- A temporary detach, asked for by a file ------------------------
+    #
+    # An example of the handler API: the worker leaves its consumer group
+    # for DETACH_SECONDS and then joins it again by itself. A detach must
+    # be called from a periodic task (or another place outside a
+    # partition's work), because it waits until every partition of this
+    # worker has drained. The harness asks for it with a file in the
+    # shared folder (scenario-detach.sh); a real handler would ask for it
+    # when its own check finds a reason, such as a slow disk.
+
+    # Where the request file is; set in on_startup.
+    detach_request_file: Path | None = None
+
+    @dk.periodic(DETACH_REQUEST_CHECK_SECONDS)
+    async def detach_on_request(self):
+        """Detach for DETACH_SECONDS when the file detach_request_file exists."""
+        if self.detach_request_file is None:
+            return
+        # The file call runs on a thread: a disk call must not stop the event loop.
+        if not await asyncio.to_thread(_take_request_file, self.detach_request_file):
+            return
+        result = await self.detach(duration=DETACH_SECONDS, reason='harness request')
+        # result.detached is false when the framework refused: result.reason
+        # says why (for example budget_full when other workers are away).
+        await logger.awarning(
+            'harness_detach_result',
+            category='handler',
+            detached=result.detached,
+            reason=result.reason,
+            until=dk.format_rfc3339_micro(result.until) if result.until else None,
         )
 
     # -------------------------------------------------------------------
