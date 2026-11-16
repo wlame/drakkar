@@ -93,15 +93,20 @@ class KafkaDetachConfig(ConfigModel):
         ),
     )
 
-    @model_validator(mode='after')
-    def _validate_default_within_max(self) -> 'KafkaDetachConfig':
-        """The default duration must be one that a request may ask for."""
+    def check_durations(self) -> None:
+        """Refuse a default duration that a request could not ask for.
+
+        The root config calls this after the range check of each value, at load
+        and again after ``on_startup``, so both give the same message.
+
+        Raises:
+            ValueError: ``default_duration`` is above ``max_duration``.
+        """
         if self.default_duration > self.max_duration:
             raise ValueError(
                 f'sources.kafka.detach.default_duration ({seconds_text(self.default_duration)}) must be <= '
                 f'sources.kafka.detach.max_duration ({seconds_text(self.max_duration)})'
             )
-        return self
 
 
 class KafkaSourceConfig(ConfigModel):

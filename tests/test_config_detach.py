@@ -169,3 +169,24 @@ def test_a_hook_that_turns_the_ui_switch_on_alone_gets_the_load_message():
 
     with pytest.raises(ValueError, match=UI_DETACH_WITHOUT_FEATURE_MESSAGE):
         app._lifecycle._check_config_after_startup()
+
+
+def test_a_hook_that_puts_the_default_duration_above_the_max_gets_the_load_message():
+    app = _app()
+    app._config.sources.kafka.detach.default_duration = 7200.0
+    app._config.sources.kafka.detach.max_duration = 3600.0
+
+    with pytest.raises(ValueError) as raised:
+        app._lifecycle._check_config_after_startup()
+
+    assert str(raised.value) == (
+        'sources.kafka.detach.default_duration (2h) must be <= sources.kafka.detach.max_duration (1h)'
+    )
+
+
+def test_the_range_of_the_default_duration_is_checked_before_its_order(tmp_path, monkeypatch):
+    with pytest.raises(ValueError) as raised:
+        _load(tmp_path, monkeypatch, _kafka_document({'default_duration': '10d', 'max_duration': '7d'}))
+
+    assert 'sources.kafka.detach.default_duration must be from 10s to 7d, got 10d' in str(raised.value)
+    assert 'must be <=' not in str(raised.value)

@@ -2724,6 +2724,21 @@
         }
       },
       "path": "sources.kafka.detach.min_attached"
+    },
+    {
+      "name": "detach_default_duration_range_before_its_order",
+      "yaml": {
+        "sources": {
+          "kafka": {
+            "detach": {
+              "default_duration": "10d",
+              "max_duration": "7d"
+            }
+          }
+        }
+      },
+      "message": "sources.kafka.detach.default_duration must be from 10s to 7d, got 10d",
+      "path": "sources.kafka.detach.default_duration"
     }
   ],
   "load_values": [

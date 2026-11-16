@@ -375,17 +375,18 @@ class DrakkarConfig(BaseSettings):
             )
 
     def check_detach(self) -> None:
-        """Refuse a detach that has no store for its budget, and a UI switch with the feature off.
+        """Refuse detach durations out of order, a detach with no store for its budget, and a UI switch alone.
 
         The budget is needed only when the Kafka source is on: with it off there is
         no group to leave. The load calls this, and so does the startup after
         ``on_startup``, which may have changed the keys: both give the same messages.
 
         Raises:
-            ValueError: detach is on with the Kafka source on and ``autodiscover`` off,
-                or ``ui.detach_enabled`` is on with detach off.
+            ValueError: ``default_duration`` is above ``max_duration``, detach is on with the
+                Kafka source on and ``autodiscover`` off, or ``ui.detach_enabled`` is on with detach off.
         """
         detach = self.sources.kafka.detach
+        detach.check_durations()
         if detach.enabled and self.sources.kafka.enabled and not self.autodiscover.enabled:
             raise ValueError(DETACH_WITHOUT_AUTODISCOVER_MESSAGE)
         if self.ui.detach_enabled and not detach.enabled:

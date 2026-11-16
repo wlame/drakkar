@@ -787,7 +787,8 @@ class AppLifecycle:
         the config load.
 
         Raises:
-            ValueError: the UI, the recorder or ``autodiscover`` cannot run as configured.
+            ValueError: the UI, the recorder or ``autodiscover`` cannot run as configured, or the detach
+                durations, the detach store or the UI detach switch break their rules.
         """
         app = self._app
         app._config.check_what_needs_the_api()
