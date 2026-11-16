@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `3ded9044389c7248`.
+Registry version: `42b0f9987e2461a5`.
 
 ## Concepts
 
@@ -983,6 +983,36 @@ Partition loops that ended on an unexpected error, with outcome restarted or dea
 **Healthy:** 0 outside of debugging.
 
 **Related:** `rule:partition-paused-by-debug`
+
+### `metric:drakkar_detached`
+
+1 while this worker is detached from its consumer group.
+
+**Meaning:** The worker left its consumer group for a bounded time; it takes no Kafka input until it attaches again.
+
+**Healthy:** 0 outside of a detach that an operator or the handler asked for.
+
+**Related:** `config:sources.kafka.detach.enabled`, `event:worker_detached`
+
+### `metric:drakkar_detach_requests_total`
+
+Detach requests by origin and outcome.
+
+**Meaning:** The outcome is detached, or the reason why the request was refused.
+
+**Healthy:** Few requests; refusals with store_unavailable or leave_failed need a look.
+
+**Related:** `config:sources.kafka.detach.max_detached`, `event:worker_detached`
+
+### `metric:drakkar_attach_total`
+
+Returns to the consumer group after a detach, by cause.
+
+**Meaning:** The cause says what ended the detach; lease_lost and too_few_workers mean the framework ended it early.
+
+**Healthy:** Mostly the causes handler, operator and deadline.
+
+**Related:** `config:sources.kafka.detach.lease`, `event:worker_attached`
 
 ### `metric:drakkar_total_queued`
 
@@ -2161,7 +2191,7 @@ The size of the values in the cache file.
 
 Provider operations by feature, provider, operation and outcome.
 
-**Meaning:** Outcomes other than ok mean the provider failed, timed out, was skipped by an open breaker or had not started.
+**Meaning:** Outcomes other than ok mean the provider failed, timed out, was skipped by an open breaker or had not started. The feature detach counts the store calls of a detach.
 
 **Healthy:** Mostly outcome ok.
 
@@ -2403,6 +2433,32 @@ Kafka took a partition away from this worker.
 **Action:** Frequent revokes mean the group is unstable; check session and poll timeouts and the worker restarts.
 
 **Related:** `concept:at-least-once`, `metric:drakkar_rebalance_events_total`
+
+### `event:worker_detached`
+
+This worker left its consumer group for a bounded time.
+
+**When:** Once per detach, after the revoke drain ended and a budget slot was taken.
+
+**Fields:**
+- `metadata`: The origin, the reason, the deadline (until) and the index of the budget slot.
+- `partition`: Always -1; the row belongs to the worker.
+
+**Action:** Check the reason; the worker takes no Kafka input until it attaches again.
+
+**Related:** `config:sources.kafka.detach.enabled`, `metric:drakkar_detached`
+
+### `event:worker_attached`
+
+This worker joined its consumer group again after a detach.
+
+**When:** Once per detach that ended, whatever the cause.
+
+**Fields:**
+- `metadata`: The cause that ended the detach and the seconds the worker was away.
+- `partition`: Always -1; the row belongs to the worker.
+
+**Related:** `config:sources.kafka.detach.enabled`, `metric:drakkar_attach_total`
 
 ### `event:committed`
 

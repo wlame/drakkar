@@ -256,6 +256,10 @@ def _record_calls() -> dict:
         'record_assigned': lambda w: w.record_assigned([0]),
         'record_revoked': lambda w: w.record_revoked([0]),
         'record_partition_stalled': lambda w: w.record_partition_stalled(0),
+        'record_worker_detached': lambda w: w.record_worker_detached(
+            origin='handler', reason='reindex', until=1_800_000_000.0, slot=0
+        ),
+        'record_worker_attached': lambda w: w.record_worker_attached(cause='deadline', detached_seconds=60.0),
         'record_offload': lambda w: w.record_offload(
             hook='arrange', partition=0, function='f', duration=0.1, queued=0.0, status='ok', offsets=(10,), offset=10
         ),

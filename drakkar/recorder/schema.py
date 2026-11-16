@@ -69,6 +69,8 @@ class EventType(StrEnum):
     MESSAGE_COMPLETE = 'message_complete'
     WINDOW_COMPLETE = 'window_complete'
     GROUP_COMPLETE = 'group_complete'
+    WORKER_DETACHED = 'worker_detached'
+    WORKER_ATTACHED = 'worker_attached'
 
     # --- Task lifecycle (subprocess pool) ---
     TASK_STARTED = 'task_started'

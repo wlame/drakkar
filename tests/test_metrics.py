@@ -1058,3 +1058,25 @@ def test_pending_bytes_help_names_every_hook_that_keeps_output():
     assert pending_bytes._documentation.endswith(
         'or kept for on_group_complete, on_message_complete and on_window_complete'
     )
+
+
+# === Detach metrics ===
+
+
+def test_detach_metrics_have_their_names_types_labels_and_help():
+    from prometheus_client import Counter, Gauge
+
+    from drakkar.metrics import attach_total, detach_requests, detached
+
+    assert isinstance(detached, Gauge)
+    assert detached._name == 'drakkar_detached'
+    assert detached._labelnames == ()
+    assert detached._documentation == '1 while this worker is detached from its consumer group'
+    assert isinstance(detach_requests, Counter)
+    assert detach_requests._name == 'drakkar_detach_requests'
+    assert detach_requests._labelnames == ('origin', 'outcome')
+    assert detach_requests._documentation == 'Detach requests by origin and outcome'
+    assert isinstance(attach_total, Counter)
+    assert attach_total._name == 'drakkar_attach'
+    assert attach_total._labelnames == ('cause',)
+    assert attach_total._documentation == 'Returns to the consumer group after a detach, by cause'

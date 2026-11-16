@@ -122,6 +122,31 @@ class TestRowShapes:
             ('revoked', 1),
         ]
 
+    def test_record_worker_detached_writes_one_worker_row_with_its_metadata(self, writer):
+        writer.record_worker_detached(origin='operator', reason='rebuild index', until=1_800_000_030.5, slot=1)
+
+        assert len(writer.rows) == 1
+        row = writer.last
+        assert row['event'] == 'worker_detached'
+        assert row['partition'] == -1
+        assert row['offset'] is None
+        assert writer.last_metadata() == {
+            'origin': 'operator',
+            'reason': 'rebuild index',
+            'until': '2027-01-15T08:00:30.500000Z',
+            'slot': 1,
+        }
+
+    def test_record_worker_attached_writes_one_worker_row_with_its_metadata(self, writer):
+        writer.record_worker_attached(cause='deadline', detached_seconds=900.25)
+
+        assert len(writer.rows) == 1
+        row = writer.last
+        assert row['event'] == 'worker_attached'
+        assert row['partition'] == -1
+        assert row['offset'] is None
+        assert writer.last_metadata() == {'cause': 'deadline', 'detached_seconds': 900.25}
+
     def test_record_periodic_run_with_slot_adds_scope_and_slot(self, writer):
         writer.record_periodic_run('refresh_rates', duration=1.5, status='ok', slot=1_800_000_030)
 

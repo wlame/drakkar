@@ -359,6 +359,26 @@ consume_pause_active = Gauge(
     'Whether consuming is paused by an operator debug pause (1=paused, 0=flowing)',
 )
 
+# --- Detach: a worker leaves its consumer group for a bounded time ---
+
+detached = Gauge(
+    'drakkar_detached',
+    '1 while this worker is detached from its consumer group',
+)
+
+# ``outcome`` is ``detached`` or the refusal reason of the request.
+detach_requests = Counter(
+    'drakkar_detach_requests_total',
+    'Detach requests by origin and outcome',
+    ['origin', 'outcome'],
+)
+
+attach_total = Counter(
+    'drakkar_attach_total',
+    'Returns to the consumer group after a detach, by cause',
+    ['cause'],
+)
+
 total_queued = Gauge(
     'drakkar_total_queued',
     'Total messages buffered in partition queues plus in-flight tasks',

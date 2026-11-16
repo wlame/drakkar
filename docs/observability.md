@@ -159,6 +159,9 @@ Prometheus needed for a quick read.
 | `drakkar_partition_processor_deaths_total` | Counter | `partition`, `outcome` | Partition loops that exited on an unexpected error. `outcome="restarted"` came back; `outcome="dead"` gave up and now fails `/readyz`. Alert on any non-zero rate — see [Deployment](deployment.md#dead-partition-loops) |
 | `drakkar_backpressure_active` | Gauge | -- | Whether Kafka fetching is paused because queued messages reached `sources.kafka.max_queued_messages` (see [backpressure](performance.md#backpressure)). `1` = paused, `0` = flowing |
 | `drakkar_consume_pause_active` | Gauge | -- | Whether an operator [debug pause](consume-pause.md) from the Live page holds consuming. `1` = paused, `0` = flowing |
+| `drakkar_detached` | Gauge | -- | `1` while this worker is detached from its consumer group (`sources.kafka.detach`) |
+| `drakkar_detach_requests_total` | Counter | `origin`, `outcome` | Detach requests; the outcome is `detached` or the refusal reason |
+| `drakkar_attach_total` | Counter | `cause` | Returns to the consumer group after a detach, by cause |
 | `drakkar_total_queued` | Gauge | -- | Total messages buffered in all partition queues plus in-flight tasks |
 | `drakkar_pending_tasks` | Gauge | -- | Tasks created and not yet settled: waiting for an executor slot, running, or in `on_task_complete` and its delivery. The actual count; reservations are not in it. New windows wait while it plus the reserved tasks reach `executor.max_pending_tasks`; it can pass the limit by the admitted window's fan-out beyond its estimate (normally one message) |
 | `drakkar_pending_bytes` | Gauge | -- | Bytes held for pending tasks and their results: task stdin plus stdout and stderr of results in hooks and delivery or kept for `on_group_complete`, `on_message_complete` and `on_window_complete`. The actual count, reservations not included; new windows wait while it plus the reserved bytes reach `executor.max_pending_bytes` |
@@ -378,7 +381,7 @@ Every call from the worker to a provider is one **operation**: the registry make
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `drakkar_provider_calls_total` | Counter | `feature` (`registry`, `election`, `recorder`, and `ui` for the holder reads of the [Autodiscover view](fleet.md#autodiscover-view)), `provider`, `op`, `outcome` | Provider operations by outcome: `ok`, `error`, `timeout`, `skipped_open` (the breaker was open, nothing was called) or `not_started` (the provider has not started). A retried operation counts once, with the outcome of its last attempt. |
+| `drakkar_provider_calls_total` | Counter | `feature` (`registry`, `election`, `recorder`, `detach` for the store calls of a detach, and `ui` for the holder reads of the [Autodiscover view](fleet.md#autodiscover-view)), `provider`, `op`, `outcome` | Provider operations by outcome: `ok`, `error`, `timeout`, `skipped_open` (the breaker was open, nothing was called) or `not_started` (the provider has not started). A retried operation counts once, with the outcome of its last attempt. |
 | `drakkar_provider_call_duration_seconds` | Histogram | `feature`, `provider`, `op` | Duration of one operation with its retries and the waits between them. Skipped and not started operations have no sample. Buckets: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30. |
 | `drakkar_provider_breaker_open` | Gauge | `feature`, `provider` | `1` while the circuit breaker of that provider is open. A breaker that stays open means the provider is down; the operations are skipped and the log carries `provider_breaker_opened`. Alert on it. |
 | `drakkar_fleet_registry_errors_total` | Counter | `op` | Registry operations that failed or timed out, and loop iterations that raised. An operation counts once, retries included, and an operation with no attempt (open breaker, not started) does not count. `op` is `start`, `publish`, `list`, `withdraw` or `stop`. |
@@ -997,6 +1000,8 @@ Indexed on `(partition, offset)`, `ts`, `dt`, `task_id`, `event`, `labels` (part
 | `sink_error` | One sink delivery attempt fails (`attempt` 0: the circuit is open) | `metadata` (sink_type, sink_name, error, attempt, action: retry/skip/dlq/failed — `dlq` only when a record was written, `skip` also for a window result, `failed` when no record could be written) |
 | `message_dlq` | A source message is written to the DLQ; no later delivery of it starts | `partition`, `offset`; for an HTTP request `origin='http'`, `request_id`, `partition=-1` and no `offset`; `metadata` (stage, sink, error, delivered_sinks, attempts) |
 | `sink_not_started` | A result's delivery to a sink does not start: its message is on the DLQ, or a `depends_on` dependency failed | `partition`; for an HTTP request `origin='http'`, `request_id`, `partition=-1`; `metadata` (sink, reason: message_dlq/dependency_failed) |
+| `worker_detached` | The worker left its consumer group for a bounded time (`sources.kafka.detach`) | `partition=-1`, `metadata` (origin, reason, until, slot) |
+| `worker_attached` | The worker joined its consumer group again after a detach | `partition=-1`, `metadata` (cause, detached_seconds) |
 | `committed` | Kafka offset committed | `partition`, `offset` |
 | `assigned` | Partition assigned during rebalance | `partition` |
 | `revoked` | Partition revoked during rebalance | `partition` |

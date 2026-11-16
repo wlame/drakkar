@@ -33,7 +33,7 @@ from drakkar.models import (
 from drakkar.recorder.fanout import WSFanout, WSSubscriber
 from drakkar.recorder.helpers import encode_json_str, sanitize_env_value
 from drakkar.recorder.schema import EventType
-from drakkar.timefmt import format_rfc3339_micro
+from drakkar.timefmt import format_epoch_micro, format_rfc3339_micro
 
 if TYPE_CHECKING:
     from drakkar.webapp.models import WebRequestContext
@@ -968,6 +968,52 @@ class EventWriter:
                     'partition': p,
                 }
             )
+
+    def record_worker_detached(self, *, origin: str, reason: str, until: float, slot: int) -> None:
+        """Record that this worker left its consumer group.
+
+        ``until`` is the deadline in epoch seconds, written in the canonical
+        timestamp format; ``slot`` is the index of the budget slot it holds.
+        The row belongs to the worker, not to a partition, so ``partition``
+        is -1.
+        """
+        self._record(
+            {
+                'ts': time.time(),
+                'event': EventType.WORKER_DETACHED,
+                'partition': -1,
+                'offset': None,
+                'metadata': encode_json_str(
+                    {
+                        'origin': origin,
+                        'reason': reason,
+                        'until': format_epoch_micro(until),
+                        'slot': slot,
+                    }
+                ),
+            }
+        )
+
+    def record_worker_attached(self, *, cause: str, detached_seconds: float) -> None:
+        """Record that this worker joined its consumer group again after a detach.
+
+        ``cause`` says what ended the detach; ``detached_seconds`` is how long
+        the worker was away. ``partition`` is -1, as for every worker row.
+        """
+        self._record(
+            {
+                'ts': time.time(),
+                'event': EventType.WORKER_ATTACHED,
+                'partition': -1,
+                'offset': None,
+                'metadata': encode_json_str(
+                    {
+                        'cause': cause,
+                        'detached_seconds': round(detached_seconds, 3),
+                    }
+                ),
+            }
+        )
 
     def record_partition_stalled(self, partition: int) -> None:
         """Record that a partition was paused because an offset stalled

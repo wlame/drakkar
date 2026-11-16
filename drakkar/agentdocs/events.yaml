@@ -41,6 +41,27 @@
     - concept:at-least-once
     - metric:drakkar_rebalance_events_total
 
+- key: worker_detached
+  summary: This worker left its consumer group for a bounded time.
+  when: Once per detach, after the revoke drain ended and a budget slot was taken.
+  fields:
+    partition: Always -1; the row belongs to the worker.
+    metadata: The origin, the reason, the deadline (until) and the index of the budget slot.
+  action: Check the reason; the worker takes no Kafka input until it attaches again.
+  related:
+    - config:sources.kafka.detach.enabled
+    - metric:drakkar_detached
+
+- key: worker_attached
+  summary: This worker joined its consumer group again after a detach.
+  when: Once per detach that ended, whatever the cause.
+  fields:
+    partition: Always -1; the row belongs to the worker.
+    metadata: The cause that ended the detach and the seconds the worker was away.
+  related:
+    - config:sources.kafka.detach.enabled
+    - metric:drakkar_attach_total
+
 - key: committed
   summary: The worker committed the watermark of a partition to Kafka.
   when: After a commit of a new watermark.

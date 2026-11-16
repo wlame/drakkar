@@ -120,6 +120,30 @@
   related:
     - rule:partition-paused-by-debug
 
+- key: drakkar_detached
+  summary: 1 while this worker is detached from its consumer group.
+  meaning: The worker left its consumer group for a bounded time; it takes no Kafka input until it attaches again.
+  healthy: 0 outside of a detach that an operator or the handler asked for.
+  related:
+    - config:sources.kafka.detach.enabled
+    - event:worker_detached
+
+- key: drakkar_detach_requests_total
+  summary: Detach requests by origin and outcome.
+  meaning: The outcome is detached, or the reason why the request was refused.
+  healthy: Few requests; refusals with store_unavailable or leave_failed need a look.
+  related:
+    - config:sources.kafka.detach.max_detached
+    - event:worker_detached
+
+- key: drakkar_attach_total
+  summary: Returns to the consumer group after a detach, by cause.
+  meaning: The cause says what ended the detach; lease_lost and too_few_workers mean the framework ended it early.
+  healthy: Mostly the causes handler, operator and deadline.
+  related:
+    - config:sources.kafka.detach.lease
+    - event:worker_attached
+
 - key: drakkar_total_queued
   summary: Messages in all partition queues plus tasks in flight.
   meaning: The total work held by the worker.
@@ -983,7 +1007,7 @@
 
 - key: drakkar_provider_calls_total
   summary: Provider operations by feature, provider, operation and outcome.
-  meaning: Outcomes other than ok mean the provider failed, timed out, was skipped by an open breaker or had not started.
+  meaning: Outcomes other than ok mean the provider failed, timed out, was skipped by an open breaker or had not started. The feature detach counts the store calls of a detach.
   healthy: Mostly outcome ok.
   promql:
     - title: Failed provider operations
