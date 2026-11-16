@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import time
 import traceback
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
@@ -51,6 +52,8 @@ import drakkar.probe as probe_module
 import drakkar.taskflow as taskflow
 from drakkar.cache import CacheScope
 from drakkar.executor import ExecutorTaskError
+from drakkar.groups import check_stream_item, drop_invalid_notes, new_task_group, open_arrange_stream
+from drakkar.handler import overridden_completion_hooks, uses_arrange_stream
 from drakkar.models import (
     CollectResult,
     ErrorAction,
@@ -63,7 +66,9 @@ from drakkar.models import (
     PostgresOp,
     RedisOp,
     SourceMessage,
+    TaskGroup,
 )
+from drakkar.partition import STREAM_CLOSE_TIMEOUT
 from drakkar.probe import _DetailsState, build_layout
 from drakkar.uiserver.runner_helpers import (
     _build_source_message,
@@ -78,6 +83,7 @@ from drakkar.uiserver.runner_models import (
     PlannedSinkRecord,
     ProbeCacheCall,
     ProbeError,
+    ProbeGroup,
     ProbeInput,
     ProbeStageResult,
     ProbeTaskEntry,
@@ -101,6 +107,14 @@ if TYPE_CHECKING:
 # Generous on purpose: this is a backstop against unbounded growth, not a
 # throughput control. An operator hitting it is doing something unusual.
 MAX_PROBE_WAITERS = 16
+
+# How many groups of a stream handler the probe runs. The report keeps every
+# task and its stdin, so running a whole message of thousands of tasks would
+# bring back the memory that streaming saves on a live worker.
+PROBE_MAX_STREAM_GROUPS = 5
+
+# What a pull of the stream gives when the generator has no group left.
+_STREAM_END = object()
 
 
 class ProbeBusyError(RuntimeError):
@@ -580,6 +594,10 @@ class RunState:
     timing: dict[str, float] = field(default_factory=dict)
     errors: list[ProbeError] = field(default_factory=list)
     details_state: _DetailsState | None = None
+    # ``None`` for a handler that uses ``arrange``: the report then leaves
+    # both keys out of its JSON.
+    groups: list[ProbeGroup] | None = None
+    stream_truncated: bool | None = None
 
     def to_report(self, *, truncated: bool) -> DebugReport:
         """Snapshot this state into a ``DebugReport`` suitable for JSON.
@@ -613,6 +631,8 @@ class RunState:
             errors=list(self.errors),
             truncated=truncated,
             user_details=self.details_state.to_user_details() if self.details_state is not None else None,
+            groups=list(self.groups) if self.groups is not None else None,
+            stream_truncated=self.stream_truncated,
         )
 
 
@@ -882,6 +902,10 @@ class DebugRunner:
         # None and move on.
         self._run_message_label(state=state, msg=msg)
 
+        if uses_arrange_stream(self._handler):
+            await self._run_stream(state=state, msg=msg)
+            return
+
         # --- arrange ---------------------------------------------------------
         arrange_start = time.monotonic()
         tasks = await self._run_arrange(state=state, msg=msg, arrange_start=arrange_start)
@@ -1051,6 +1075,7 @@ class DebugRunner:
         successful_terminal_results: list[ExecutorResult],
         terminal_errors: list[ExecutorError],
         arrange_start: float,
+        groups: list[TaskGroup] | None = None,
     ) -> None:
         """Run handler.on_message_complete with error capture.
 
@@ -1065,7 +1090,9 @@ class DebugRunner:
         successful ExecutorResults (mirrors production's
         ``tracker.results``). ``terminal_errors`` carries terminally-
         failed tasks' ExecutorErrors (mirrors production's
-        ``tracker.errors``).
+        ``tracker.errors``). ``groups`` is given for a stream handler: as in
+        production, its message group then has empty task, result and error
+        lists, and its counters come from the groups.
         """
         mc_start = time.monotonic()
         with _stage('message_complete'):
@@ -1077,6 +1104,7 @@ class DebugRunner:
                     errors=list(terminal_errors),
                     started_at=arrange_start,
                     finished_at=time.monotonic(),
+                    groups=list(groups or []),
                 )
                 mc_result = await self._handler.on_message_complete(group)
             except Exception as exc:
@@ -1326,6 +1354,11 @@ class DebugRunner:
         is the lineage production would build.
         """
         for replacement in taskflow.link_replacements(task, list(replacements)):
+            if task.group is not None:
+                # A task of a stream group: as in production, the replacement
+                # joins the group and covers the same message.
+                replacement.group = task.group
+                replacement.source_offsets = list(task.source_offsets)
             all_scheduled_tasks.append(replacement)
             await self._process_task(
                 state=state,
@@ -1619,6 +1652,241 @@ class DebugRunner:
         )
         return entry, None
 
+    # -- stream handlers -----------------------------------------------------
+
+    async def _run_stream(self, *, state: RunState, msg: SourceMessage) -> None:
+        """Run the first groups of ``arrange_stream``, then ``on_message_complete`` with them.
+
+        The groups are pulled one after another, with no budget. After
+        ``PROBE_MAX_STREAM_GROUPS`` groups the stream is pulled once more,
+        only to learn whether it had more (``stream_truncated``). The
+        generator is closed on every path, so its ``finally`` runs. An error
+        of the stream is reported on the arrange stage, as an arrange error
+        is; the groups that ran stay in the report, and the message hook does
+        not run, as in production.
+        """
+        state.groups = []
+        state.stream_truncated = False
+        started_at = time.monotonic()
+        groups: list[TaskGroup] = []
+        stream: AsyncIterator[list[ExecutorTask]] | None = None
+        error: str | None = None
+        try:
+            try:
+                with _stage('arrange'):
+                    stream = open_arrange_stream(self._handler, msg)
+            except Exception as exc:
+                error = self._record_stream_error(state=state, exc=exc)
+            else:
+                error = await self._run_stream_groups(state=state, msg=msg, stream=stream, groups=groups)
+        finally:
+            if stream is not None:
+                await self._close_probe_stream(state=state, stream=stream)
+            state.timing.setdefault('arrange', 0.0)
+            state.arrange = ProbeStageResult(duration_seconds=state.timing['arrange'], error=error)
+        if error is not None:
+            return
+        await self._run_on_message_complete(
+            state=state,
+            msg=msg,
+            all_scheduled_tasks=[],
+            successful_terminal_results=[],
+            terminal_errors=[],
+            arrange_start=started_at,
+            groups=groups,
+        )
+
+    async def _run_stream_groups(
+        self,
+        *,
+        state: RunState,
+        msg: SourceMessage,
+        stream: AsyncIterator[list[ExecutorTask]],
+        groups: list[TaskGroup],
+    ) -> str | None:
+        """Pull and run groups until the stream ends or the limit is reached; the error summary, if the stream failed."""
+        while True:
+            # The probe runs on the worker's event loop: a generator that
+            # never awaits must not hold it from one pull to the next.
+            await asyncio.sleep(0)
+            try:
+                item = await self._pull_stream_item(state=state, stream=stream)
+                if item is _STREAM_END:
+                    return None
+                if len(groups) == PROBE_MAX_STREAM_GROUPS:
+                    state.stream_truncated = True
+                    return None
+                tasks = check_stream_item(item, msg)
+            except Exception as exc:
+                return self._record_stream_error(state=state, exc=exc)
+            if tasks:
+                groups.append(await self._run_stream_group(state=state, msg=msg, tasks=tasks, index=len(groups)))
+
+    @staticmethod
+    async def _pull_stream_item(*, state: RunState, stream: AsyncIterator[list[ExecutorTask]]) -> Any:
+        """The next item of the stream, or ``_STREAM_END``; the pull time is added to the arrange timing."""
+        pull_start = time.monotonic()
+        try:
+            with _stage('arrange'):
+                return await anext(stream)
+        except StopAsyncIteration:
+            return _STREAM_END
+        finally:
+            state.timing['arrange'] = state.timing.get('arrange', 0.0) + (time.monotonic() - pull_start)
+
+    async def _run_stream_group(
+        self,
+        *,
+        state: RunState,
+        msg: SourceMessage,
+        tasks: list[ExecutorTask],
+        index: int,
+    ) -> TaskGroup:
+        """Run the tasks of one group as probe tasks, then its ``on_group_complete``; report the group."""
+        group = new_task_group(
+            index=index,
+            source_message=msg,
+            tasks=tasks,
+            label_names=tuple(getattr(self._handler, 'group_labels', ())),
+            started_at=time.monotonic(),
+        )
+        # Per group, as production keeps them only for the group hook.
+        successful_terminal_results: list[ExecutorResult] = []
+        terminal_errors: list[ExecutorError] = []
+        all_terminal_results: list[ExecutorResult] = []
+        scheduled_tasks: list[ExecutorTask] = list(tasks)
+        for task in tasks:
+            await self._process_task(
+                state=state,
+                task=task,
+                msg=msg,
+                successful_terminal_results=successful_terminal_results,
+                terminal_errors=terminal_errors,
+                all_terminal_results=all_terminal_results,
+                all_scheduled_tasks=scheduled_tasks,
+            )
+        # Each scheduled task ends as a success, a failure or a replacement.
+        group.succeeded = len(successful_terminal_results)
+        group.failed = len(terminal_errors)
+        group.replaced = len(scheduled_tasks) - group.succeeded - group.failed
+        group.finished_at = time.monotonic()
+        # The Tasks section already holds a copy of each stdin; the group hook
+        # sees the tasks without it, as in production.
+        for scheduled in scheduled_tasks:
+            scheduled.stdin = None
+        hook: ProbeStageResult | None = None
+        if overridden_completion_hooks(self._handler)['group_complete']:
+            hook = await self._run_on_group_complete(
+                state=state,
+                msg=msg,
+                group=group,
+                results=successful_terminal_results,
+                errors=terminal_errors,
+            )
+        self._drop_invalid_group_notes(state=state, group=group)
+        assert state.groups is not None
+        state.groups.append(
+            ProbeGroup(
+                index=group.index,
+                task_count=group.task_count,
+                succeeded=group.succeeded,
+                failed=group.failed,
+                replaced=group.replaced,
+                labels={name: list(values) for name, values in group.labels.items()},
+                notes=dict(group.notes),
+                skipped_deliveries=dict(group.skipped_deliveries),
+                hook=hook,
+            )
+        )
+        return group
+
+    async def _run_on_group_complete(
+        self,
+        *,
+        state: RunState,
+        msg: SourceMessage,
+        group: TaskGroup,
+        results: list[ExecutorResult],
+        errors: list[ExecutorError],
+    ) -> ProbeStageResult:
+        """Run handler.on_group_complete for one group with error capture; a raise does not stop the probe."""
+        stage = f'group_complete:{group.index}'
+        hook_start = time.monotonic()
+        with _stage(stage):
+            try:
+                result = await self._handler.on_group_complete(group, list(results), list(errors))
+            except Exception as exc:
+                self._record_error(
+                    state=state,
+                    error=self._build_probe_error(state=state, stage=f'on_group_complete:{group.index}', exc=exc),
+                )
+                return ProbeStageResult(duration_seconds=time.monotonic() - hook_start, error=_one_line_summary(exc))
+        duration = time.monotonic() - hook_start
+        if result is not None:
+            with _stage(stage):
+                await state.sink_collector(result, msg.partition)
+        return ProbeStageResult(duration_seconds=duration, collect_result=result)
+
+    def _drop_invalid_group_notes(self, *, state: RunState, group: TaskGroup) -> None:
+        """Remove the notes of other types than str, int, float and bool, and report their keys."""
+        invalid = drop_invalid_notes(group)
+        if invalid:
+            self._record_error(
+                state=state,
+                error=self._plain_probe_error(
+                    state=state,
+                    stage=f'on_group_complete:{group.index}',
+                    exception_class='TypeError',
+                    message=f'group.notes values must be str, int, float or bool; dropped keys: {", ".join(invalid)}',
+                ),
+            )
+
+    def _record_stream_error(self, *, state: RunState, exc: Exception) -> str:
+        """Record an error of the stream on the arrange stage; return its one-line summary.
+
+        Call only from inside the ``except`` block that caught ``exc``.
+        """
+        self._record_error(state=state, error=self._build_probe_error(state=state, stage='arrange', exc=exc))
+        return _one_line_summary(exc)
+
+    async def _close_probe_stream(self, *, state: RunState, stream: AsyncIterator[list[ExecutorTask]]) -> None:
+        """``aclose()`` the generator within ``STREAM_CLOSE_TIMEOUT``; a failure is reported, never raised.
+
+        ``asyncio.wait`` does not cancel what it waits for, so a generator
+        that catches the cancellation and keeps awaiting cannot hold the
+        probe past the time bound: it is left behind, and the report says so.
+        """
+        aclose = getattr(stream, 'aclose', None)
+        if aclose is None:
+            return
+        with _stage('arrange'):
+            closing = asyncio.create_task(_await_close(aclose))
+        closing.add_done_callback(_retrieve_task_outcome)
+        await asyncio.wait({closing}, timeout=STREAM_CLOSE_TIMEOUT)
+        if not closing.done():
+            closing.cancel()
+            self._record_error(
+                state=state,
+                error=self._plain_probe_error(
+                    state=state,
+                    stage='arrange',
+                    exception_class='TimeoutError',
+                    message=f'the close of arrange_stream timed out after {STREAM_CLOSE_TIMEOUT:g} s',
+                ),
+            )
+            return
+        error = None if closing.cancelled() else closing.exception()
+        if error is not None:
+            self._record_error(
+                state=state,
+                error=self._plain_probe_error(
+                    state=state,
+                    stage='arrange',
+                    exception_class=type(error).__name__,
+                    message=f'the close of arrange_stream failed: {error}',
+                ),
+            )
+
     # -- error-capture helpers ----------------------------------------------
 
     def _build_probe_error(
@@ -1643,6 +1911,16 @@ class DebugRunner:
             occurred_at_ms=(time.monotonic() - state.start_monotonic) * 1000.0,
         )
 
+    @staticmethod
+    def _plain_probe_error(*, state: RunState, stage: str, exception_class: str, message: str) -> ProbeError:
+        """A ``ProbeError`` for a failure that has no exception context to take a traceback from."""
+        return ProbeError(
+            stage=stage,
+            exception_class=exception_class,
+            message=message,
+            occurred_at_ms=(time.monotonic() - state.start_monotonic) * 1000.0,
+        )
+
     def _record_error(self, *, state: RunState, error: ProbeError) -> None:
         """Append a ``ProbeError`` to the per-run errors list.
 
@@ -1650,3 +1928,14 @@ class DebugRunner:
         logging of captured errors) has one place to patch.
         """
         state.errors.append(error)
+
+
+async def _await_close(aclose: Callable[[], Awaitable[Any]]) -> None:
+    """Await ``aclose()`` inside a coroutine, so it can run as a task."""
+    await aclose()
+
+
+def _retrieve_task_outcome(task: asyncio.Task) -> None:
+    """Read the outcome of a task nobody awaits, so asyncio does not log an unread exception."""
+    if not task.cancelled():
+        task.exception()

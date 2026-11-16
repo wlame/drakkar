@@ -266,6 +266,41 @@ class PlannedSinkRecord(BaseModel):
     )
 
 
+class ProbeGroup(BaseModel):
+    """One task group of a stream handler that the probe ran.
+
+    The counters, labels, notes and skipped deliveries are those of the
+    :class:`drakkar.models.TaskGroup` when the group ended; ``hook`` is the
+    outcome of ``on_group_complete`` for the group.
+    """
+
+    index: int = Field(description='Order of the group in its message, from 0.')
+    task_count: int = Field(description='Number of tasks in the yielded list.')
+    succeeded: int = Field(default=0, description='Tasks of the group that terminally succeeded.')
+    failed: int = Field(default=0, description='Tasks of the group that terminally failed.')
+    replaced: int = Field(default=0, description='Tasks of the group that on_error replaced with other tasks.')
+    labels: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="For each name in the handler's group_labels: the values of that label on the yielded tasks.",
+    )
+    notes: dict[str, str | int | float | bool] = Field(
+        default_factory=dict, description='The scalar values the hooks wrote into group.notes.'
+    )
+    skipped_deliveries: dict[str, int] = Field(
+        default_factory=dict,
+        description='For each sink <type>/<name>: deliveries of this group that ended in skip. Always empty in a probe.',
+    )
+    hook: ProbeStageResult | None = Field(
+        default=None,
+        description='Outcome of on_group_complete for this group; null when the handler does not override it.',
+    )
+
+
+def _is_none(value: object) -> bool:
+    """Whether ``value`` is None; the report leaves such a stream key out of its JSON."""
+    return value is None
+
+
 class DebugReport(BaseModel):
     """Full report returned by the probe endpoint.
 
@@ -326,5 +361,20 @@ class DebugReport(BaseModel):
         description=(
             'User-defined probe details: layout descriptor, serialized model data, and the '
             'stage-attributed write log. None when the handler registers no probe_details_model.'
+        ),
+    )
+    # Absent from the JSON for a handler that uses arrange(): the key itself
+    # tells the UI that the handler streams its groups.
+    groups: list[ProbeGroup] | None = Field(
+        default=None,
+        exclude_if=_is_none,
+        description='The task groups of a stream handler that the probe ran, in index order. Absent for arrange().',
+    )
+    stream_truncated: bool | None = Field(
+        default=None,
+        exclude_if=_is_none,
+        description=(
+            'True when the probe stopped after its group limit and the stream had more. '
+            'Absent for a handler that uses arrange().'
         ),
     )

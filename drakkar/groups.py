@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import inspect
+from collections.abc import AsyncIterator, Sequence
+from typing import Any
 
 from drakkar.models import ExecutorTask, SourceMessage, TaskGroup
 
@@ -13,6 +15,23 @@ _NOTE_VALUE_TYPES = frozenset({str, int, float, bool})
 
 class ArrangeStreamError(Exception):
     """A value that ``arrange_stream`` produced breaks the rules of the hook."""
+
+
+def open_arrange_stream(handler: Any, message: SourceMessage) -> AsyncIterator[list[ExecutorTask]]:
+    """Call ``handler.arrange_stream(message)`` and return its async iterator.
+
+    Raises:
+        ArrangeStreamError: when the hook returns anything that is not an
+            async iterator.
+    """
+    result = handler.arrange_stream(message)
+    if not hasattr(result, '__aiter__'):
+        if inspect.iscoroutine(result):
+            # An ``async def`` without a yield: close it so it does not warn
+            # that it was never awaited.
+            result.close()
+        raise ArrangeStreamError(f'arrange_stream must be an async generator, got {type(result).__name__}')
+    return result.__aiter__()
 
 
 def check_stream_item(item: object, message: SourceMessage) -> list[ExecutorTask]:

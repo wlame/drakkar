@@ -3,7 +3,6 @@
 import asyncio
 import contextvars
 import functools
-import inspect
 import math
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
@@ -16,7 +15,12 @@ from structlog.contextvars import bind_contextvars, unbind_contextvars
 from drakkar import taskflow
 from drakkar.budget import TASKS_LIMIT, BudgetAccount, MessageShape, PendingBudget, output_bytes, text_bytes
 from drakkar.executor import ExecutorPool, ExecutorTaskError
-from drakkar.groups import ArrangeStreamError, check_stream_item, drop_invalid_notes, new_task_group
+from drakkar.groups import (
+    check_stream_item,
+    drop_invalid_notes,
+    new_task_group,
+    open_arrange_stream,
+)
 from drakkar.handler import (
     BaseDrakkarHandler,
     overridden_completion_hooks,
@@ -1672,14 +1676,7 @@ class PartitionProcessor:
 
     def _open_stream(self, message: SourceMessage) -> AsyncIterator[list[ExecutorTask]]:
         """Call ``arrange_stream`` and return its async iterator; any other result is a stream error."""
-        result = self._handler.arrange_stream(message)
-        if not hasattr(result, '__aiter__'):
-            if inspect.iscoroutine(result):
-                # An ``async def`` without a yield: close it so it does not
-                # warn that it was never awaited.
-                result.close()
-            raise ArrangeStreamError(f'arrange_stream must be an async generator, got {type(result).__name__}')
-        return result.__aiter__()
+        return open_arrange_stream(self._handler, message)
 
     async def _pull_group(
         self, stream: AsyncIterator[list[ExecutorTask]], tracker: MessageTracker

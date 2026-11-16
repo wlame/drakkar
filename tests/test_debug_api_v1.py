@@ -9,6 +9,7 @@ Covers:
     and merge/download/trace/trace-by-label input hardening.
 """
 
+import asyncio
 import contextlib
 import sqlite3
 import time
@@ -41,8 +42,9 @@ from drakkar.recorder import queries as queries_mod
 from drakkar.recorder.postgres import RecorderPostgresSettings
 from drakkar.uiserver.routes_pages import _docs_wire, _timeline_wire
 from drakkar.uiserver.server import create_ui_app
-from tests.conftest import kafka_connections
+from tests.conftest import kafka_connections, wait_for
 from tests.recorder_pg_fake import RecorderFakePostgres
+from tests.stream_helpers import RecordingStreamHandler, make_msg, stream_processor
 
 _INT32_MAX = 2**31 - 1
 
@@ -627,6 +629,35 @@ class TestApiV1LiveOverview:
         assert len(arrange['labels']) == 10  # capped at 10 labels per entry
         assert arrange['duration'] >= 2.0
         assert data['partition_count'] == 1
+
+    async def test_arranging_shows_a_stream_partition_while_a_pull_is_in_progress(
+        self, debug_config, mock_recorder, mock_app
+    ):
+        release = asyncio.Event()
+
+        class WaitsInItsFirstPull(RecordingStreamHandler):
+            async def arrange_stream(self, message):
+                await release.wait()
+                yield self.make_group(message, 0, 1)
+
+        proc = stream_processor(WaitsInItsFirstPull())
+        proc.enqueue(make_msg(5))
+        proc.start()
+        try:
+            await wait_for(lambda: proc._arranging)
+            mock_app.processors = {0: proc}
+            mock_recorder.config = RecorderConfig()
+            async with make_client(debug_config, mock_recorder, mock_app) as c:
+                resp = await c.get('/api/v1/live/overview')
+            (arrange,) = resp.json()['arranging']
+            assert arrange['partition'] == 0
+            assert arrange['message_count'] == 1
+            assert arrange['labels'] == ['0:5']
+            assert arrange['duration'] >= 0
+        finally:
+            release.set()
+            await proc.stop()
+        assert not proc._arranging
 
     async def test_hook_flags_reflect_handler_overrides(self, debug_config, mock_recorder, mock_app):
         from drakkar.handler import BaseDrakkarHandler

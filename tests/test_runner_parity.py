@@ -191,3 +191,47 @@ async def test_replacement_lineage_is_linked_the_same_way_in_both_runners():
         assert handler.replacements[0].parent_task_id == 't-1', 'an unset parent links to the failing task'
         assert handler.replacements[1].parent_task_id == 'chosen-by-handler', 'an explicit parent is kept'
         assert sorted(handler.completed) == ['r-1', 'r-2'], 'both replacements ran to completion'
+
+
+class StreamHandler(BaseDrakkarHandler):
+    """Yields two groups: one task that succeeds, and one task that fails and is replaced by two."""
+
+    group_labels = ('kind',)
+
+    def __init__(self) -> None:
+        self.group_counts: list[tuple[int, int, int, int, dict]] = []
+        self.message_counts: list[tuple[int, int, int, int]] = []
+
+    async def arrange_stream(self, message):
+        task = succeeding_task('s-0', message.offset)
+        task.labels = {'kind': 'first'}
+        yield [task]
+        yield [failing_task('f-0', message.offset)]
+
+    async def on_error(self, task, error):
+        # The replacements name no message: in stream mode both runners give
+        # them the offsets of the task they replace.
+        return [succeeding_task(f'{task.task_id}-r{index}') for index in range(2)]
+
+    async def on_group_complete(self, group, results, errors):
+        self.group_counts.append((group.index, group.succeeded, group.failed, group.replaced, dict(group.labels)))
+        return None
+
+    async def on_message_complete(self, group):
+        self.message_counts.append((len(group.groups), group.succeeded, group.failed, group.replaced))
+        return None
+
+
+async def test_stream_groups_are_counted_the_same_way_in_both_runners():
+    production = StreamHandler()
+    probe = StreamHandler()
+
+    await run_in_production(production, max_retries=0)
+    report = await run_in_probe(probe, max_retries=0)
+
+    assert sorted(probe.group_counts) == sorted(production.group_counts)
+    assert probe.message_counts == production.message_counts == [(2, 3, 0, 1)]
+    assert [(group.index, group.succeeded, group.failed, group.replaced) for group in report.groups] == [
+        (0, 1, 0, 0),
+        (1, 2, 0, 1),
+    ]

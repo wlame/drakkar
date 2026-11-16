@@ -3735,3 +3735,396 @@ async def test_probe_waiters_are_capped_and_shed_with_a_busy_error(monkeypatch):
     # Capacity is returned, not permanently consumed.
     release.set()
     await runner._run_with_state(MagicMock())
+
+
+# --- DebugRunner: stream handlers --------------------------------------------
+#
+# A handler that overrides ``arrange_stream`` yields groups of tasks. The
+# probe runs at most ``PROBE_MAX_STREAM_GROUPS`` of them, pulls once more only
+# to learn whether the stream had more, and always closes the generator.
+
+
+class _StreamHandler(BaseDrakkarHandler):
+    """Yields ``group_count`` groups of ``group_size`` precomputed tasks; records what the hooks see."""
+
+    group_labels = ('kind',)
+
+    def __init__(self, group_count: int, group_size: int = 2) -> None:
+        self.group_count = group_count
+        self.group_size = group_size
+        self.pulls = 0
+        self.finally_ran = False
+        self.message_groups: list[MessageGroup] = []
+
+    def make_group(self, message: SourceMessage, index: int) -> list[ExecutorTask]:
+        """The tasks of group ``index``; every task but the last has the label ``kind``."""
+        tasks = []
+        for position in range(self.group_size):
+            labels = {'kind': f'k{index}-{position}'} if position < self.group_size - 1 else {}
+            tasks.append(
+                _make_precomputed_task(
+                    task_id=f'g{index}-t{position}', offset=message.offset, labels=labels, stdin='in'
+                )
+            )
+        return tasks
+
+    async def arrange_stream(self, message: SourceMessage):
+        try:
+            for index in range(self.group_count):
+                self.pulls += 1
+                yield self.make_group(message, index)
+        finally:
+            self.finally_ran = True
+
+    async def on_message_complete(self, group: MessageGroup) -> CollectResult | None:
+        self.message_groups.append(group)
+        return None
+
+
+class _StreamHandlerWithGroupHook(_StreamHandler):
+    """A stream handler that also overrides ``on_group_complete`` and writes notes."""
+
+    def __init__(self, group_count: int, group_size: int = 2) -> None:
+        super().__init__(group_count, group_size)
+        self.group_calls: list[tuple[int, int, int]] = []
+
+    async def on_group_complete(self, group, results, errors) -> CollectResult | None:
+        self.group_calls.append((group.index, len(results), len(errors)))
+        group.notes['seen'] = len(results)
+        return CollectResult(kafka=[KafkaPayload(sink='groups', data=_TinyOutput(id=group.index, note='group'))])
+
+
+def _stream_runner(handler: BaseDrakkarHandler, *, max_retries: int = 1) -> DebugRunner:
+    return DebugRunner(
+        handler=handler, executor_pool=_make_executor_pool(), app_config=_make_config(max_retries=max_retries)
+    )
+
+
+async def test_probe_runs_every_group_of_a_short_stream():
+    handler = _StreamHandlerWithGroupHook(group_count=3)
+
+    report = await _stream_runner(handler).run(ProbeInput(value='{}', offset=7))
+
+    assert report.stream_truncated is False
+    assert [group.index for group in report.groups] == [0, 1, 2]
+    first = report.groups[0]
+    assert (first.task_count, first.succeeded, first.failed, first.replaced) == (2, 2, 0, 0)
+    assert first.labels == {'kind': ['k0-0']}
+    assert first.notes == {'seen': 2}
+    assert first.skipped_deliveries == {}
+    assert first.hook is not None
+    assert first.hook.error is None
+    assert first.hook.collect_result is not None
+    assert handler.group_calls == [(0, 2, 0), (1, 2, 0), (2, 2, 0)]
+    assert [task.task_id for task in report.tasks] == ['g0-t0', 'g0-t1', 'g1-t0', 'g1-t1', 'g2-t0', 'g2-t1']
+    # The message hook ran once, with the three groups and, as in production,
+    # with no task, result or error lists.
+    assert report.on_message_complete is not None
+    (message_group,) = handler.message_groups
+    assert [group.index for group in message_group.groups] == [0, 1, 2]
+    assert message_group.tasks == []
+    assert message_group.results == []
+    assert message_group.succeeded == 6
+    assert report.on_window_complete is None
+    assert report.arrange.duration_seconds is not None
+    assert report.arrange.error is None
+    assert report.arrange.collect_result is None
+    assert handler.finally_ran
+    stages = {record.origin_stage for record in report.planned_sink_payloads}
+    assert {'group_complete:0', 'group_complete:1', 'group_complete:2'} <= stages
+
+
+async def test_probe_runs_the_first_five_groups_of_a_long_stream_and_closes_it():
+    from drakkar.uiserver.runner import PROBE_MAX_STREAM_GROUPS
+
+    handler = _StreamHandler(group_count=8)
+
+    report = await _stream_runner(handler).run(ProbeInput(value='{}'))
+
+    assert PROBE_MAX_STREAM_GROUPS == 5
+    assert len(report.groups) == 5
+    assert report.stream_truncated is True
+    # Five groups and one more pull that only learns the stream had more.
+    assert handler.pulls == 6
+    assert handler.finally_ran
+    assert len(report.tasks) == 10
+    assert [group.index for group in handler.message_groups[0].groups] == [0, 1, 2, 3, 4]
+    # No group hook: the group's hook stage is null.
+    assert all(group.hook is None for group in report.groups)
+
+
+async def test_probe_reports_the_stream_as_not_truncated_when_it_ends_after_five_groups():
+    handler = _StreamHandler(group_count=5)
+
+    report = await _stream_runner(handler).run(ProbeInput(value='{}'))
+
+    assert len(report.groups) == 5
+    assert report.stream_truncated is False
+
+
+async def test_probe_keeps_the_groups_that_ran_when_the_stream_raises():
+    class FailsAfterFirstGroup(_StreamHandler):
+        async def arrange_stream(self, message):
+            try:
+                yield self.make_group(message, 0)
+                raise RuntimeError('stream broke')
+            finally:
+                self.finally_ran = True
+
+    handler = FailsAfterFirstGroup(group_count=1)
+
+    report = await _stream_runner(handler).run(ProbeInput(value='{}'))
+
+    assert len(report.groups) == 1
+    assert report.stream_truncated is False
+    assert report.arrange.error is not None
+    assert 'stream broke' in report.arrange.error
+    assert [error.stage for error in report.errors] == ['arrange']
+    # As after an arrange error: the message hook does not run.
+    assert report.on_message_complete is None
+    assert handler.message_groups == []
+    assert handler.finally_ran
+
+
+async def test_probe_reports_a_yielded_value_that_breaks_the_stream_rules():
+    class YieldsATuple(_StreamHandler):
+        async def arrange_stream(self, message):
+            try:
+                yield (self.make_group(message, 0)[0],)
+            finally:
+                self.finally_ran = True
+
+    handler = YieldsATuple(group_count=1)
+
+    report = await _stream_runner(handler).run(ProbeInput(value='{}'))
+
+    assert report.groups == []
+    assert report.tasks == []
+    assert 'must yield a list of ExecutorTask' in (report.arrange.error or '')
+    assert report.errors[0].exception_class == 'ArrangeStreamError'
+    assert handler.finally_ran
+
+
+async def test_probe_reports_an_arrange_stream_that_is_not_an_async_generator():
+    class ReturnsAList(BaseDrakkarHandler):
+        async def arrange_stream(self, message):  # type: ignore[override]
+            return []
+
+    report = await _stream_runner(ReturnsAList()).run(ProbeInput(value='{}'))
+
+    assert report.groups == []
+    assert report.stream_truncated is False
+    assert 'must be an async generator' in (report.arrange.error or '')
+
+
+async def test_probe_skips_an_empty_list_of_a_stream():
+    class YieldsAnEmptyListFirst(_StreamHandler):
+        async def arrange_stream(self, message):
+            yield []
+            yield self.make_group(message, 0)
+
+    report = await _stream_runner(YieldsAnEmptyListFirst(group_count=1)).run(ProbeInput(value='{}'))
+
+    assert [group.index for group in report.groups] == [0]
+    assert report.groups[0].task_count == 2
+
+
+async def test_probe_counts_a_replaced_task_of_a_group_like_production():
+    class ReplacesTheFailingTask(_StreamHandlerWithGroupHook):
+        def make_group(self, message, index):
+            return [
+                ExecutorTask(
+                    task_id=f'g{index}-fail',
+                    source_offsets=[message.offset],
+                    precomputed=PrecomputedResult(stdout='', stderr='boom', exit_code=1, duration_seconds=0.001),
+                )
+            ]
+
+        async def on_error(self, task, error):
+            # No source offsets: in stream mode the replacement takes those of
+            # the task it replaces, and joins its group.
+            return [
+                ExecutorTask(task_id=f'{task.task_id}-r', source_offsets=[], precomputed=PrecomputedResult(stdout='ok'))
+            ]
+
+    handler = ReplacesTheFailingTask(group_count=1)
+
+    report = await _stream_runner(handler).run(ProbeInput(value='{}', offset=3))
+
+    group = report.groups[0]
+    assert (group.task_count, group.succeeded, group.failed, group.replaced) == (1, 1, 0, 1)
+    assert [entry.status for entry in report.tasks] == ['replaced', 'done']
+    assert report.tasks[1].source_offsets == [3]
+    assert handler.group_calls == [(0, 1, 0)]
+
+
+async def test_probe_reports_a_raising_group_hook_and_goes_on():
+    class RaisingGroupHook(_StreamHandler):
+        async def on_group_complete(self, group, results, errors):
+            raise ValueError('group hook broke')
+
+    handler = RaisingGroupHook(group_count=2)
+
+    report = await _stream_runner(handler).run(ProbeInput(value='{}'))
+
+    assert len(report.groups) == 2
+    assert all(group.hook is not None and 'group hook broke' in (group.hook.error or '') for group in report.groups)
+    assert [error.stage for error in report.errors] == ['on_group_complete:0', 'on_group_complete:1']
+    assert report.on_message_complete is not None
+
+
+async def test_probe_drops_group_notes_of_other_types_and_reports_them():
+    class WritesAListNote(_StreamHandler):
+        async def on_group_complete(self, group, results, errors):
+            group.notes['good'] = 1
+            group.notes['bad'] = [1, 2]  # type: ignore[assignment]
+            return None
+
+    report = await _stream_runner(WritesAListNote(group_count=1)).run(ProbeInput(value='{}'))
+
+    assert report.groups[0].notes == {'good': 1}
+    (error,) = report.errors
+    assert error.stage == 'on_group_complete:0'
+    assert 'bad' in error.message
+
+
+async def test_probe_reports_a_stream_whose_close_raises():
+    class RaisesOnClose(_StreamHandler):
+        async def arrange_stream(self, message):
+            try:
+                yield self.make_group(message, 0)
+                yield self.make_group(message, 1)
+            finally:
+                raise RuntimeError('close broke')
+
+    from drakkar.uiserver import runner as runner_module
+
+    report = await _stream_runner(RaisesOnClose(group_count=2)).run(ProbeInput(value='{}'))
+
+    # The stream ended by itself; its close raised in the ``finally`` of the
+    # last pull, which is an error of the stream.
+    assert runner_module.PROBE_MAX_STREAM_GROUPS == 5
+    assert len(report.groups) == 2
+    assert 'close broke' in (report.arrange.error or '')
+
+
+async def test_probe_reports_a_close_that_raises_after_truncation(monkeypatch):
+    class RaisesOnClose(_StreamHandler):
+        async def arrange_stream(self, message):
+            index = 0
+            try:
+                while True:
+                    yield self.make_group(message, index)
+                    index += 1
+            finally:
+                raise RuntimeError('close broke')
+
+    report = await _stream_runner(RaisesOnClose(group_count=0, group_size=1)).run(ProbeInput(value='{}'))
+
+    assert len(report.groups) == 5
+    assert report.stream_truncated is True
+    assert report.errors[-1].stage == 'arrange'
+    assert 'close broke' in report.errors[-1].message
+
+
+async def test_probe_leaves_a_stream_whose_close_does_not_end(monkeypatch):
+    from drakkar.uiserver import runner as runner_module
+
+    monkeypatch.setattr(runner_module, 'STREAM_CLOSE_TIMEOUT', 0.05)
+    never = asyncio.Event()
+
+    class WaitsOnClose(_StreamHandler):
+        async def arrange_stream(self, message):
+            index = 0
+            try:
+                while True:
+                    yield self.make_group(message, index)
+                    index += 1
+            finally:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await never.wait()
+                await never.wait()
+
+    report = await _stream_runner(WaitsOnClose(group_count=0, group_size=1)).run(ProbeInput(value='{}'))
+
+    assert report.stream_truncated is True
+    assert 'timed out' in report.errors[-1].message
+
+
+async def test_probe_closes_the_stream_when_the_run_is_cancelled():
+    release = asyncio.Event()
+
+    class WaitsInSecondPull(_StreamHandler):
+        async def arrange_stream(self, message):
+            try:
+                yield self.make_group(message, 0)
+                await release.wait()
+                yield self.make_group(message, 1)
+            finally:
+                self.finally_ran = True
+
+    handler = WaitsInSecondPull(group_count=2)
+    runner = _stream_runner(handler)
+    state = runner._make_run_state(ProbeInput(value='{}'))
+    run = asyncio.create_task(runner._run_with_state(state))
+    await wait_for(lambda: state.groups is not None and len(state.groups) == 1)
+    run.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await run
+
+    assert handler.finally_ran
+    partial = state.to_report(truncated=True)
+    assert [group.index for group in partial.groups] == [0]
+
+
+async def test_list_handler_report_has_no_stream_keys():
+    report = await _stream_runner(_HappyPathHandler(task_count=1)).run(ProbeInput(value='{}'))
+
+    dumped = report.model_dump(mode='json')
+    assert 'groups' not in dumped
+    assert 'stream_truncated' not in dumped
+
+
+async def test_stream_handler_report_carries_the_stream_keys_in_json():
+    report = await _stream_runner(_StreamHandler(group_count=1)).run(ProbeInput(value='{}'))
+
+    dumped = report.model_dump(mode='json')
+    assert dumped['stream_truncated'] is False
+    assert dumped['groups'][0]['labels'] == {'kind': ['k0-0']}
+    assert set(dumped['groups'][0]) == {
+        'index',
+        'task_count',
+        'succeeded',
+        'failed',
+        'replaced',
+        'labels',
+        'notes',
+        'skipped_deliveries',
+        'hook',
+    }
+
+
+async def test_probe_runs_a_stream_that_is_a_plain_async_iterator():
+    class OneGroupIterator:
+        """An async iterator with no ``aclose``: there is nothing to close."""
+
+        def __init__(self, group: list[ExecutorTask]) -> None:
+            self.items = [group]
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self.items:
+                raise StopAsyncIteration
+            return self.items.pop()
+
+    class IteratorHandler(_StreamHandler):
+        def arrange_stream(self, message):  # type: ignore[override]
+            return OneGroupIterator(self.make_group(message, 0))
+
+    report = await _stream_runner(IteratorHandler(group_count=1)).run(ProbeInput(value='{}'))
+
+    assert [group.index for group in report.groups] == [0]
+    assert report.stream_truncated is False
+    assert report.errors == []
