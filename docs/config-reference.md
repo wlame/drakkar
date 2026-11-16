@@ -83,6 +83,17 @@ sources:
       min_wait: 4s                   # min sleep before alignment (buffer for slow init). env: DK_SOURCES__KAFKA__STARTUP_ALIGN__MIN_WAIT
       interval: 10s                  # whole seconds; wake at next time%interval==0 boundary. env: DK_SOURCES__KAFKA__STARTUP_ALIGN__INTERVAL
 
+    # Leave the consumer group for a bounded time and join it again, with no restart.
+    # Needs autodiscover with the Kafka source on: the budget of detached workers is kept in its store.
+    detach:
+      enabled: false                 # env: DK_SOURCES__KAFKA__DETACH__ENABLED
+      max_detached: 1                # workers of one group detached at once, 1 to 100; use one value per group. env: DK_SOURCES__KAFKA__DETACH__MAX_DETACHED
+      min_attached: 1                # workers of one group that stay attached, 1 to 1000; use one value per group. env: DK_SOURCES__KAFKA__DETACH__MIN_ATTACHED
+      default_duration: 1h           # a detach with no duration; 10s to max_duration. env: DK_SOURCES__KAFKA__DETACH__DEFAULT_DURATION
+      max_duration: 24h              # the longest detach; 10s to 7d. env: DK_SOURCES__KAFKA__DETACH__MAX_DURATION
+      cooldown: 5m                   # between handler detaches; 0 (none) to 1d. env: DK_SOURCES__KAFKA__DETACH__COOLDOWN
+      lease: 1m                      # slot lease in the store, whole seconds, 40s to 1d. env: DK_SOURCES__KAFKA__DETACH__LEASE
+
   http:
     enabled: false                   # master switch; false = no FastAPI server. env: DK_SOURCES__HTTP__ENABLED
     host: '0.0.0.0'                  # uvicorn bind interface. env: DK_SOURCES__HTTP__HOST
@@ -477,6 +488,10 @@ ui:
     enabled: false                 # serve the pause API + Live-page control. env: DK_UI__CONSUME_PAUSE__ENABLED
     durations: [15s, 1m, 5m, 15m]  # preset buttons, whole seconds from 1s to 1h; the API accepts any value in it.
                                    # env: DK_UI__CONSUME_PAUSE__DURATIONS (JSON list)
+
+  # --- Operator detach (Live page; OPT-IN — a detach takes the worker out of its consumer group) ---
+  detach_enabled: false            # serve POST /api/v1/debug/detach and /attach + the Detach button; needs
+                                   # sources.kafka.detach.enabled. false = 403. env: DK_UI__DETACH_ENABLED
 
   # --- Presentation ---
   max_rows: 5000                   # max rows returned by UI list endpoints. env: DK_UI__MAX_ROWS

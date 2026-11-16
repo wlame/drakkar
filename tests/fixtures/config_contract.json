@@ -2606,6 +2606,124 @@
         }
       },
       "message": "logging.ecs_namespace 'request_id' is an ECS field name; choose another name, for example your product name"
+    },
+    {
+      "name": "detach_needs_autodiscover",
+      "yaml": {
+        "sources": {
+          "kafka": {
+            "detach": {
+              "enabled": true
+            }
+          }
+        }
+      },
+      "message": "sources.kafka.detach.enabled needs autodiscover.enabled: the budget of detached workers is kept in the autodiscover store"
+    },
+    {
+      "name": "detach_default_duration_above_max_duration",
+      "yaml": {
+        "sources": {
+          "kafka": {
+            "detach": {
+              "default_duration": "2h",
+              "max_duration": "1h"
+            }
+          }
+        }
+      },
+      "message": "sources.kafka.detach.default_duration (2h) must be <= sources.kafka.detach.max_duration (1h)"
+    },
+    {
+      "name": "ui_detach_needs_the_feature",
+      "yaml": {
+        "ui": {
+          "detach_enabled": true
+        }
+      },
+      "message": "ui.detach_enabled needs sources.kafka.detach.enabled"
+    },
+    {
+      "name": "detach_lease_below_floor",
+      "yaml": {
+        "sources": {
+          "kafka": {
+            "detach": {
+              "lease": "39s"
+            }
+          }
+        }
+      },
+      "message": "sources.kafka.detach.lease must be from 40s to 1d, got 39s",
+      "path": "sources.kafka.detach.lease"
+    },
+    {
+      "name": "detach_max_duration_above_ceiling",
+      "yaml": {
+        "sources": {
+          "kafka": {
+            "detach": {
+              "max_duration": "8d"
+            }
+          }
+        }
+      },
+      "message": "sources.kafka.detach.max_duration must be from 10s to 7d, got 8d",
+      "path": "sources.kafka.detach.max_duration"
+    },
+    {
+      "name": "detach_default_duration_below_floor",
+      "yaml": {
+        "sources": {
+          "kafka": {
+            "detach": {
+              "default_duration": "5s"
+            }
+          }
+        }
+      },
+      "message": "sources.kafka.detach.default_duration must be from 10s to 7d, got 5s",
+      "path": "sources.kafka.detach.default_duration"
+    },
+    {
+      "name": "detach_cooldown_above_ceiling",
+      "yaml": {
+        "sources": {
+          "kafka": {
+            "detach": {
+              "cooldown": "25h"
+            }
+          }
+        }
+      },
+      "message": "sources.kafka.detach.cooldown must be at most 1d, got 1d1h",
+      "path": "sources.kafka.detach.cooldown"
+    },
+    {
+      "name": "detach_max_detached_zero",
+      "yaml": {
+        "sources": {
+          "kafka": {
+            "detach": {
+              "max_detached": 0
+            }
+          }
+        }
+      },
+      "path": "sources.kafka.detach.max_detached"
+    },
+    {
+      "name": "detach_min_attached_zero",
+      "yaml": {
+        "sources": {
+          "kafka": {
+            "detach": {
+              "min_attached": 0
+            }
+          }
+        }
+      },
+      "path": "sources.kafka.detach.min_attached"
     }
   ],
   "load_values": [

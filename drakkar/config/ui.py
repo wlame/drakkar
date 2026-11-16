@@ -652,6 +652,16 @@ class UIConfig(ConfigModel):
         ),
     )
     consume_pause: UIConsumePauseConfig = Field(default_factory=UIConsumePauseConfig)
+    detach_enabled: bool = Field(
+        default=False,
+        description=(
+            'Serve the operator detach and attach routes (``POST /api/v1/debug/detach`` and '
+            '``POST /api/v1/debug/attach``) and show the Detach button on the Live page. Needs '
+            '``sources.kafka.detach.enabled``. Off by default: a detach takes this worker out of its '
+            'consumer group, which is a production-affecting act, and the debug UI is open by design. '
+            'Independent of ``auth_token``, per the reasoning on ``probe.enabled``.'
+        ),
+    )
     prometheus: UIPrometheusConfig = Field(default_factory=UIPrometheusConfig)
     custom_links: list[dict[str, str]] = Field(
         default_factory=list,

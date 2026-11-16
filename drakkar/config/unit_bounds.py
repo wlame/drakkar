@@ -45,6 +45,10 @@ class UnitBound:
 
 UNIT_BOUNDS: tuple[UnitBound, ...] = (
     UnitBound('sources.kafka.startup_align.interval', 1, None),
+    UnitBound('sources.kafka.detach.default_duration', 10, 604_800),
+    UnitBound('sources.kafka.detach.max_duration', 10, 604_800),
+    UnitBound('sources.kafka.detach.cooldown', None, 86_400),
+    UnitBound('sources.kafka.detach.lease', 40, 86_400),
     UnitBound('executor.task_timeout', 1, None),
     UnitBound('executor.drain_timeout', 1, None),
     UnitBound('executor.max_pending_bytes', 16 * MIB, None),

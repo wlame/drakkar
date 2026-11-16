@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `19c8a436ca74e396`.
+Registry version: `3ded9044389c7248`.
 
 ## Concepts
 
@@ -496,6 +496,58 @@ The longest time between two polls before Kafka evicts the consumer.
 
 **Related:** `concept:at-least-once`
 
+### `config:sources.kafka.detach.enabled`
+
+Whether this worker may leave its consumer group for a bounded time and join it again.
+
+**Advice:** Turn it on only with autodiscover on, and set max_detached and min_attached to the same values on every worker of the group.
+
+**Related:** `concept:autodiscover`, `config:sources.kafka.detach.max_detached`
+
+### `config:sources.kafka.detach.max_detached`
+
+How many workers of one consumer group may be detached at once.
+
+**Advice:** Keep it well below the group size; workers that are away leave their partitions to the others, which must carry the load.
+
+**Related:** `config:sources.kafka.detach.min_attached`
+
+### `config:sources.kafka.detach.min_attached`
+
+How many workers of one consumer group must stay attached.
+
+**Advice:** Raise it when the group needs a minimum number of consumers to keep up with the topic.
+
+**Related:** `config:sources.kafka.detach.max_detached`
+
+### `config:sources.kafka.detach.default_duration`
+
+How long a detach lasts when the request gives no duration.
+
+**Advice:** Set it to the usual time a worker needs to recover; it must not be above max_duration.
+
+**Related:** `config:sources.kafka.detach.max_duration`
+
+### `config:sources.kafka.detach.max_duration`
+
+The longest detach a request may ask for.
+
+**Advice:** Keep it short enough that a forgotten detach ends by itself in a time the group can carry.
+
+### `config:sources.kafka.detach.cooldown`
+
+The shortest time between the return of a handler detach and the next handler detach.
+
+**Advice:** Raise it when handler detaches repeat often; each return makes the other workers of the group run a revoke drain.
+
+### `config:sources.kafka.detach.lease`
+
+The lease of the detach slot in the autodiscover store.
+
+**Advice:** Keep the default unless the store is slow; a longer lease keeps a slot longer after a worker died.
+
+**Related:** `concept:autodiscover`
+
 ### `config:sources.http.request_timeout`
 
 The time limit of one HTTP request.
@@ -751,6 +803,14 @@ The heartbeat age that marks the runtime stalled and captures stacks.
 **Advice:** Keep the default unless stalls shorter than it matter for the workload.
 
 **Related:** `concept:runtime-health`
+
+### `config:ui.detach_enabled`
+
+Whether the operator detach and attach routes answer and the Live page shows the Detach button.
+
+**Advice:** Turn it on only where operators may take a worker out of its group; the debug UI is open, so anyone who reaches it can detach.
+
+**Related:** `config:sources.kafka.detach.enabled`
 
 ### `config:agent.enabled`
 

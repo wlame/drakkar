@@ -447,6 +447,76 @@
           "group": "sources"
         },
         {
+          "path": "sources.kafka.detach.enabled",
+          "env": "DK_SOURCES__KAFKA__DETACH__ENABLED",
+          "description": "Let this worker leave its consumer group for a bounded time and join it again without a restart.",
+          "full_description": "Let this worker leave its consumer group for a bounded time and join it again without a restart. Needs autodiscover: the budget of detached workers is kept in its store.",
+          "type": "boolean",
+          "default": false,
+          "secret": false,
+          "group": "sources"
+        },
+        {
+          "path": "sources.kafka.detach.max_detached",
+          "env": "DK_SOURCES__KAFKA__DETACH__MAX_DETACHED",
+          "description": "How many workers of one consumer group may be detached at once, from 1 to 100.",
+          "full_description": "How many workers of one consumer group may be detached at once, from 1 to 100. Workers of one group should use the same value.",
+          "type": "integer",
+          "default": 1,
+          "secret": false,
+          "group": "sources"
+        },
+        {
+          "path": "sources.kafka.detach.min_attached",
+          "env": "DK_SOURCES__KAFKA__DETACH__MIN_ATTACHED",
+          "description": "How many workers of one consumer group must stay attached, from 1 to 1000.",
+          "full_description": "How many workers of one consumer group must stay attached, from 1 to 1000. Workers of one group should use the same value.",
+          "type": "integer",
+          "default": 1,
+          "secret": false,
+          "group": "sources"
+        },
+        {
+          "path": "sources.kafka.detach.default_duration",
+          "env": "DK_SOURCES__KAFKA__DETACH__DEFAULT_DURATION",
+          "description": "How long a detach lasts when the request gives no duration; from 10s to max_duration.",
+          "full_description": "How long a detach lasts when the request gives no duration; from 10s to max_duration.",
+          "type": "duration",
+          "default": "1h",
+          "secret": false,
+          "group": "sources"
+        },
+        {
+          "path": "sources.kafka.detach.max_duration",
+          "env": "DK_SOURCES__KAFKA__DETACH__MAX_DURATION",
+          "description": "The longest detach a request may ask for, from 10s to 7d.",
+          "full_description": "The longest detach a request may ask for, from 10s to 7d.",
+          "type": "duration",
+          "default": "1d",
+          "secret": false,
+          "group": "sources"
+        },
+        {
+          "path": "sources.kafka.detach.cooldown",
+          "env": "DK_SOURCES__KAFKA__DETACH__COOLDOWN",
+          "description": "The shortest time between the return of a handler detach and the next handler detach, from 0 (none) to 1d.",
+          "full_description": "The shortest time between the return of a handler detach and the next handler detach, from 0 (none) to 1d. An operator detach does not wait for it.",
+          "type": "duration",
+          "default": "5m",
+          "secret": false,
+          "group": "sources"
+        },
+        {
+          "path": "sources.kafka.detach.lease",
+          "env": "DK_SOURCES__KAFKA__DETACH__LEASE",
+          "description": "The lease of the slot in the autodiscover store, from 40s to 1d.",
+          "full_description": "The lease of the slot in the autodiscover store, from 40s to 1d. A detached worker attaches again when its lease was not confirmed for this long.",
+          "type": "duration",
+          "default": "1m",
+          "secret": false,
+          "group": "sources"
+        },
+        {
           "path": "sources.http.enabled",
           "env": "DK_SOURCES__HTTP__ENABLED",
           "description": "Run the HTTP input source.",
@@ -2685,6 +2755,16 @@
             "5m",
             "15m"
           ],
+          "secret": false,
+          "group": "ui"
+        },
+        {
+          "path": "ui.detach_enabled",
+          "env": "DK_UI__DETACH_ENABLED",
+          "description": "Serve the operator detach and attach routes (``POST /api/v1/debug/detach`` and ``POST /api/v1/debug/attach``) and show the Detach button on the Live page.",
+          "full_description": "Serve the operator detach and attach routes (``POST /api/v1/debug/detach`` and ``POST /api/v1/debug/attach``) and show the Detach button on the Live page. Needs ``sources.kafka.detach.enabled``. Off by default: a detach takes this worker out of its consumer group, which is a production-affecting act, and the debug UI is open by design. Independent of ``auth_token``, per the reasoning on ``probe.enabled``.",
+          "type": "boolean",
+          "default": false,
           "secret": false,
           "group": "ui"
         },

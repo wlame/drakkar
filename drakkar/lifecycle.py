@@ -781,7 +781,7 @@ class AppLifecycle:
         return None if fleet is None else fleet.name_online(worker)
 
     def _check_config_after_startup(self) -> None:
-        """Check the ``api``, recorder and ``autodiscover`` rules again, and say once when the cluster name is empty.
+        """Check the ``api``, recorder, ``autodiscover`` and detach rules again, and say once when the cluster name is empty.
 
         ``on_startup`` may have changed the keys, so this gives the messages of
         the config load.
@@ -793,6 +793,7 @@ class AppLifecycle:
         app._config.check_what_needs_the_api()
         app._config.check_recorder_provider()
         app._config.check_autodiscover()
+        app._config.check_detach()
         if app._config.autodiscover.enabled and not app._cluster_name:
             logger.warning(
                 'cluster_name_empty',

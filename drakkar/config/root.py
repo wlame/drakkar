@@ -64,6 +64,13 @@ AUTODISCOVER_WITHOUT_API_MESSAGE = 'autodiscover.enabled needs api.enabled: peer
 
 AGENT_WITHOUT_API_MESSAGE = 'agent.enabled needs api.enabled: the agent routes are served by the API server'
 
+DETACH_WITHOUT_AUTODISCOVER_MESSAGE = (
+    'sources.kafka.detach.enabled needs autodiscover.enabled: '
+    'the budget of detached workers is kept in the autodiscover store'
+)
+
+UI_DETACH_WITHOUT_FEATURE_MESSAGE = 'ui.detach_enabled needs sources.kafka.detach.enabled'
+
 # The loader passes the whole tree, the ``DK_*`` values already in it with their
 # map names resolved. No variable name can start with NUL, so with this prefix the
 # settings env source finds nothing and cannot add a value a second time under its
@@ -218,6 +225,12 @@ class DrakkarConfig(BaseSettings):
         return self
 
     @model_validator(mode='after')
+    def _validate_detach(self) -> 'DrakkarConfig':
+        """What an enabled detach and the UI detach switch need from the rest of the config."""
+        self.check_detach()
+        return self
+
+    @model_validator(mode='after')
     def _validate_kafka_source_connection(self) -> 'DrakkarConfig':
         """An enabled Kafka source needs its connection declared."""
         source = self.sources.kafka
@@ -360,6 +373,23 @@ class DrakkarConfig(BaseSettings):
             _require_declared_connection(
                 'autodiscover.connection', autodiscover.provider, autodiscover.connection, self.connections
             )
+
+    def check_detach(self) -> None:
+        """Refuse a detach that has no store for its budget, and a UI switch with the feature off.
+
+        The budget is needed only when the Kafka source is on: with it off there is
+        no group to leave. The load calls this, and so does the startup after
+        ``on_startup``, which may have changed the keys: both give the same messages.
+
+        Raises:
+            ValueError: detach is on with the Kafka source on and ``autodiscover`` off,
+                or ``ui.detach_enabled`` is on with detach off.
+        """
+        detach = self.sources.kafka.detach
+        if detach.enabled and self.sources.kafka.enabled and not self.autodiscover.enabled:
+            raise ValueError(DETACH_WITHOUT_AUTODISCOVER_MESSAGE)
+        if self.ui.detach_enabled and not detach.enabled:
+            raise ValueError(UI_DETACH_WITHOUT_FEATURE_MESSAGE)
 
     def declared_connection(self, path: str, kind: str, name: str) -> Any:
         """The connection ``name`` of the service ``kind``, read at run time.

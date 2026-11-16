@@ -10,7 +10,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from drakkar.config.base import ConfigModel
-from drakkar.config.units import Duration, WholeSeconds
+from drakkar.config.units import Duration, WholeSeconds, seconds_text
 from drakkar.config.webapp import WebAppConfig
 
 
@@ -36,6 +36,72 @@ class StartupAlignConfig(ConfigModel):
             'the default 10s aligns on :00/:10/:20/:30/:40/:50 of every minute.'
         ),
     )
+
+
+class KafkaDetachConfig(ConfigModel):
+    """Leave the consumer group for a bounded time and join it again (``sources.kafka.detach``).
+
+    A lease slot in the autodiscover store limits how many workers of one group
+    are away at once.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            'Let this worker leave its consumer group for a bounded time and join it again without a '
+            'restart. Needs autodiscover: the budget of detached workers is kept in its store.'
+        ),
+    )
+    max_detached: int = Field(
+        default=1,
+        ge=1,
+        le=100,
+        description=(
+            'How many workers of one consumer group may be detached at once, from 1 to 100. '
+            'Workers of one group should use the same value.'
+        ),
+    )
+    min_attached: int = Field(
+        default=1,
+        ge=1,
+        le=1000,
+        description=(
+            'How many workers of one consumer group must stay attached, from 1 to 1000. '
+            'Workers of one group should use the same value.'
+        ),
+    )
+    default_duration: Duration = Field(
+        default=3600.0,
+        description='How long a detach lasts when the request gives no duration; from 10s to max_duration.',
+    )
+    max_duration: Duration = Field(
+        default=86400.0,
+        description='The longest detach a request may ask for, from 10s to 7d.',
+    )
+    cooldown: Duration = Field(
+        default=300.0,
+        description=(
+            'The shortest time between the return of a handler detach and the next handler detach, '
+            'from 0 (none) to 1d. An operator detach does not wait for it.'
+        ),
+    )
+    lease: WholeSeconds = Field(
+        default=60,
+        description=(
+            'The lease of the slot in the autodiscover store, from 40s to 1d. A detached worker '
+            'attaches again when its lease was not confirmed for this long.'
+        ),
+    )
+
+    @model_validator(mode='after')
+    def _validate_default_within_max(self) -> 'KafkaDetachConfig':
+        """The default duration must be one that a request may ask for."""
+        if self.default_duration > self.max_duration:
+            raise ValueError(
+                f'sources.kafka.detach.default_duration ({seconds_text(self.default_duration)}) must be <= '
+                f'sources.kafka.detach.max_duration ({seconds_text(self.max_duration)})'
+            )
+        return self
 
 
 class KafkaSourceConfig(ConfigModel):
@@ -97,6 +163,7 @@ class KafkaSourceConfig(ConfigModel):
         ),
     )
     startup_align: StartupAlignConfig = Field(default_factory=StartupAlignConfig)
+    detach: KafkaDetachConfig = Field(default_factory=KafkaDetachConfig)
 
     def validation_errors(self) -> list[str]:
         """Problems that block this source when it is enabled. Pure; used by the model validator and by startup warnings."""
