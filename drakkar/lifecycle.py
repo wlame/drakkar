@@ -69,6 +69,7 @@ from drakkar.cluster_tasks import (
 from drakkar.config.autodiscover import FILESYSTEM_PROVIDER
 from drakkar.config.recorder import PERSISTENCE_POSTGRES
 from drakkar.configmeta import dump_by_yaml_key
+from drakkar.detach_group import kafka_card_feature
 from drakkar.executor import ExecutorPool
 from drakkar.fleet.providers import BUILTIN_PROVIDERS
 from drakkar.fleet.service import FleetRegistry
@@ -271,6 +272,9 @@ class AppLifecycle:
         # The clock of the cluster periodic tasks' slot loops; tests replace it
         # so no test waits for a real slot.
         self._clock: Clock = SYSTEM_CLOCK
+        # Whether the worker is detached from its consumer group now, read at
+        # each card publish; the detach controller replaces it when it exists.
+        self._is_detached: Callable[[], bool] = lambda: False
 
     async def _run_on_startup(self) -> None:
         """Run the handler's ``on_startup`` and adopt the config it returned.
@@ -907,13 +911,23 @@ class AppLifecycle:
         await app._fleet.start()
 
     def _card_features(self) -> dict[str, Any]:
-        """The card's ``features``: the cluster task hash, the UI switch, and the cache marks while the cache serves.
+        """The card's ``features``: the cluster task hash, the UI switch, the cache marks while the cache serves,
+        and the consumer group with the detach state when the Kafka source is on.
 
-        Read at each publish: the cache engine starts after the registry.
+        Read at each publish: the cache engine starts after the registry, and the detach state changes at run time.
         """
         app = self._app
+        config = app._config
         cache = app._cache_engine.features() if app._cache_engine is not None else {}
-        return {'periodic': {'cluster_hash': app.cluster_tasks_hash}, 'ui': app._config.ui.enabled, **cache}
+        features = {'periodic': {'cluster_hash': app.cluster_tasks_hash}, 'ui': config.ui.enabled, **cache}
+        kafka_source = config.sources.kafka
+        if kafka_source.enabled:
+            features['kafka'] = kafka_card_feature(
+                consumer_group=config.resolved_consumer_group,
+                detached=self._is_detached(),
+                detach=kafka_source.detach,
+            )
+        return features
 
     def _set_lifecycle_state(self, state: str) -> None:
         """Record the worker's state and publish it in the registry card at once."""

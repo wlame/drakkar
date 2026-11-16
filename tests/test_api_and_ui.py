@@ -25,7 +25,7 @@ from drakkar.uiserver.server import APIServer, create_api_app, create_ui_app
 from drakkar.uiserver.server_helpers import capabilities_of
 from tests.conftest import kafka_connections
 from tests.test_openapi_parity import _app_routes
-from tests.test_sources_validation import KafkaOnlyHandler
+from tests.test_sources_validation import HttpOnlyHandler, KafkaOnlyHandler
 
 UI_NEEDS_API = 'ui.enabled needs api.enabled; set ui.enabled to false, or set api.enabled to true'
 AUTODISCOVER_NEEDS_API = 'autodiscover.enabled needs api.enabled: peers reach a worker through its API'
@@ -516,6 +516,52 @@ def test_card_features_say_whether_the_ui_is_on(ui_enabled):
     app = DrakkarApp(handler=KafkaOnlyHandler(), config=_config(ui={'enabled': ui_enabled}), worker_id='w-1')
 
     assert app._lifecycle._card_features()['ui'] is ui_enabled
+
+
+def test_card_features_of_a_kafka_worker_carry_its_consumer_group():
+    config = _config()
+    app = DrakkarApp(handler=KafkaOnlyHandler(), config=config, worker_id='w-1')
+
+    assert app._lifecycle._card_features()['kafka'] == {
+        'group': config.resolved_consumer_group,
+        'detached': False,
+    }
+
+
+def test_card_features_carry_the_detach_limits_when_detach_is_on():
+    config = _config(
+        sources={
+            'kafka': {
+                'enabled': True,
+                'startup_align': {'enabled': False},
+                'detach': {'enabled': True, 'max_detached': 2, 'min_attached': 3},
+            }
+        },
+        autodiscover={'enabled': True, 'provider': 'filesystem'},
+        storage={'shared_dir': '/tmp/drakkar-shared-unused'},
+    )
+    app = DrakkarApp(handler=KafkaOnlyHandler(), config=config, worker_id='w-1')
+
+    assert app._lifecycle._card_features()['kafka'] == {
+        'group': config.resolved_consumer_group,
+        'detached': False,
+        'max_detached': 2,
+        'min_attached': 3,
+    }
+
+
+def test_card_features_of_a_worker_without_the_kafka_source_have_no_kafka_key():
+    config = _config(sources={'http': {'enabled': True}}, dlq={'enabled': False})
+    app = DrakkarApp(handler=HttpOnlyHandler(), config=config, worker_id='w-1')
+
+    assert 'kafka' not in app._lifecycle._card_features()
+
+
+def test_card_features_read_the_detached_state_at_each_call():
+    app = DrakkarApp(handler=KafkaOnlyHandler(), config=_config(), worker_id='w-1')
+    app._lifecycle._is_detached = lambda: True
+
+    assert app._lifecycle._card_features()['kafka']['detached'] is True
 
 
 # --- the recorder of a worker with no UI ---

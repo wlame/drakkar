@@ -245,6 +245,15 @@ class FleetRegistry:
         self._state = state
         self._state_changed.set()
 
+    def publish_soon(self) -> None:
+        """Publish the card again without waiting for the heartbeat, for a change of its ``features``.
+
+        Call it on the event loop of the registry. Before :meth:`start` the
+        first publish reads the features anyway; after :meth:`stop` no loop
+        runs, so the call does nothing.
+        """
+        self._state_changed.set()
+
     def snapshot(self) -> FleetSnapshot:
         """The last snapshot. Safe from any thread: it is one immutable object."""
         return self._snapshot

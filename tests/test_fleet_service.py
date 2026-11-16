@@ -875,6 +875,34 @@ async def test_start_twice_runs_one_set_of_loops():
     await service.stop()
 
 
+async def test_publish_soon_sends_the_card_without_waiting_for_the_heartbeat():
+    # The heartbeat is an hour and the clock does not move: only publish_soon can cause the second publish.
+    provider = _Recording(MemoryStore())
+    service = _service(provider)
+
+    await service.start()
+    await wait_for(lambda: ('publish', 'starting') in provider.calls)
+    service.publish_soon()
+    await wait_for(lambda: provider.calls.count(('publish', 'starting')) == 2)
+    await service.stop()
+
+    assert provider.calls.count(('publish', 'starting')) == 2
+
+
+async def test_publish_soon_before_start_and_after_stop_is_harmless():
+    provider = _Recording(MemoryStore())
+    service = _service(provider)
+
+    service.publish_soon()
+    await service.start()
+    await wait_for(lambda: ('publish', 'starting') in provider.calls)
+    await service.stop()
+    service.publish_soon()
+    await asyncio.sleep(0)
+
+    assert provider.calls[-1] == ('withdraw', 'w-1', OWN.instance)
+
+
 async def test_every_state_is_published_even_when_the_next_arrives_before_the_first_publish():
     release = asyncio.Event()
 

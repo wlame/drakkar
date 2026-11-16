@@ -911,7 +911,11 @@ async def test_first_published_card_carries_the_cluster_hash(tmp_path, monkeypat
     )
     assert app.cluster_tasks_hash == expected
     assert provider.cards[0]['state'] == 'starting'
-    assert provider.cards[0]['features'] == {'periodic': {'cluster_hash': expected}, 'ui': True}
+    assert provider.cards[0]['features'] == {
+        'periodic': {'cluster_hash': expected},
+        'ui': True,
+        'kafka': {'group': app._config.resolved_consumer_group, 'detached': False},
+    }
     checker = getattr(app._fleet._on_refresh, '__self__', None)
     assert isinstance(checker, ClusterHashChecker)
 
