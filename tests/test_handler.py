@@ -395,3 +395,92 @@ def test_http_request_label_custom_override_can_embed_business_field():
     req = TenantBM(tenant='acme')
     label = handler.http_request_label(req=req, request_id='req_20260506T000000_0007')
     assert label == 'acme/req_20260506T000000_0007'
+
+
+# --- Completion hook detection and the streaming arrange hook ---
+
+
+def test_overridden_completion_hooks_group_complete_is_false_when_inherited():
+    from drakkar.handler import overridden_completion_hooks
+
+    class H(BaseDrakkarHandler):
+        pass
+
+    assert overridden_completion_hooks(H())['group_complete'] is False
+
+
+def test_overridden_completion_hooks_group_complete_is_true_when_overridden():
+    from drakkar.handler import overridden_completion_hooks
+
+    class H(BaseDrakkarHandler):
+        async def on_group_complete(self, group, results, errors):
+            return None
+
+    flags = overridden_completion_hooks(H())
+    assert flags == {
+        'task_complete': False,
+        'message_complete': False,
+        'window_complete': False,
+        'group_complete': True,
+    }
+
+
+def test_overridden_completion_hooks_class_without_the_attributes_reads_as_not_implemented():
+    from drakkar.handler import overridden_completion_hooks
+
+    class ProtocolOnly:
+        async def arrange(self, messages, pending):
+            return []
+
+    assert overridden_completion_hooks(ProtocolOnly()) == {
+        'task_complete': False,
+        'message_complete': False,
+        'window_complete': False,
+        'group_complete': False,
+    }
+
+
+def test_overridden_completion_hooks_protocol_handler_with_a_hook_reads_as_implemented():
+    from drakkar.handler import overridden_completion_hooks
+
+    class ProtocolOnly:
+        async def on_task_complete(self, result):
+            return None
+
+    assert overridden_completion_hooks(ProtocolOnly())['task_complete'] is True
+
+
+def test_uses_arrange_stream_only_for_an_override():
+    from drakkar.handler import uses_arrange_stream
+
+    class ListHandler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            return []
+
+    class StreamHandler(BaseDrakkarHandler):
+        async def arrange_stream(self, message):
+            yield []
+
+    class ProtocolOnly:
+        pass
+
+    assert uses_arrange_stream(StreamHandler()) is True
+    assert uses_arrange_stream(ListHandler()) is False
+    assert uses_arrange_stream(BaseDrakkarHandler()) is False
+    assert uses_arrange_stream(ProtocolOnly()) is False
+
+
+def test_base_handler_arrange_stream_raises(handler: BaseDrakkarHandler, source_message: SourceMessage):
+    with pytest.raises(NotImplementedError, match='arrange_stream'):
+        handler.arrange_stream(source_message)
+
+
+async def test_base_handler_on_group_complete_returns_none(handler: BaseDrakkarHandler, source_message: SourceMessage):
+    from drakkar.models import TaskGroup
+
+    group = TaskGroup(index=0, source_message=source_message, task_count=0)
+    assert await handler.on_group_complete(group, [], []) is None
+
+
+def test_base_handler_group_labels_default_is_empty():
+    assert BaseDrakkarHandler.group_labels == ()

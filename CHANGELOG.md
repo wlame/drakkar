@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The handler surface of the streaming arrange hook: the model `TaskGroup` (`ExecutorTask.group`, `MessageGroup.groups`), the hooks `arrange_stream` and `on_group_complete`, the class attribute `group_labels`, and their startup checks. The worker does not call the new hooks yet. A handler class that has no method of a completion hook now reads as not implementing it, and `hook_flags` of the live overview has the key `group_complete`.
+
 ### Changed
 
 - In the own archive scope, retention now also deletes the archives of other worker names of the cluster, and their sealed files, once their window is older than `recorder.archive.retention`. Before, the files of a name that stopped for good (an old pod name, or a dead worker's folder that the orphan pass sealed) stayed for ever. A deleted sealed file logs `recorder_sealed_expired`.

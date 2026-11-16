@@ -142,7 +142,7 @@ def create_live_router(deps: UIDeps) -> APIRouter:
         # ``partition_count`` powers the Arrange tab's "last N batches" cap
         # (3 x partition_count) so the live list stays stable-sized regardless
         # of how many partitions the broker has assigned to this worker.
-        # ``hook_flags`` hides completion-hook tabs (Task/Message/Window
+        # ``hook_flags`` hides completion-hook tabs (Task/Message/Window/Group
         # Results) for hooks the handler doesn't implement.
         kafka_cfg = drakkar_app._config.kafka_source_connection
         kafka_src = drakkar_app._config.sources.kafka
@@ -163,6 +163,7 @@ def create_live_router(deps: UIDeps) -> APIRouter:
                 'task_complete': False,
                 'message_complete': False,
                 'window_complete': False,
+                'group_complete': False,
             },
             # Kafka-UI deep-link config for the SPA (Jinja globals on the
             # HTML pages). Always strings; empty when unconfigured or when

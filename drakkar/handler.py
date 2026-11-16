@@ -9,7 +9,7 @@ handles sink failures.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, get_args
 
 import structlog
@@ -47,6 +47,7 @@ from drakkar.models import (
     OutputT,
     PendingContext,
     SourceMessage,
+    TaskGroup,
 )
 from drakkar.utils import make_request_id
 
@@ -227,6 +228,10 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     # ``probe_details_model`` above, and are never set per-instance.
     app_config_model: ClassVar[type[BaseModel] | None] = None
     app_env_prefix: ClassVar[str] = 'APP_'
+    # Label names whose values each task group of ``arrange_stream`` collects
+    # into ``TaskGroup.labels``. Checked at startup: a sequence of unique,
+    # non-empty names, set only together with ``arrange_stream``.
+    group_labels: ClassVar[tuple[str, ...]] = ()
 
     # Backing field for :attr:`app_config`. A class-level ``None`` (rather
     # than an ``__init__`` assignment) keeps the property working on
@@ -475,6 +480,25 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         """
         raise NotImplementedError('arrange() must be implemented by the user')
 
+    def arrange_stream(self, message: SourceMessage) -> AsyncIterator[list[ExecutorTask]]:
+        """Turn one source message into groups of executor tasks, one group per yield.
+
+        Optional, and the other way to the work of ``arrange``: a handler
+        implements one of the two. Write it as an async generator. Each
+        ``yield`` gives one list of tasks, a group; the framework starts the
+        group at once and asks for the next one only when the pending budget
+        has room, so a message with many thousands of tasks holds a bounded
+        number of them in memory. A bare ``return`` or the end of the
+        function ends the stream. An empty list is ignored.
+
+        Every task must have ``source_offsets == [message.offset]``. Each
+        task gets ``task.group``, the :class:`TaskGroup` of its list. The
+        handler class attribute ``group_labels`` names the labels the group
+        collects. ``executor.window_size`` has no effect for such a handler,
+        and ``on_window_complete`` is refused at startup.
+        """
+        raise NotImplementedError('arrange_stream() is optional; override it instead of arrange()')
+
     def task_run_seconds(self, result: ExecutorResult) -> float | None:
         """Return the run time to draw for this task, or None to use the framework measure.
 
@@ -547,6 +571,28 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         tasks (e.g. per-task detail via on_task_complete, per-message
         rollup via on_message_complete). Offsets are committed
         immediately after this hook returns.
+        """
+        return None
+
+    async def on_group_complete(
+        self,
+        group: TaskGroup,
+        results: list[ExecutorResult],
+        errors: list[ExecutorError],
+    ) -> CollectResult | None:
+        """Process the outcome of one task group of ``arrange_stream``.
+
+        Fires once for each group, after every task of the group has a
+        terminal outcome and the ``on_task_complete`` hook and delivery of
+        each task have ended. ``results`` are the terminal successes in
+        completion order and ``errors`` the terminal failures, as in
+        ``MessageGroup``. The framework keeps both lists only for a handler
+        that overrides this hook, and drops them after the hook and its
+        delivery end. Write small scalar values into ``group.notes`` to keep
+        them until ``on_message_complete``.
+
+        Return a CollectResult to deliver with the message context, or None.
+        A raise is logged and ignored. Valid only with ``arrange_stream``.
         """
         return None
 
@@ -858,6 +904,7 @@ _COMPLETION_HOOKS = {
     'task_complete': 'on_task_complete',
     'message_complete': 'on_message_complete',
     'window_complete': 'on_window_complete',
+    'group_complete': 'on_group_complete',
 }
 
 
@@ -869,22 +916,32 @@ def overridden_completion_hooks(handler: object) -> dict[str, bool]:
     hook has a different one, one that inherits shares it. This also works
     for handlers that implement the ``DrakkarHandler`` protocol without
     subclassing — their methods are not the base class's either, so they
-    read as implemented.
+    read as implemented. Such a handler that has no method of that name
+    reads as not implemented, so nothing is kept for a hook that does not
+    exist.
 
     A handler that wraps a hook through composition or a decorator also
     reads as implemented. That is the safe direction to be wrong in: the
     caller then keeps data nobody reads, rather than dropping data a hook
     was going to be handed.
     """
-    cls = type(handler)
-    return {
-        # ``getattr`` on the class, not the instance: bound methods wrap in a
-        # fresh object per access, so an identity test on them never matches.
-        # A handler missing the attribute entirely (it should not happen given
-        # the Protocol) counts as not implemented.
-        name: getattr(cls, attr, None) is not getattr(BaseDrakkarHandler, attr)
-        for name, attr in _COMPLETION_HOOKS.items()
-    }
+    return {name: _overrides(handler, attr) for name, attr in _COMPLETION_HOOKS.items()}
+
+
+def _overrides(handler: object, attr: str) -> bool:
+    """Whether the handler's class defines ``attr`` and it is not the base class's default.
+
+    ``getattr`` on the class, not the instance: bound methods wrap in a fresh
+    object per access, so an identity test on them never matches. A class
+    missing the attribute entirely counts as not implemented.
+    """
+    hook = getattr(type(handler), attr, None)
+    return hook is not None and hook is not getattr(BaseDrakkarHandler, attr)
+
+
+def uses_arrange_stream(handler: object) -> bool:
+    """Whether the handler overrides ``arrange_stream``, so it turns each message into a stream of task groups."""
+    return _overrides(handler, 'arrange_stream')
 
 
 def task_run_seconds_hook(handler: Any) -> Callable[[ExecutorResult], float | None] | None:

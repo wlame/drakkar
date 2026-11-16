@@ -574,6 +574,7 @@ class TestApiV1LiveOverview:
             'task_complete': False,
             'message_complete': False,
             'window_complete': False,
+            'group_complete': False,
         }
         # Kafka-UI knobs unconfigured → empty strings; source topic has a default
         assert data['kafka_ui_base'] == ''
@@ -643,6 +644,7 @@ class TestApiV1LiveOverview:
             'task_complete': True,
             'message_complete': False,
             'window_complete': False,
+            'group_complete': False,
         }
 
     async def test_kafka_ui_config_surfaces(self, debug_config, mock_recorder, mock_app):

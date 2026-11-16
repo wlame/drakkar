@@ -1319,6 +1319,7 @@ def test_hook_flags_no_overrides_returns_all_false():
         'task_complete': False,
         'message_complete': False,
         'window_complete': False,
+        'group_complete': False,
     }
 
 
@@ -1341,6 +1342,7 @@ def test_hook_flags_detects_overrides():
     assert flags['task_complete'] is True
     assert flags['message_complete'] is True
     assert flags['window_complete'] is False
+    assert flags['group_complete'] is False
 
 
 # --- Sinks page and API ---

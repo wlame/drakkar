@@ -203,6 +203,51 @@ class PrecomputedResult(BaseModel):
     )
 
 
+class TaskGroup(BaseModel):
+    """One list of tasks yielded by ``arrange_stream``, and its outcome counters.
+
+    The framework creates it when it receives the list and sets
+    ``task.group`` on each task of the list. The reference goes from the
+    task to the group only: the group never holds a task, a result or an
+    output text, so it can live until the message ends without keeping
+    task payloads in memory.
+    """
+
+    index: int = Field(description='Order of the group in its message, from 0.')
+    source_message: SourceMessage = Field(
+        description='The message of the group. The same object for every group of the message.',
+    )
+    task_count: int = Field(description='Number of tasks in the yielded list. It does not change.')
+    succeeded: int = Field(default=0, description='Tasks of the group that terminally succeeded so far.')
+    failed: int = Field(default=0, description='Tasks of the group that terminally failed so far.')
+    replaced: int = Field(
+        default=0,
+        description=(
+            'Tasks that on_error replaced with other tasks. When the group ends, '
+            'succeeded + failed + replaced is the number of tasks ever scheduled in the group.'
+        ),
+    )
+    labels: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "For each name in the handler's group_labels: the values of that label on the "
+            'yielded tasks, in list order, one entry for each task that has the label.'
+        ),
+    )
+    skipped_deliveries: dict[str, int] = Field(
+        default_factory=dict,
+        description='For each sink <type>/<name>: deliveries of this group that ended in skip.',
+    )
+    # A write into the dict is not validated; drop_invalid_notes checks it
+    # when the group ends.
+    notes: dict[str, str | int | float | bool] = Field(
+        default_factory=dict,
+        description='Small scalar values the hooks keep until on_message_complete.',
+    )
+    started_at: float = Field(default=0.0, description='Monotonic time the group was received.')
+    finished_at: float = Field(default=0.0, description='Monotonic time the last task of the group settled.')
+
+
 class ExecutorTask(BaseModel):
     """A task to be executed by the subprocess executor pool."""
 
@@ -307,6 +352,14 @@ class ExecutorTask(BaseModel):
             'request. Populated only for ``origin == "http"`` tasks; '
             '``None`` for Kafka-origin tasks. See ``make_request_id``.'
         ),
+    )
+    # Excluded from every dump and from repr: the group is shared by many
+    # tasks, and a recorder row or a DLQ record of one task must not carry it.
+    group: TaskGroup | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+        description='The group this task was yielded in by arrange_stream. None for a task from arrange().',
     )
 
 
@@ -504,25 +557,41 @@ class MessageGroup(BaseModel):
             '``origin == "http"``.'
         ),
     )
+    groups: list[TaskGroup] = Field(
+        default_factory=list,
+        description=(
+            'The task groups of a stream handler (arrange_stream), in index order. '
+            'Empty for a handler that uses arrange(); in stream mode tasks, results '
+            'and errors are empty and the counters come from these groups.'
+        ),
+    )
 
     @property
     def succeeded(self) -> int:
         """Number of tasks in this group that terminally succeeded."""
+        if self.groups:
+            return sum(group.succeeded for group in self.groups)
         return len(self.results)
 
     @property
     def failed(self) -> int:
         """Number of tasks in this group that terminally failed."""
+        if self.groups:
+            return sum(group.failed for group in self.groups)
         return len(self.errors)
 
     @property
     def total(self) -> int:
         """Total tasks ever scheduled for this group (includes replaced)."""
+        if self.groups:
+            return self.succeeded + self.failed + self.replaced
         return len(self.tasks)
 
     @property
     def replaced(self) -> int:
         """Tasks that were replaced via on_error — the delta between scheduled and terminal."""
+        if self.groups:
+            return sum(group.replaced for group in self.groups)
         return max(0, self.total - self.succeeded - self.failed)
 
     @property
