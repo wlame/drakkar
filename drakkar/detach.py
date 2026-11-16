@@ -1,6 +1,6 @@
 """Detach a worker from its Kafka consumer group for a bounded time, and attach it again.
 
-The controller is the state machine of spec states ``attached``, ``detaching``,
+The controller is the state machine of the states ``attached``, ``detaching``,
 ``detached`` and ``attaching``. A detach takes one of ``max_detached`` lease
 slots in the autodiscover store (:mod:`drakkar.detach_slots`), checks that
 enough workers of the group stay attached (:mod:`drakkar.detach_group`), and
@@ -76,6 +76,8 @@ REFUSED_BUDGET_FULL = 'budget_full'
 REFUSED_STORE_UNAVAILABLE = 'store_unavailable'
 REFUSED_LEAVE_FAILED = 'leave_failed'
 REFUSED_HELD_BY_OPERATOR = 'held_by_operator'
+# An attach answer: the worker is still outside its group, and the join is tried again every 5 s.
+REFUSED_JOIN_FAILED = 'join_failed'
 
 # The causes of an attach (the ``cause`` of ``worker_attached``).
 CAUSE_HANDLER = 'handler'
@@ -103,6 +105,9 @@ _ABORT_REASONS = {
     CAUSE_TOO_FEW_WORKERS: REFUSED_TOO_FEW_WORKERS,
     CAUSE_DEADLINE: REFUSED_LEAVE_FAILED,
 }
+
+# The causes a caller of ``attach`` may give; the other causes are the framework's own.
+_CALLER_CAUSES = frozenset({CAUSE_HANDLER, CAUSE_OPERATOR})
 
 # A slot acquire that was not won, as the refusal it gives.
 _ACQUIRE_REFUSALS = {
@@ -211,6 +216,8 @@ class DetachController:
         self._current: _Transition | None = None
         self._timer: asyncio.Task[None] | None = None
         self._timer_stop: _TimerStop | None = None
+        # The background retry of a join that failed; at most one runs.
+        self._join_retry: asyncio.Task[None] | None = None
         # Clock times: when the worker became detached, and when it last attached (for the cooldown).
         self._detached_at: float | None = None
         self._last_attach_at: float | None = None
@@ -264,10 +271,10 @@ class DetachController:
         """Leave the consumer group for ``duration`` seconds, or answer why not.
 
         Returns when the revoke drain has ended and no partition is left on
-        this worker, or with a refusal (spec order: ``not_running``,
+        this worker, or with a refusal, checked in this order: ``not_running``,
         ``stopping``, ``disabled``, ``inside_pipeline_hook``,
         ``already_detached``, ``cooldown``, ``too_few_workers``,
-        ``budget_full``, ``store_unavailable``, ``leave_failed``).
+        ``budget_full``, ``store_unavailable``, ``leave_failed``.
 
         Raises:
             ValueError: ``duration`` is out of range (:func:`check_duration`).
@@ -295,10 +302,17 @@ class DetachController:
     async def attach(self, *, cause: str, reason: str = '') -> AttachResult:
         """Join the consumer group again; ``cause`` is ``handler`` or ``operator``.
 
-        Returns when the join has seen one poll and the slot is released. A
-        handler attach does not end an operator detach (``held_by_operator``).
-        A cancelled caller does not stop the attach.
+        Returns when the join has seen one poll and the slot is released, or
+        with ``join_failed`` when the join did not succeed: the worker is still
+        outside its group and the join is tried again every 5 s. A handler
+        attach does not end an operator detach (``held_by_operator``). A
+        cancelled caller does not stop the attach.
+
+        Raises:
+            ValueError: ``cause`` is not ``handler`` or ``operator``.
         """
+        if cause not in _CALLER_CAUSES:
+            raise ValueError(f'cause must be handler or operator, got {cause!r}')
         asked_at = self._clock.time()
         source = self._source()
         refusal = None
@@ -306,6 +320,10 @@ class DetachController:
             refusal = REFUSED_NOT_RUNNING
         elif self._is_stopping():
             refusal = REFUSED_STOPPING
+        elif self._state.state == STATE_ATTACHING:
+            # An earlier attach still tries its join: answer at once, with no second retry.
+            refusal = REFUSED_JOIN_FAILED
+            self._start_join_retry(cause=cause, reason=reason[:REASON_MAX_CHARS])
         if refusal is not None:
             result = AttachResult(attached=False, reason=refusal)
             self._note_request(cause, ACTION_ATTACH, refusal, asked_at)
@@ -368,16 +386,28 @@ class DetachController:
     async def _detach_job(
         self, transition: _Transition, *, origin: DetachOrigin, seconds: float, reason: str, asked_at: float
     ) -> DetachResult:
-        async with self._lock:
-            self._current = transition
-            try:
-                result = await self._detach_locked(transition, origin=origin, seconds=seconds, reason=reason)
-            except Exception:
-                await logger.aexception('detach_transition_failed', category='kafka', origin=str(origin))
-                result = DetachResult(detached=False, reason=REFUSED_LEAVE_FAILED, until=None)
-            finally:
-                self._current = None
-        await self._account_detach(origin, result, asked_at)
+        try:
+            async with self._lock:
+                self._current = transition
+                try:
+                    result = await self._detach_locked(transition, origin=origin, seconds=seconds, reason=reason)
+                except Exception:
+                    await logger.aexception('detach_transition_failed', category='kafka', origin=str(origin))
+                    result = DetachResult(detached=False, reason=REFUSED_LEAVE_FAILED, until=None)
+                finally:
+                    self._current = None
+        except asyncio.CancelledError:
+            # Only the stop cancels a job: the request still counts, as stopping.
+            self._count_detach(origin, REFUSED_STOPPING, asked_at)
+            raise
+        if self._state.state == STATE_ATTACHING and not self._is_stopping():
+            # An undo that failed left the worker outside its group: the join retry brings it back.
+            self._start_join_retry(cause=str(origin), reason='')
+        try:
+            await self._account_detach(origin, result, asked_at)
+        except Exception:
+            # Nobody may await this task any more (a cancelled caller), so its error is logged here.
+            await logger.aexception('detach_transition_failed', category='kafka', origin=str(origin))
         return result
 
     async def _detach_locked(
@@ -391,8 +421,10 @@ class DetachController:
         state = self._state
         if state.state == STATE_DETACHED:
             return self._detach_again(state, origin=origin, seconds=seconds, reason=reason)
+        if state.state == STATE_ATTACHING:
+            # A join retry is in progress: the worker is outside its group, with no deadline.
+            return DetachResult(detached=True, reason=REFUSED_ALREADY_DETACHED, until=None)
         if state.state != STATE_ATTACHED:
-            # Only a stop leaves another state behind a transition.
             return self._refused(REFUSED_STOPPING)
         now = self._clock.time()
         if (
@@ -453,7 +485,7 @@ class DetachController:
         self._state = DetachState(
             state=STATE_DETACHING, origin=origin, reason=reason, since=_utc(self._clock.time()), until=None
         )
-        leave = asyncio.create_task(source.leave_group(), name='drakkar-detach-leave')
+        leave = self._spawn(source.leave_group(), name='drakkar-detach-leave')
         await asyncio.wait({leave, transition.stopped}, return_when=asyncio.FIRST_COMPLETED)
         if not leave.done():
             leave.cancel()
@@ -501,51 +533,101 @@ class DetachController:
         return DetachResult(detached=True, reason='', until=_utc(until))
 
     async def _undo_leave(self, slot: DetachSlot) -> None:
-        """Bring a detach that did not end in ``detached`` back: join again (unless stopping), release the slot."""
+        """Bring a detach that did not end in ``detached`` back: join again (unless stopping), release the slot.
+
+        A publish that failed half way may have started the timer, set the
+        gauge and sent a card; all three are put back.
+        """
+        self._cancel_timer()
+        detached.set(0)
         state = self._state
         self._state = DetachState(
             state=STATE_ATTACHING, origin=state.origin, reason=state.reason, since=state.since, until=None
         )
-        source = self._source()
-        joined = source is None or source.is_group_member or await self._join_until_member(source)
-        await self._release_slot(slot)
-        if joined:
-            self._state = ATTACHED_STATE
+        joined = False
+        try:
+            source = self._source()
+            joined = source is None or source.is_group_member or await self._join_until_member(source)
+        finally:
+            # Released whatever the join did: a slot left held would be refreshed for ever.
+            await self._release_slot(slot)
+            if joined:
+                self._state = ATTACHED_STATE
+            self._publish_card()
 
     # --- the attach transition -------------------------------------------------
 
     async def _attach_job(self, *, cause: str, reason: str, asked_at: float | None) -> AttachResult:
-        """Attach under the lock; ``asked_at`` is set for a handler or operator request, which ``last_request`` shows."""
-        async with self._lock:
-            try:
+        """Attach under the lock; ``asked_at`` is set for a handler or operator request, which ``last_request`` shows.
+
+        An attach that raises answers ``join_failed`` unless the worker is
+        attached or stopping, and the join is tried again in the background:
+        the worker may already be outside its group.
+        """
+        try:
+            async with self._lock:
                 result = await self._attach_locked(cause=cause, reason=reason)
-            except Exception:
-                await logger.aexception('attach_transition_failed', category='kafka', cause=cause)
-                result = AttachResult(attached=False, reason=REFUSED_STOPPING)
+        except Exception:
+            await logger.aexception('attach_transition_failed', category='kafka', cause=cause)
+            result = self._after_failed_attach(cause=cause, reason=reason)
         if asked_at is not None:
             outcome = OUTCOME_ATTACHED if result.attached else result.reason
             self._note_request(cause, ACTION_ATTACH, outcome, asked_at)
         return result
 
+    def _after_failed_attach(self, *, cause: str, reason: str) -> AttachResult:
+        """The answer of an attach that raised; the join retry starts when the worker is still outside its group."""
+        if self._state.state == STATE_ATTACHED:
+            return AttachResult(attached=True, reason='')
+        if self._is_stopping():
+            return AttachResult(attached=False, reason=REFUSED_STOPPING)
+        if self._state.state == STATE_ATTACHING:
+            self._start_join_retry(cause=cause, reason=reason)
+        return AttachResult(attached=False, reason=REFUSED_JOIN_FAILED)
+
     async def _attach_locked(self, *, cause: str, reason: str) -> AttachResult:
         state = self._state
         if state.state == STATE_ATTACHED:
             return AttachResult(attached=True, reason='')
-        if state.state != STATE_DETACHED or self._is_stopping():
+        if self._is_stopping():
+            return AttachResult(attached=False, reason=REFUSED_STOPPING)
+        if state.state == STATE_ATTACHING:
+            # An earlier attach still tries its join; it ends the detach when the join succeeds.
+            self._start_join_retry(cause=cause, reason=reason)
+            return AttachResult(attached=False, reason=REFUSED_JOIN_FAILED)
+        if state.state != STATE_DETACHED:
             return AttachResult(attached=False, reason=REFUSED_STOPPING)
         if cause == CAUSE_HANDLER and state.origin == DetachOrigin.OPERATOR:
             return AttachResult(attached=False, reason=REFUSED_HELD_BY_OPERATOR)
         self._cancel_timer()
+        # No deadline while attaching: the timer has ended.
         self._state = DetachState(
-            state=STATE_ATTACHING, origin=state.origin, reason=state.reason, since=state.since, until=state.until
+            state=STATE_ATTACHING, origin=state.origin, reason=state.reason, since=state.since, until=None
         )
+        result = await self._join_and_finish(cause=cause, reason=reason)
+        if result.reason == REFUSED_JOIN_FAILED:
+            self._start_join_retry(cause=cause, reason=reason)
+        return result
+
+    async def _join_and_finish(self, *, cause: str, reason: str) -> AttachResult:
+        """One bounded join; on success release the slot and enter ``attached``.
+
+        Answers ``join_failed`` when the join did not succeed and the worker
+        is not stopping; the slot then stays held and refreshed, because the
+        worker is outside its group. At a stop the slot is released.
+        """
         source = self._source()
-        joined = source is None or await self._join_until_member(source)
+        joined = source is None or (not self._is_stopping() and await self._join_attempt(source))
+        if not joined:
+            if not self._is_stopping():
+                return AttachResult(attached=False, reason=REFUSED_JOIN_FAILED)
+            slot = self._slot
+            if slot is not None:
+                await self._release_slot(slot)
+            return AttachResult(attached=False, reason=REFUSED_STOPPING)
         slot = self._slot
         if slot is not None:
             await self._release_slot(slot)
-        if not joined:
-            return AttachResult(attached=False, reason=REFUSED_STOPPING)
         now = self._clock.time()
         detached_seconds = round(now - (self._detached_at if self._detached_at is not None else now), 3)
         self._last_attach_at = now
@@ -562,28 +644,59 @@ class DetachController:
         )
         return AttachResult(attached=True, reason='')
 
+    def _start_join_retry(self, *, cause: str, reason: str) -> None:
+        """Start the background join retry unless one runs; it keeps the cause of the attach that started it."""
+        if self._join_retry is not None and not self._join_retry.done():
+            return
+        self._join_retry = self._spawn(
+            self._guarded(self._retry_join(cause=cause, reason=reason), event='attach_transition_failed'),
+            name='drakkar-attach-retry',
+        )
+
+    async def _retry_join(self, *, cause: str, reason: str) -> None:
+        """Try the join every :data:`JOIN_RETRY_SECONDS` until the worker is attached or stops.
+
+        Each try takes the lock only for its own join, so a caller is never
+        held behind the retries.
+        """
+        while True:
+            await self._clock.sleep(JOIN_RETRY_SECONDS)
+            async with self._lock:
+                if self._state.state != STATE_ATTACHING:
+                    return
+                try:
+                    result = await self._join_and_finish(cause=cause, reason=reason)
+                except Exception:
+                    await logger.aexception('attach_transition_failed', category='kafka', cause=cause)
+                    continue
+            if result.reason != REFUSED_JOIN_FAILED:
+                return
+
+    async def _join_attempt(self, source: KafkaSource) -> bool:
+        """One join bounded by ``executor.drain_timeout`` plus the leave margin; a failure is logged."""
+        bound = self._app.config.executor.drain_timeout + LEAVE_MARGIN_SECONDS
+        try:
+            joined = await self._join_once(source, bound)
+        except Exception as exc:
+            await logger.awarning('detach_join_failed', category='kafka', error=str(exc) or type(exc).__name__)
+            return False
+        if not joined and not self._is_stopping():
+            await logger.awarning('detach_join_failed', category='kafka', error='the join did not complete')
+        return joined
+
     async def _join_until_member(self, source: KafkaSource) -> bool:
         """Join until the source is a member; False when the worker stops first.
 
-        Each try is bounded by ``executor.drain_timeout`` plus the leave
-        margin. A try that fails, answers False without a stop, or passes its
-        bound is followed by another one :data:`JOIN_RETRY_SECONDS` later.
+        Each try is :meth:`_join_attempt`; a failed try is followed by another
+        one :data:`JOIN_RETRY_SECONDS` later.
         """
-        bound = self._app.config.executor.drain_timeout + LEAVE_MARGIN_SECONDS
-        while True:
+        while not self._is_stopping():
+            if await self._join_attempt(source):
+                return True
             if self._is_stopping():
                 return False
-            try:
-                joined = await self._join_once(source, bound)
-            except Exception as exc:
-                await logger.awarning('detach_join_failed', category='kafka', error=str(exc) or type(exc).__name__)
-            else:
-                if joined:
-                    return True
-                if self._is_stopping():
-                    return False
-                await logger.awarning('detach_join_failed', category='kafka', error='the join did not complete')
             await self._clock.sleep(JOIN_RETRY_SECONDS)
+        return False
 
     async def _join_once(self, source: KafkaSource, bound: float) -> bool:
         """One join, bounded by ``bound`` seconds of the clock; False when it passes its bound."""
@@ -611,16 +724,20 @@ class DetachController:
         """End a detach for a safety rule without waiting: abort one in progress, or start an attach."""
         if self._is_stopping():
             return
+        if self._state.state == STATE_DETACHED:
+            # Also while a detach job still holds the lock (it may be logging its publish):
+            # this attach queues on the lock and runs right after it.
+            self._start_attach(cause)
+            return
         if self._current is not None:
             self._current.abort(_ABORT_REASONS[cause])
-            return
-        if self._state.state == STATE_DETACHED:
-            self._spawn(
-                self._guarded(
-                    self._attach_job(cause=cause, reason='', asked_at=None), event='attach_transition_failed'
-                ),
-                name=f'drakkar-attach-{cause}',
-            )
+
+    def _start_attach(self, cause: str) -> None:
+        """Start an attach on a task of the controller's own, not awaited by anyone."""
+        self._spawn(
+            self._guarded(self._attach_job(cause=cause, reason='', asked_at=None), event='attach_transition_failed'),
+            name=f'drakkar-attach-{cause}',
+        )
 
     def _start_timer(self, until: float) -> None:
         self._cancel_timer()
@@ -702,7 +819,7 @@ class DetachController:
         return source is not None and source._poll_waits_end()
 
     def _early_detach_refusal(self, *, in_pipeline_hook: bool) -> str | None:
-        """The refusals that need no lock and no store call, in spec order."""
+        """The refusals that need no lock and no store call, in the order of the refusal list."""
         source = self._source()
         if source is not None and not source.is_ready:
             return REFUSED_NOT_RUNNING
@@ -768,10 +885,13 @@ class DetachController:
     async def _account_detach(self, origin: DetachOrigin, result: DetachResult, asked_at: float) -> None:
         """Count, log and note a detach request once its outcome is known."""
         outcome = OUTCOME_DETACHED if result.detached and not result.reason else result.reason
-        detach_requests.labels(origin=str(origin), outcome=outcome).inc()
-        self._note_request(str(origin), ACTION_DETACH, outcome, asked_at)
+        self._count_detach(origin, outcome, asked_at)
         if outcome != OUTCOME_DETACHED:
             await logger.ainfo('detach_refused', category='kafka', origin=str(origin), reason=outcome)
+
+    def _count_detach(self, origin: DetachOrigin, outcome: str, asked_at: float) -> None:
+        detach_requests.labels(origin=str(origin), outcome=outcome).inc()
+        self._note_request(str(origin), ACTION_DETACH, outcome, asked_at)
 
     def _note_request(self, origin: str, action: str, outcome: str, asked_at: float) -> None:
         self._last_request = {

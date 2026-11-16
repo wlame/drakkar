@@ -534,33 +534,96 @@ async def test_attach_before_the_run_or_at_a_stop_is_refused(worker, ready, stop
     assert await worker.controller.attach(cause='handler') == AttachResult(attached=False, reason=reason)
 
 
-async def test_a_join_that_fails_is_tried_again_and_keeps_the_slot(worker, clock, logs):
+async def test_a_join_that_fails_answers_join_failed_and_is_tried_again(worker, clock, logs):
     await worker.detach()
     worker.source.join_answers = [False, RuntimeError('broker gone'), HANG, True]
 
-    attach = asyncio.create_task(worker.controller.attach(cause='operator'))
-    await run_clock_until(clock, NOW + 4)
+    result = await worker.controller.attach(cause='operator')
+
+    assert result == AttachResult(attached=False, reason='join_failed')
+    assert worker.controller.wire_state()['last_request']['outcome'] == 'join_failed'
     assert worker.controller.state.state == 'attaching'
     assert worker.held_scopes() == [worker.scopes[0]]
     await run_clock_until(clock, NOW + 40)
 
-    assert (await attach).attached
+    assert worker.controller.state.state == 'attached'
     assert worker.calls.count('join_group') == 4
     assert len(logs.named('detach_join_failed')) == 3
     assert worker.held_scopes() == []
+
+
+async def test_a_join_retry_that_succeeds_writes_the_attach_once_with_its_cause(worker, clock, logs):
+    before = attached_by('operator')
+    await worker.detach()
+    worker.source.join_answers = [False]
+
+    assert (await worker.controller.attach(cause='operator')).reason == 'join_failed'
+    await run_clock_until(clock, NOW + 6)
+
+    assert worker.controller.state.state == 'attached'
+    assert attached_by('operator') == before + 1
+    worker.recorder.record_worker_attached.assert_called_once_with(cause='operator', detached_seconds=5.0)
+    assert len(logs.named('worker_attached')) == 1
+
+
+async def test_an_attach_while_attaching_answers_at_once_and_starts_no_second_retry(worker, clock):
+    await worker.detach()
+    worker.source.join_answers = [False, False, True]
+    assert (await worker.controller.attach(cause='operator')).reason == 'join_failed'
+    retry = worker.controller._join_retry
+
+    second = await worker.controller.attach(cause='handler')
+
+    assert second == AttachResult(attached=False, reason='join_failed')
+    assert worker.controller._join_retry is retry
+    assert worker.calls.count('join_group') == 1
+    await run_clock_until(clock, NOW + 11)
+    assert worker.controller.state.state == 'attached'
+    assert worker.calls.count('join_group') == 3
+
+
+async def test_a_detach_while_attaching_answers_already_detached(worker):
+    await worker.detach()
+    worker.source.join_answers = [False]
+    await worker.controller.attach(cause='operator')
+
+    result = await worker.detach()
+
+    assert result == DetachResult(detached=True, reason='already_detached', until=None)
 
 
 async def test_a_stop_during_the_join_retries_releases_the_slot(worker, clock):
     await worker.detach()
     worker.source.join_answers = [RuntimeError('broker gone')]
 
-    attach = asyncio.create_task(worker.controller.attach(cause='operator'))
-    await run_clock_until(clock, NOW + 1)
+    assert (await worker.controller.attach(cause='operator')).reason == 'join_failed'
     worker.source._stop_requested = True
     await run_clock_until(clock, NOW + 10)
 
-    assert await attach == AttachResult(attached=False, reason='stopping')
     assert worker.held_scopes() == []
+
+
+async def test_until_ms_is_set_only_while_detached(worker, clock):
+    seen: dict[str, Any] = {}
+    worker.source.leave_gate = asyncio.Event()
+    task = asyncio.create_task(worker.detach())
+    await wait_for(lambda: 'leave_group' in worker.calls)
+    seen['detaching'] = worker.controller.wire_state()
+    worker.source.leave_gate.set()
+    await task
+    seen['detached'] = worker.controller.wire_state()
+    worker.source.join_answers = [False]
+    await worker.controller.attach(cause='operator')
+    seen['attaching'] = worker.controller.wire_state()
+    await run_clock_until(clock, NOW + 6)
+    seen['attached'] = worker.controller.wire_state()
+
+    assert {name: (state['state'], state['until_ms'] is not None) for name, state in seen.items()} == {
+        'detaching': ('detaching', False),
+        'detached': ('detached', True),
+        'attaching': ('attaching', False),
+        'attached': ('attached', False),
+    }
 
 
 async def test_a_cancelled_attach_caller_does_not_stop_the_attach(worker, clock):
@@ -951,16 +1014,123 @@ async def test_a_failed_slot_release_is_logged_and_the_worker_attaches(worker, l
     worker.controller._slot = None
 
 
-async def test_an_attach_that_raises_is_logged(worker, logs, monkeypatch):
+async def test_an_attach_that_raises_answers_join_failed_and_is_tried_again(worker, logs, clock, monkeypatch):
     await worker.detach()
+    original = worker.controller._join_and_finish
+    tries: list[int] = []
 
-    async def broken_attach(**kwargs):
-        raise RuntimeError('attach broke')
+    async def join_raising_once(**kwargs):
+        tries.append(1)
+        if len(tries) == 1:
+            raise RuntimeError('join log broke')
+        return await original(**kwargs)
 
-    monkeypatch.setattr(worker.controller, '_attach_locked', broken_attach)
+    monkeypatch.setattr(worker.controller, '_join_and_finish', join_raising_once)
 
-    assert await worker.controller.attach(cause='handler') == AttachResult(attached=False, reason='stopping')
-    assert logs.named('attach_transition_failed')
+    assert await worker.controller.attach(cause='handler') == AttachResult(attached=False, reason='join_failed')
+    assert worker.controller.state.state == 'attaching'
+    await run_clock_until(clock, NOW + 10)
+
+    assert worker.controller.state.state == 'attached'
+    assert worker.held_scopes() == []
+    assert len(logs.named('attach_transition_failed')) == 1
+
+
+async def test_a_lease_lost_while_the_detach_is_logged_attaches(worker, logs, monkeypatch):
+    class LossInsideTheLog(RecordingLogger):
+        async def awarning(self, event, **fields):
+            if event == 'worker_detached':
+                await worker.controller._on_slot_lost('taken_over')
+            await super().awarning(event, **fields)
+
+    monkeypatch.setattr(detach_module, 'logger', LossInsideTheLog(logs.entries))
+
+    assert (await worker.detach()).detached
+    await wait_for(lambda: worker.controller.state.state == 'attached')
+
+    assert worker.held_scopes() == []
+
+
+async def test_an_undo_that_raises_still_releases_the_slot_and_attaches(worker, logs, clock, monkeypatch):
+    worker.source.leave_outcomes = [LeaveOutcome.TIMED_OUT]
+    original = worker.controller._join_until_member
+    tries: list[int] = []
+
+    async def join_raising_once(source):
+        tries.append(1)
+        if len(tries) <= 2:
+            raise RuntimeError('join log broke')
+        return await original(source)
+
+    monkeypatch.setattr(worker.controller, '_join_until_member', join_raising_once)
+
+    result = await worker.detach()
+
+    assert result.reason == 'leave_failed'
+    assert worker.held_scopes() == []
+    await run_clock_until(clock, NOW + 10)
+    assert worker.controller.state.state == 'attached'
+
+
+async def test_a_failed_publish_clears_the_gauge_the_timer_and_the_card(worker, monkeypatch):
+    def broken_record(**kwargs):
+        raise RuntimeError('recorder broke')
+
+    worker.recorder.record_worker_detached.side_effect = broken_record
+
+    result = await worker.detach()
+
+    assert result.reason == 'leave_failed'
+    assert worker.controller.state.state == 'attached'
+    assert detached._value.get() == 0
+    assert worker.controller._timer is None
+    assert worker.calls.count('publish') == 2
+
+
+async def test_the_leave_task_is_owned_by_the_controller(worker):
+    worker.source.leave_gate = asyncio.Event()
+    task = asyncio.create_task(worker.detach())
+    await wait_for(lambda: 'leave_group' in worker.calls)
+
+    names = {owned.get_name() for owned in worker.controller._tasks}
+
+    assert 'drakkar-detach-leave' in names
+    await worker.controller.release_at_stop(1.0)
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert all(owned.done() for owned in worker.controller._tasks)
+
+
+async def test_an_error_in_the_tail_of_a_detach_job_is_logged(worker, logs, monkeypatch):
+    async def broken_account(*args, **kwargs):
+        raise RuntimeError('account broke')
+
+    monkeypatch.setattr(worker.controller, '_account_detach', broken_account)
+
+    result = await worker.detach()
+
+    assert result.detached
+    assert logs.named('detach_transition_failed')
+
+
+async def test_a_detach_cancelled_by_the_stop_is_counted_as_stopping(worker):
+    before = counted('handler', 'stopping')
+    worker.source.leave_gate = asyncio.Event()
+    task = asyncio.create_task(worker.detach())
+    await wait_for(lambda: 'leave_group' in worker.calls)
+
+    await worker.controller.release_at_stop(1.0)
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert counted('handler', 'stopping') == before + 1
+    assert worker.controller.wire_state()['last_request']['outcome'] == 'stopping'
+
+
+@pytest.mark.parametrize('cause', ['deadline', 'lease_lost', 'too_few_workers', 'anything'])
+async def test_attach_refuses_a_cause_a_caller_may_not_give(worker, cause):
+    with pytest.raises(ValueError, match='cause must be handler or operator'):
+        await worker.controller.attach(cause=cause)
 
 
 async def test_an_operator_request_that_raises_is_logged(worker, logs, monkeypatch):
@@ -971,3 +1141,16 @@ async def test_an_operator_request_that_raises_is_logged(worker, logs, monkeypat
 
     worker.controller.request(action='attach')
     await wait_for(lambda: logs.named('detach_request_failed'))
+
+
+async def test_with_the_feature_off_a_hash_check_error_reaches_the_registry(worker, monkeypatch):
+    worker.app.config.sources.kafka.detach.enabled = False
+
+    async def broken_check(self, views):
+        raise RuntimeError('hash check broke')
+
+    monkeypatch.setattr(cluster_tasks.ClusterHashChecker, 'check', broken_check)
+    on_refresh = worker.app._lifecycle._registry_refresh_callback()
+
+    with pytest.raises(RuntimeError, match='hash check broke'):
+        await on_refresh([])

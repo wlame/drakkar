@@ -14,7 +14,7 @@ from structlog.testing import capture_logs
 
 from drakkar import cluster_tasks as cluster_tasks_module
 from drakkar.app import DrakkarApp
-from drakkar.cluster_tasks import ClusterElection, archive_scope
+from drakkar.cluster_tasks import ClusterElection, ClusterHashChecker, archive_scope
 from drakkar.config import DrakkarConfig
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
 from drakkar.fleet.providers import BUILTIN_PROVIDERS, FilesystemRegistry
@@ -927,7 +927,8 @@ async def test_first_published_card_carries_the_cluster_hash(tmp_path, monkeypat
         'ui': True,
         'kafka': {'group': app._config.resolved_consumer_group, 'detached': False},
     }
-    assert app._fleet._on_refresh is not None
+    checker = getattr(app._fleet._on_refresh, '__self__', None)
+    assert isinstance(checker, ClusterHashChecker)
 
 
 async def test_roster_runs_before_the_registry_and_any_sink_connects(tmp_path, monkeypatch):

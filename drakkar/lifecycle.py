@@ -919,10 +919,15 @@ class AppLifecycle:
     def _registry_refresh_callback(self) -> Callable[[list[PeerView]], Awaitable[None]]:
         """The one callback of each registry refresh: the cluster hash check, then the detach watchdog.
 
-        An error of one is logged and does not keep the other from running.
+        An error of one is logged and does not keep the other from running. With
+        the detach feature off the callback is the hash check alone.
         """
         app = self._app
         hash_checker = ClusterHashChecker(app.cluster_tasks_hash, app._cluster_name)
+        kafka = app._config.sources.kafka
+        if not (kafka.enabled and kafka.detach.enabled):
+            # No watchdog to protect: an error of the hash check reaches the registry as it always did.
+            return hash_checker.check
 
         async def on_refresh(views: list[PeerView]) -> None:
             try:
