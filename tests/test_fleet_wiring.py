@@ -293,6 +293,17 @@ def test_election_is_built_for_detach_without_a_cluster_task(tmp_path):
     assert election.caller._category == 'periodic'
 
 
+def test_detach_with_autodiscover_off_and_no_cluster_task_builds_no_election(tmp_path):
+    app = _app(
+        tmp_path,
+        sources={'kafka': {'enabled': True, 'startup_align': {'enabled': False}, 'detach': {'enabled': True}}},
+    )
+    # The config load refuses this; the builder must still not fail on it.
+    app._config.autodiscover.enabled = False
+
+    assert app._lifecycle._build_cluster_election([]) is None
+
+
 @pytest.mark.parametrize(
     'overrides',
     [

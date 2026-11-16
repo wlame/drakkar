@@ -841,7 +841,10 @@ class AppLifecycle:
             return None
         autodiscover = config.autodiscover
         if not autodiscover.enabled:
-            raise ValueError(STARTUP_NO_AUTODISCOVER.format(name=sorted(cluster_task_names)[0]))
+            if cluster_task_names:
+                raise ValueError(STARTUP_NO_AUTODISCOVER.format(name=sorted(cluster_task_names)[0]))
+            # Only the detach budget wants it, and the config load refuses detach with autodiscover off.
+            return None
         options = election_provider_options(config)
         context = ElectionContext(
             worker=app._worker_id,

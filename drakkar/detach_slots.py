@@ -22,7 +22,7 @@ import secrets
 from collections.abc import Awaitable, Callable, Sequence
 from enum import StrEnum
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -74,6 +74,22 @@ def slot_scope(cluster: str, consumer_group: str, index: int) -> str:
     return task_scope(cluster, f'detach.{group_key(consumer_group)}_{index}')
 
 
+class _StopRequest:
+    """Set when :meth:`DetachSlot.release` or :meth:`DetachSlot.stop_refreshing` ends a refresher on purpose."""
+
+    def __init__(self) -> None:
+        self.requested = False
+
+
+async def _log_error(event: str, **fields: Any) -> None:
+    """Log an error line of the refresher; a log call that fails must not keep the loss from its report."""
+    try:
+        await logger.aexception(event, category='kafka', **fields)
+    except Exception:
+        # The log is the only place this error could go; the loss report matters more.
+        return
+
+
 class DetachSlot:
     """The slot this worker holds while it is detached: at most one, taken from ``scopes`` in order.
 
@@ -106,6 +122,7 @@ class DetachSlot:
         self._confirmed_at = 0.0
         self._loss_reason: str | None = None
         self._refresher: asyncio.Task[None] | None = None
+        self._refresh_stop: _StopRequest | None = None
         # Releases started for an acquire that was cancelled; kept so they are not collected while they run.
         self._background: set[asyncio.Task[None]] = set()
 
@@ -188,36 +205,69 @@ class DetachSlot:
             raise RuntimeError('there is no detach slot to refresh')
         self.stop_refreshing()
         scope = self._scopes[self.index]
+        # One flag per refresher: an old refresher that ends late cannot read a new one's flag.
+        stop = _StopRequest()
+        self._refresh_stop = stop
         self._refresher = asyncio.create_task(
-            self._refresh_loop(scope, self._token, on_lost), name=f'drakkar-detach-refresh-{scope}'
+            self._refresh_loop(scope, self._token, stop, on_lost), name=f'drakkar-detach-refresh-{scope}'
         )
 
     def stop_refreshing(self) -> None:
-        """Stop the refresh task at once, releasing nothing."""
-        refresher, self._refresher = self._refresher, None
-        if refresher is not None:
-            refresher.cancel()
+        """Stop the refresh task at once, releasing nothing and reporting no loss."""
+        self._end_refresher()
 
     async def release(self, *, deadline_seconds: float = SLOT_ACQUIRE_SECONDS) -> None:
         """Stop refreshing, then give the slot back; no release is sent once the store answered ``taken_over``.
 
         A slot lost as ``expired`` may still be held at the store, so it is released.
         """
-        refresher, self._refresher = self._refresher, None
-        if refresher is not None:
-            refresher.cancel()
-            # asyncio.wait, not await: a cancellation of this release must still reach its caller.
-            await asyncio.wait({refresher})
+        refresher = self._end_refresher()
+        # A refresher runs only while a slot is held, so with no slot there is nothing to wait for.
         if self.index is None or self._token is None:
             return
         scope, token = self._scopes[self.index], self._token
-        self.index = None
-        self._token = None
+        if refresher is not None:
+            try:
+                # asyncio.wait, not await: a cancellation of this release must still reach its caller.
+                await asyncio.wait({refresher})
+            except asyncio.CancelledError:
+                self._forget_slot()
+                if self._loss_reason != LOSS_TAKEN_OVER:
+                    self._release_in_background(scope, token)
+                raise
+        self._forget_slot()
         if self._loss_reason == LOSS_TAKEN_OVER:
             return
         await self._release_scope(scope, token, deadline_seconds=deadline_seconds)
 
+    def _forget_slot(self) -> None:
+        self.index = None
+        self._token = None
+
+    def _end_refresher(self) -> asyncio.Task[None] | None:
+        """Mark the refresher's stop as requested, cancel it and return its task (``None`` when none runs)."""
+        refresher, self._refresher = self._refresher, None
+        stop, self._refresh_stop = self._refresh_stop, None
+        if stop is not None:
+            stop.requested = True
+        if refresher is not None:
+            refresher.cancel()
+        return refresher
+
     async def _release_scope(self, scope: str, token: str, *, deadline_seconds: float = SLOT_ACQUIRE_SECONDS) -> None:
+        """Release ``scope`` for ``token``; when this is cancelled, the release goes on in the background.
+
+        The slot is no longer recorded here when this runs, so a release that a
+        cancellation stopped would leave the store holding it with no owner
+        until the lease ends.
+        """
+        try:
+            await self._send_release(scope, token, deadline_seconds=deadline_seconds)
+        except asyncio.CancelledError:
+            self._release_in_background(scope, token)
+            raise
+
+    async def _send_release(self, scope: str, token: str, *, deadline_seconds: float = SLOT_ACQUIRE_SECONDS) -> None:
         provider = self._election.provider
         await self._caller.call(
             'release',
@@ -226,29 +276,44 @@ class DetachSlot:
         )
 
     def _release_in_background(self, scope: str, token: str) -> None:
-        """Release a slot that a cancelled acquire may have taken, without waiting for it."""
-        task = asyncio.create_task(self._release_scope(scope, token), name=f'drakkar-detach-release-{scope}')
+        """Release a slot whose release or acquire was cancelled, without waiting for it."""
+        task = asyncio.create_task(self._send_release(scope, token), name=f'drakkar-detach-release-{scope}')
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
-    async def _refresh_loop(self, scope: str, token: str, on_lost: Callable[[str], Awaitable[None]]) -> None:
+    async def _refresh_loop(
+        self,
+        scope: str,
+        token: str,
+        stop: _StopRequest,
+        on_lost: Callable[[str], Awaitable[None]],
+    ) -> None:
         try:
             reason = await self._refresh_until_lost(scope, token)
+        except asyncio.CancelledError:
+            if not stop.requested:
+                # Cancelled by something other than release() or stop_refreshing():
+                # nothing refreshes the slot any more, so the loss is reported.
+                await self._report_loss(scope, LOSS_EXPIRED, on_lost)
+            raise
         except Exception as exc:
             # Nothing awaits this task, so its error is logged here or never; the
             # loss is still reported, so the worker does not stay detached unrefreshed.
-            await logger.aexception('detach_lease_refresh_failed', category='kafka', scope=scope, exc_info=exc)
+            await _log_error('detach_lease_refresh_failed', scope=scope, exc_info=exc)
             reason = LOSS_EXPIRED
+        await self._report_loss(scope, reason, on_lost)
+
+    async def _report_loss(self, scope: str, reason: str, on_lost: Callable[[str], Awaitable[None]]) -> None:
+        """Record the loss and call ``on_lost`` once; an error of the callback is logged."""
         self._loss_reason = reason
         # Forget this task first: on_lost may call release(), which must not wait for its own task.
         if self._refresher is asyncio.current_task():
             self._refresher = None
+            self._refresh_stop = None
         try:
             await on_lost(reason)
         except Exception as exc:
-            await logger.aexception(
-                'detach_lease_loss_report_failed', category='kafka', scope=scope, reason=reason, exc_info=exc
-            )
+            await _log_error('detach_lease_loss_report_failed', scope=scope, reason=reason, exc_info=exc)
 
     async def _refresh_until_lost(self, scope: str, token: str) -> str:
         """Refresh until the slot is lost; the reason, ``taken_over`` or ``expired``."""

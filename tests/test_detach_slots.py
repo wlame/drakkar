@@ -273,11 +273,64 @@ async def test_a_cancelled_acquire_leaves_no_slot_held(logs):
     acquiring.cancel()
     with pytest.raises(asyncio.CancelledError):
         await acquiring
-    for _ in range(20):
-        await asyncio.sleep(0)
+    await asyncio.gather(*slot._background)
 
     assert slot.index is None
     assert provider.calls['release'] == 1
+    assert provider.store.holder(SCOPES[0]) is None
+
+
+class HangingFirstRelease(WritesThenFails):
+    """A provider whose first release does not answer until it is cancelled; later releases answer."""
+
+    def __init__(self, clock: VirtualClock, *, acquire_fails: bool = True) -> None:
+        super().__init__(clock)
+        self._acquire_fails = acquire_fails
+        self.release_started = asyncio.Event()
+
+    async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
+        if self._acquire_fails:
+            return await super().acquire(scope, token, lease_seconds)
+        return await ScriptedElection.acquire(self, scope, token, lease_seconds)
+
+    async def release(self, scope: str, token: str) -> None:
+        if not self.release_started.is_set():
+            self.release_started.set()
+            await asyncio.Event().wait()
+        await super().release(scope, token)
+
+
+async def test_a_cancelled_clean_up_release_of_a_failed_acquire_is_sent_in_the_background(logs):
+    clock = VirtualClock(NOW)
+    provider = HangingFirstRelease(clock)
+    slot = make_slot(provider, clock, scopes=SCOPES[:1])
+    acquiring = asyncio.ensure_future(slot.acquire())
+    await asyncio.wait_for(provider.release_started.wait(), timeout=5)
+    assert provider.store.holder(SCOPES[0]) is not None
+
+    acquiring.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await acquiring
+    await asyncio.gather(*slot._background)
+
+    assert slot.index is None
+    assert provider.store.holder(SCOPES[0]) is None
+
+
+async def test_a_cancelled_release_is_sent_in_the_background(logs):
+    clock = VirtualClock(NOW)
+    provider = HangingFirstRelease(clock, acquire_fails=False)
+    slot = make_slot(provider, clock, scopes=SCOPES[:1])
+    assert await slot.acquire() is SlotAcquire.WON
+    releasing = asyncio.ensure_future(slot.release())
+    await asyncio.wait_for(provider.release_started.wait(), timeout=5)
+
+    releasing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await releasing
+    await asyncio.gather(*slot._background)
+
+    assert slot.index is None
     assert provider.store.holder(SCOPES[0]) is None
 
 
@@ -564,3 +617,111 @@ async def test_start_refreshing_with_no_slot_raises(logs):
 
     with pytest.raises(RuntimeError, match='no detach slot'):
         slot.start_refreshing(LossRecorder(clock))
+
+
+async def test_a_refresher_cancelled_from_outside_reports_expired(logs):
+    clock = VirtualClock(NOW)
+    provider = ScriptedElection(clock)
+    slot = make_slot(provider, clock)
+    await slot.acquire()
+    lost = LossRecorder(clock)
+    slot.start_refreshing(lost)
+    await run_clock_until(clock, NOW + REFRESH + 1)
+    refresher = slot._refresher
+
+    refresher.cancel()
+    await asyncio.wait({refresher})
+
+    assert refresher.cancelled()
+    assert lost.reports == [(LOSS_EXPIRED, NOW + REFRESH + 1)]
+
+
+async def test_stop_refreshing_reports_no_loss(logs):
+    clock = VirtualClock(NOW)
+    provider = ScriptedElection(clock)
+    slot = make_slot(provider, clock)
+    await slot.acquire()
+    lost = LossRecorder(clock)
+    slot.start_refreshing(lost)
+    await run_clock_until(clock, NOW + REFRESH + 1)
+    refresher = slot._refresher
+
+    slot.stop_refreshing()
+    await asyncio.wait({refresher})
+
+    assert lost.reports == []
+    assert provider.store.holder(SCOPES[0]) is not None
+
+
+class RaisingLogger(RecordingLogger):
+    """A logger whose error lines raise, as a broken log handler would."""
+
+    async def aexception(self, event: str, **fields: Any) -> None:
+        raise RuntimeError('the log handler is broken')
+
+
+async def test_a_raising_logger_does_not_skip_on_lost(monkeypatch):
+    monkeypatch.setattr(detach_slots, 'logger', RaisingLogger())
+    monkeypatch.setattr(cluster_tasks, 'logger', RecordingLogger())
+    clock = VirtualClock(NOW)
+    caller = RefreshRaises(
+        ResilienceConfig(max_retries=0),
+        feature=DETACH_FEATURE,
+        provider=PROVIDER,
+        category='kafka',
+        logger=RecordingLogger(),
+        sleep=_no_sleep,
+    )
+    slot = make_slot(ScriptedElection(clock), clock, caller=caller)
+    await slot.acquire()
+    lost = LossRecorder(clock)
+
+    slot.start_refreshing(lost)
+    await run_clock_until(clock, NOW + 2 * LEASE)
+
+    assert lost.reports == [(LOSS_EXPIRED, NOW + REFRESH)]
+
+
+class SlowToStopRefresh(ScriptedElection):
+    """A refresh that does not answer, and that takes until ``may_end`` is set to end once cancelled."""
+
+    def __init__(self, clock: VirtualClock) -> None:
+        super().__init__(clock)
+        self.refreshing = asyncio.Event()
+        self.may_end = asyncio.Event()
+
+    async def refresh(self, scope: str, token: str) -> bool:
+        self.refreshing.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await self.may_end.wait()
+            raise
+        return True
+
+
+async def test_a_release_cancelled_while_the_refresher_ends_is_sent_in_the_background(logs):
+    clock = VirtualClock(NOW)
+    provider = SlowToStopRefresh(clock)
+    slot = make_slot(provider, clock, scopes=SCOPES[:1])
+    await slot.acquire()
+    lost = LossRecorder(clock)
+    slot.start_refreshing(lost)
+    keeper = asyncio.ensure_future(run_clock_until(clock, NOW + REFRESH))
+    await asyncio.wait_for(provider.refreshing.wait(), timeout=5)
+    releasing = asyncio.ensure_future(slot.release())
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    releasing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await releasing
+    await asyncio.gather(*slot._background)
+    provider.may_end.set()
+    keeper.cancel()
+    with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+        await keeper
+
+    assert slot.index is None
+    assert provider.store.holder(SCOPES[0]) is None
+    assert lost.reports == []
