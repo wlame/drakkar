@@ -383,7 +383,7 @@
     offset: The offset of the message.
     group_index: The index of the group the pull was preparing.
     error: The error text.
-  action: Fix the generator, or catch the errors of side calls inside it; the started groups finish, the offset stays pending and the partition loop restarts once, then is dead.
+  action: Fix the generator, or catch the errors of side calls inside it. The started groups finish. The first such error restarts the partition loop, which goes on with the next messages, but the offset of the failed message stays pending for the life of the process, so the commits of the partition stop there and its lag grows until a restart or a rebalance, when the message is read again. A second error marks the partition dead, and /readyz shows it.
   related:
     - concept:arrange-stream
     - event:log:partition_processor_died

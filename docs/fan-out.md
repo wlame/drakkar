@@ -574,7 +574,10 @@ reserves the average size of a group (tasks, stdin bytes, kept output),
 pulls the next group, charges its real tasks and bytes, and starts its tasks
 in chunks. Admission needs only "below the limits", not "the group fits": a
 group larger than the limits is admitted when its turn comes, so a stream
-never waits for ever.
+never waits for ever. During the first 3 groups of a partition the
+reservation takes at least all the free room, so other loops wait until that
+group has fanned out; before the worker has measured a group with tasks,
+only one unmeasured group is pulled at a time.
 
 **You bound the memory by the size of your groups.** The pending limits
 are passed by at most one group for each message that streams. Keep groups
@@ -602,16 +605,21 @@ the stream:
 - The message never completes: `on_message_complete` does not fire and the
   offset stays pending.
 - The error is logged as `arrange_stream_failed` and then handled as a
-  raise of `arrange()`: the partition loop restarts once, then the
-  partition is dead and `/readyz` shows it.
+  raise of `arrange()`. The first such error restarts the partition loop,
+  and the loop goes on with the next messages. The offset of the failed
+  message stays pending for the life of the process, so the commits of that
+  partition stop there and its lag grows until a restart or a rebalance,
+  when the message is read again. A second error marks the partition dead,
+  and `/readyz` shows it.
 
 So catch the errors of side API calls inside the generator when a retry
 there is possible.
 
 ### A DLQ outcome
 
-A DLQ record ends the message, as for `arrange()`. It also closes the
-stream: no further group is pulled, and a pull in progress is cancelled.
+A DLQ outcome ends the message, as for `arrange()`: a DLQ record was
+written, or, under `dlq.on_send_failure: drop`, a DLQ write failed and the
+message was dropped. It also closes the stream: no further group is pulled, and a pull in progress is cancelled.
 Groups that are running finish; `on_group_complete` and
 `on_message_complete` still fire, and their results are not delivered
 (`sink_not_started`, reason `message_dlq`). The offset completes.
@@ -622,10 +630,12 @@ A message whose stream has already ended drains as usual: its offset can
 still complete, so the drain waits for it.
 
 A message whose stream is still open is **abandoned**
-(`arrange_stream_abandoned`). Its tasks are cancelled first, then the
-generator is closed; its group hooks, its message hook and their deliveries
-do not run, because the next owner of the partition runs the message from
-its start. The cancelled tasks give back their budget charges. Its offset
+(`arrange_stream_abandoned`). The pull in progress is cancelled at once;
+then the tasks of the message are cancelled, then the generator is closed.
+No further group hook, no message hook and no delivery of them runs,
+because the next owner of the partition runs the message from its start.
+Groups that finished before the stop have already run their hook and
+delivered. The cancelled tasks give back their budget charges. Its offset
 stays pending and the drain does not wait for it. The still-running tasks
 of a stream that failed earlier are cancelled too
 (`arrange_stream_tasks_cancelled`): that offset can never complete in this
@@ -652,11 +662,12 @@ async def arrange_stream(self, message):
 ```
 
 The generator runs in one context for the whole stream, so a context
-variable or a log field it binds lives across its yields. Closing has a
-bound of 5 seconds. A generator that catches the cancellation and keeps
-running is left behind after it, with one error line
-`arrange_stream_close_failed`. With `executor.drain_timeout` below about 6
-seconds such a generator can make the drain time out.
+variable or a log field it binds lives across its yields. The framework
+waits at most 5 seconds for the close. A generator that catches the
+cancellation and keeps running is left running after that, with one error
+line `arrange_stream_close_failed`. A stream ended by a DLQ outcome
+completes only after its close, so with `executor.drain_timeout` below about
+6 seconds such a generator can make the drain time out at a stop.
 
 ### Startup checks
 
@@ -675,19 +686,23 @@ Startup fails, with a message that names the handler class, when:
 
 - `arranged`: one row for each group. `message_count` is 1; `duration` is
   the time inside the pull (the preparation of that group, without the wait
-  for room); the metadata has `group_index`. Each group takes its own
-  `window_id`.
+  for room); the metadata has `group_index`. Each pull takes the next
+  `window_id`; an empty list uses one up too, so the ids of the groups can
+  have gaps.
 - `group_complete`: one row for each group, only when the handler overrides
   `on_group_complete` (also when the hook raised, then with
   `output_message_count` 0).
 - `message_complete`: the metadata has `group_count`.
 - No `window_complete` rows.
 - `drakkar_handler_duration_seconds{hook="arrange_stream"}` has one sample
-  for each pull; `{hook="on_group_complete"}` one for each hook call.
+  for each pull that returned a group; `{hook="on_group_complete"}` one for each hook call.
 
 The [Message Probe](observability.md#debug-debug-tools) runs a stream
-handler too, but only its first 5 groups; it reports a flag
-`stream_truncated` when the stream had more.
+handler too, but only its first 5 groups. It calls `on_group_complete`, when
+the handler overrides it, right after the tasks of each group end, and then
+`on_message_complete` with the groups that ran; it reports a flag
+`stream_truncated` when the stream had more. After an error of the stream
+the probe closes the stream, and `on_message_complete` does not run.
 
 The HTTP source does not stream: `arrange_http_request()` keeps its list
 form.

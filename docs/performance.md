@@ -596,6 +596,11 @@ its real tasks and bytes out of the reservation, and gives back the rest.
 - Admission needs only "below the limits", not "the group fits". A group
   larger than the limits is admitted when its turn comes, so a stream never
   waits for ever.
+- **Warm-up:** during the first 3 groups of a partition the reservation takes
+  at least all the free room, so no other loop is admitted until that group
+  has fanned out. Before the worker has measured a group with tasks, only one
+  unmeasured group is pulled at a time. Unlike a window, a group has no floor
+  from `executor.window_size`.
 - **The limits are passed by at most one group for each message that
   streams.** The handler bounds the memory by the size of its groups.
 - The averages are per group on such a worker; a worker has one handler, so

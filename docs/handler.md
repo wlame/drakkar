@@ -352,9 +352,13 @@ list is ignored.
   effect, and `on_window_complete` is refused at startup.
 - The offset completes only when the whole message ends; a replay runs
   every group again.
-- A raise inside the generator fails the stream: the started groups finish,
-  the message never completes, and the partition loop restarts once, then
-  is dead. Catch the errors of side calls inside the generator.
+- A raise inside the generator fails the stream: the started groups finish
+  and the message never completes. The first such error restarts the
+  partition loop, which goes on with the next messages; the offset stays
+  pending, so the commits of that partition stop and its lag grows until a
+  restart or a rebalance, when the message is read again. A second error
+  marks the partition dead, and `/readyz` shows it. Catch the errors of side
+  calls inside the generator.
 - At a stop the generator sees `GeneratorExit` at a `yield` or
   `CancelledError` inside an `await`; put cleanup in `try`/`finally`.
 

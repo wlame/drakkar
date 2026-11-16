@@ -387,7 +387,7 @@
     - do: Keep executor.drain_timeout below sources.kafka.max_poll_interval and check that executor.task_timeout times the retries fits the time a message may take.
       why: A drain that times out cancels the work and skips the final commit of every partition; the messages run again on the next owner.
     - do: With arrange_stream, catch the errors of side calls inside the generator and write cleanup in try and finally.
-      why: A raise ends the stream, keeps the offset pending and restarts the partition loop; at a stop the generator sees GeneratorExit or CancelledError.
+      why: A raise ends the stream and restarts the partition loop; the offset stays pending, so the partition commits nothing more until a restart or a rebalance. At a stop the generator sees GeneratorExit or CancelledError.
   causes:
     - cause: Messages are lost without a record.
       check: drakkar_dlq_dropped_payloads_total grows.

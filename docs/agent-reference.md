@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `7b4fb444c63ad91d`.
+Registry version: `99fa5e2cbf8fe309`.
 
 ## Concepts
 
@@ -41,7 +41,7 @@ Each partition loop takes messages from its queue into a window. The size of a w
 
 A partition loop does not wait for a window to finish before it takes the next one. Many windows of one partition can be in flight at one time. The offsets of a window are committed in order, so a slow message holds the commit of the messages after it.
 
-A handler with `arrange_stream` has no windows: it takes one message at a time, and `executor.window_size` has no effect. Each of its groups takes the next window id of the partition, so its `arranged` row and its annotations carry that id.
+A handler with `arrange_stream` has no windows: it takes one message at a time, and `executor.window_size` has no effect. Each of its pulls takes the next window id of the partition, so the `arranged` row of a group and its annotations carry that id. An empty list uses up an id too, so the ids of the groups can have gaps.
 
 **Principles:**
 - A window never holds messages of two partitions.
@@ -119,7 +119,7 @@ The budget counts the tasks that are created and not settled (waiting for a slot
 
 A partition loop checks the room and reserves the estimate of its next window before it calls `arrange`. While the budget is full, loops wait in a first-in, first-out list; the wait is counted in `drakkar_window_admission_wait_seconds_total`. The HTTP source uses the same budget.
 
-For a handler with `arrange_stream` the unit is a group: the loop waits for room and reserves the average size of a group before each pull. Only "below the limits" is needed, so a group larger than the limits is still admitted when its turn comes. The limits are passed by at most one group for each message that streams.
+For a handler with `arrange_stream` the unit is a group: the loop waits for room and reserves the average size of a group before each pull. During the first 3 groups of a partition the reservation takes at least all the free room, and before the worker has measured a group with tasks only one unmeasured group is pulled at a time. Only "below the limits" is needed, so a group larger than the limits is still admitted when its turn comes. The limits are passed by at most one group for each message that streams.
 
 A full budget is the normal state of a busy worker. It is a problem only when the executor pool is not busy at the same time.
 
@@ -381,7 +381,7 @@ Every task must have `source_offsets == [message.offset]`. The worker takes one 
 
 The offset completes only when the whole message ends. A restart, a revoke or a DLQ replay runs the message from its start, and the sinks receive the finished groups again.
 
-The generator runs in one context for the whole stream, so a context variable it binds lives across yields. At a stop the pull in progress is cancelled and the generator is closed within 5 seconds: the handler sees `GeneratorExit` at a `yield` or `CancelledError` inside an `await`. Put cleanup in `try`/`finally`. A raise inside the generator is an error of the stream (`log:arrange_stream_failed`): the started groups finish, the message never completes, and the partition loop restarts once, then is dead.
+The generator runs in one context for the whole stream, so a context variable it binds lives across yields. At a stop the pull in progress is cancelled and the generator is closed; the framework waits at most 5 seconds for the close, and a generator that ignores the cancellation is left running. The handler sees `GeneratorExit` at a `yield` or `CancelledError` inside an `await`. Put cleanup in `try`/`finally`. A raise inside the generator is an error of the stream (`log:arrange_stream_failed`): the started groups finish and the message never completes. The first such error restarts the partition loop, which goes on with the next messages, but the offset of the failed message stays pending for the life of the process, so the commits of the partition stop there and its lag grows until a restart or a rebalance, when the message is read again. A second error marks the partition dead, and `/readyz` shows it.
 
 **Principles:**
 - Catch the errors of side API calls inside the generator when a retry there is possible; a raise fails the whole stream.
@@ -437,14 +437,14 @@ What can fail at each step of a message, which hook or config key decides, and w
 | Step | Decided by | Outcomes |
 |---|---|---|
 | Parse | `sources.kafka.on_parse_error` | `skip` (the arrange hook gets the message with `payload` None), `dlq` (DLQ record, then commit), `raise` (the partition loop fails) |
-| Arrange (any form) | the hook raises | the loop restarts once, then the partition is dead; the offset stays pending; for a stream, started groups finish |
+| Arrange (any form) | the hook raises | the first error restarts the partition loop, which goes on with the next messages; the offset stays pending, so the partition commits nothing more until a restart or a rebalance; a second error marks the partition dead; for a stream, started groups finish |
 | Task run | `executor.task_timeout`, `on_error`, `executor.max_retries`, `executor.on_failure` | retry, skip, replace, DLQ record |
 | Completion hook raises | which hook | a task failure for `on_task_complete`; logged and ignored for group, message and window hooks |
 | Sink delivery | `sinks.defaults` and each sink, `on_delivery_error`, the breaker, `depends_on` | retry, skip, DLQ record, not started |
 | DLQ write | `dlq.on_send_failure` | `drop` (commits), `stall` (offset held) |
 | Stop or revoke | `executor.drain_timeout` | drained and committed; cancelled and replayed; open stream closed and replayed |
 
-A DLQ record ends the message: no later delivery starts, the hooks still run without delivery, and the offset commits. For a stream it also closes the stream. At a stop, a message whose stream is still open is abandoned: its tasks are cancelled, no hook runs, and its offset stays uncommitted and is left out of the drain.
+A DLQ record ends the message: no later delivery starts, the hooks still run without delivery, and the offset commits. For a stream a DLQ outcome also closes the stream; under `dlq.on_send_failure: drop` a DLQ write that fails does the same. At a stop, a message whose stream is still open is abandoned: its tasks are cancelled, no further group hook, no message hook and no delivery of them runs, and its offset stays uncommitted and is left out of the drain.
 
 **Principles:**
 - Every failure either commits with a record (DLQ, skip count, log line) or keeps the offset for a replay.
@@ -2780,7 +2780,7 @@ The arrange_stream generator raised or yielded a value that breaks its rules; th
 - `group_index`: The index of the group the pull was preparing.
 - `offset`: The offset of the message.
 
-**Action:** Fix the generator, or catch the errors of side calls inside it; the started groups finish, the offset stays pending and the partition loop restarts once, then is dead.
+**Action:** Fix the generator, or catch the errors of side calls inside it. The started groups finish. The first such error restarts the partition loop, which goes on with the next messages, but the offset of the failed message stays pending for the life of the process, so the commits of the partition stop there and its lag grows until a restart or a rebalance, when the message is read again. A second error marks the partition dead, and /readyz shows it.
 
 **Related:** `concept:arrange-stream`, `event:log:partition_processor_died`, `recipe:partition-dead`
 
@@ -3152,7 +3152,7 @@ Set timeouts, retries and failure policies so that they agree with each other an
 3. Set sinks.defaults.on_failure (dlq or skip), max_retries and delivery_timeout, and override them on a sink that needs other values. Why: A failed delivery is retried up to max_retries, then the declared policy writes a DLQ record or skips the payloads.
 4. Choose dlq.on_send_failure, drop or stall. Why: It decides when no DLQ record can be written; drop loses the message and commits, stall holds the offset.
 5. Keep executor.drain_timeout below sources.kafka.max_poll_interval and check that executor.task_timeout times the retries fits the time a message may take. Why: A drain that times out cancels the work and skips the final commit of every partition; the messages run again on the next owner.
-6. With arrange_stream, catch the errors of side calls inside the generator and write cleanup in try and finally. Why: A raise ends the stream, keeps the offset pending and restarts the partition loop; at a stop the generator sees GeneratorExit or CancelledError.
+6. With arrange_stream, catch the errors of side calls inside the generator and write cleanup in try and finally. Why: A raise ends the stream and restarts the partition loop; the offset stays pending, so the partition commits nothing more until a restart or a rebalance. At a stop the generator sees GeneratorExit or CancelledError.
 
 **Causes:**
 - Messages are lost without a record. Check: drakkar_dlq_dropped_payloads_total grows. Fix: Fix the DLQ topic, or set dlq.on_send_failure to stall.
