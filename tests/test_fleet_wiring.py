@@ -36,9 +36,10 @@ from tests.archive_helpers import (
     idle_archive_task,
     make_sealed_db,
 )
+from tests.clocks import VirtualClock
 from tests.conftest import WAIT_FOR_TIMEOUT_SECONDS, kafka_connections, wait_for
-from tests.fleet_fakes import ElectionStore, MemoryElection, MemoryRegistry, MemoryStore
-from tests.test_cluster_tasks import NOW, SLOT, RecordingLogger, VirtualClock
+from tests.fleet_fakes import ElectionStore, MemoryElection, MemoryRegistry, MemoryStore, RecordingLogger
+from tests.test_cluster_tasks import NOW, SLOT
 from tests.test_lifecycle_sources import StubSource
 from tests.test_sources_validation import KafkaOnlyHandler
 
@@ -277,6 +278,19 @@ def test_no_cluster_task_builds_no_election(tmp_path):
     app = _app(tmp_path)
 
     assert app._lifecycle._build_cluster_election([]) is None
+
+
+def test_election_is_built_for_detach_without_a_cluster_task(tmp_path):
+    app = _app(
+        tmp_path,
+        sources={'kafka': {'enabled': True, 'startup_align': {'enabled': False}, 'detach': {'enabled': True}}},
+    )
+
+    election = app._lifecycle._build_cluster_election([])
+
+    assert isinstance(election, ClusterElection)
+    assert isinstance(election.provider, FilesystemElection)
+    assert election.caller._category == 'periodic'
 
 
 @pytest.mark.parametrize(

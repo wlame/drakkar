@@ -818,18 +818,23 @@ class AppLifecycle:
         app._cluster_election = self._build_cluster_election(app._periodic_roster.cluster_task_names)
 
     def _build_cluster_election(self, cluster_task_names: Sequence[str]) -> ClusterElection | None:
-        """The election service of ``cluster_task_names``; ``None`` when the worker runs no cluster task.
+        """The worker's one election service; ``None`` when it runs no cluster task and keeps no detach budget.
 
-        The provider is made here and starts at the first slot that needs it.
+        The cluster tasks and the budget of detached workers share it. The
+        provider is made here and starts at the first slot or detach that
+        needs it. The config load already refuses the detach feature with
+        ``autodiscover`` off.
 
         Raises:
             ValueError: a cluster task with ``autodiscover`` off, naming the
                 first task in sorted order.
         """
-        if not cluster_task_names:
-            return None
         app = self._app
         config = app._config
+        kafka = config.sources.kafka
+        keeps_detach_budget = kafka.enabled and kafka.detach.enabled
+        if not cluster_task_names and not keeps_detach_budget:
+            return None
         autodiscover = config.autodiscover
         if not autodiscover.enabled:
             raise ValueError(STARTUP_NO_AUTODISCOVER.format(name=sorted(cluster_task_names)[0]))

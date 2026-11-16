@@ -11,13 +11,17 @@ through an :class:`ElectionStore`, expiring on a clock the test moves. It
 runs through the election test kit.
 """
 
-from collections import Counter
+import asyncio
+from collections import Counter, defaultdict
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from drakkar.fleet.card import sanitize_worker_name
 from drakkar.fleet.provider import PeerCard, PeerCardList, RegistryContext
+from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder.election import ElectionContext
 from drakkar.recorder.lease import LeaseHolder
+from tests.clocks import VirtualClock
 
 
 class MemoryStore:
@@ -177,3 +181,126 @@ class MemoryElection:
     async def stop(self) -> None:
         self.calls['stop'] += 1
         self.stopped = True
+
+
+class RecordingLogger:
+    """An async logger that keeps every line in memory, written on the event loop."""
+
+    def __init__(self, entries: list[dict] | None = None, context: dict | None = None) -> None:
+        self.entries: list[dict] = [] if entries is None else entries
+        self._context = context or {}
+
+    def bind(self, **fields: Any) -> 'RecordingLogger':
+        return RecordingLogger(self.entries, {**self._context, **fields})
+
+    def _write(self, level: str, event: str, fields: dict) -> None:
+        self.entries.append({'event': event, 'log_level': level, **self._context, **fields})
+
+    def debug(self, event: str, **fields: Any) -> None:
+        self._write('debug', event, fields)
+
+    async def ainfo(self, event: str, **fields: Any) -> None:
+        self._write('info', event, fields)
+
+    async def awarning(self, event: str, **fields: Any) -> None:
+        self._write('warning', event, fields)
+
+    async def aexception(self, event: str, **fields: Any) -> None:
+        self._write('error', event, fields)
+
+    def named(self, event: str) -> list[dict]:
+        return [entry for entry in self.entries if entry['event'] == event]
+
+
+class ScriptedElection(MemoryElection):
+    """A memory election whose answers can be scripted per call, recording the clock time of every call.
+
+    ``start_error`` makes every start raise. ``acquire`` and ``refresh`` list
+    the answers of the first calls (a bool, or an exception to raise); later
+    calls answer as the memory election does. ``start_yields``,
+    ``refresh_yields`` and ``is_held_yields`` make a call give the event loop
+    that many turns before it answers; ``start_seconds`` makes a start take
+    that long on the clock.
+    """
+
+    def __init__(
+        self,
+        clock: VirtualClock | None = None,
+        *,
+        start_error: Exception | None = None,
+        acquire: tuple[bool | Exception, ...] = (),
+        refresh: tuple[bool | Exception, ...] = (),
+        start_yields: int = 0,
+        refresh_yields: int = 0,
+        is_held_yields: int = 0,
+        start_seconds: float = 0.0,
+    ) -> None:
+        super().__init__(ElectionStore())
+        self._clock = clock
+        self._start_error = start_error
+        self._acquire = list(acquire)
+        self._refresh = list(refresh)
+        self._start_yields = start_yields
+        self._refresh_yields = refresh_yields
+        self._is_held_yields = is_held_yields
+        self._start_seconds = start_seconds
+        self.at: defaultdict[str, list[float]] = defaultdict(list)
+
+    @property
+    def store(self) -> ElectionStore:
+        return self._store
+
+    def _note(self, op: str) -> None:
+        self.at[op].append(self._clock.time() if self._clock is not None else 0.0)
+
+    async def start(self, ctx: ElectionContext) -> None:
+        self._note('start')
+        for _ in range(self._start_yields):
+            await asyncio.sleep(0)
+        if self._start_seconds and self._clock is not None:
+            await self._clock.sleep(self._start_seconds)
+        if self._start_error is not None:
+            self.calls['start'] += 1
+            raise self._start_error
+        await super().start(ctx)
+
+    async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
+        self._note('acquire')
+        if self._acquire:
+            return self._scripted('acquire', self._acquire.pop(0))
+        return await super().acquire(scope, token, lease_seconds)
+
+    async def refresh(self, scope: str, token: str) -> bool:
+        self._note('refresh')
+        for _ in range(self._refresh_yields):
+            await asyncio.sleep(0)
+        if self._refresh:
+            return self._scripted('refresh', self._refresh.pop(0))
+        return await super().refresh(scope, token)
+
+    async def is_held(self, scope: str, token: str) -> bool:
+        for _ in range(self._is_held_yields):
+            await asyncio.sleep(0)
+        return await super().is_held(scope, token)
+
+    async def release(self, scope: str, token: str) -> None:
+        self._note('release')
+        await super().release(scope, token)
+
+    def _scripted(self, op: str, answer: bool | Exception) -> bool:
+        self.calls[op] += 1
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+class SpyCaller(ResilientCaller):
+    """A resilient caller that notes the deadline each operation was given."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.deadlines: list[tuple[str, float | None]] = []
+
+    async def call(self, op: str, make_call: Callable[[], Awaitable[Any]], **kwargs: Any) -> Any:
+        self.deadlines.append((op, kwargs.get('deadline_seconds')))
+        return await super().call(op, make_call, **kwargs)

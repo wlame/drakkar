@@ -262,13 +262,15 @@ class ClusterElection:
         finally:
             self._holder_batch_running = False
 
-    async def ensure_started(self, deadline_seconds: float) -> CallResult:
+    async def ensure_started(self, deadline_seconds: float, *, caller: ResilientCaller | None = None) -> CallResult:
         """Start the provider unless it has started; the result of the start, or an ok one with no call.
 
         ``deadline_seconds`` bounds the start from the moment of this call:
         a slot that waited for another slot's start gets only the time left.
         After :meth:`stop` the provider is not started again (outcome
-        ``not_started``, nothing counted).
+        ``not_started``, nothing counted). The start goes through ``caller``
+        when one is given (a detach counts its start on its own caller and
+        breaker), else through :attr:`caller`.
         """
         entered = self._clock.time()
         async with self._start_lock:
@@ -277,7 +279,8 @@ class ClusterElection:
             if self._stopped:
                 return _STOPPED
             time_left = deadline_seconds - (self._clock.time() - entered)
-            result = await self.caller.call(
+            start_caller = caller if caller is not None else self.caller
+            result = await start_caller.call(
                 'start', lambda: self.provider.start(self._context), deadline_seconds=time_left
             )
             if not result.ok:

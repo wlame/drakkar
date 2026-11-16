@@ -532,7 +532,7 @@ class DrakkarApp:
 
     @property
     def cluster_election(self) -> ClusterElection | None:
-        """The election of the cluster tasks, or None when the worker runs none."""
+        """The election of the cluster tasks and the detach budget, or None when the worker needs neither."""
         return self._cluster_election
 
     @property

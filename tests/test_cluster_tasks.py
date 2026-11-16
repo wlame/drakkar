@@ -10,13 +10,10 @@ while a line is still being written.
 
 import asyncio
 import contextlib
-import heapq
 import importlib
-import itertools
 import math
 import threading
 import time
-from collections import defaultdict
 from collections.abc import Awaitable, Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any
@@ -46,8 +43,9 @@ from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder import election as election_mod
 from drakkar.recorder.election import LOSS_TAKEN_OVER, LOSS_UNCONFIRMED, ElectionContext, ThreadFence
 from drakkar.schedule import MIN_HOLD_SECONDS, task_scope
+from tests.clocks import VirtualClock
 from tests.conftest import kafka_connections
-from tests.fleet_fakes import ElectionStore, MemoryElection
+from tests.fleet_fakes import RecordingLogger, ScriptedElection, SpyCaller
 
 CLUSTER = 'search-fleet'
 PROVIDER = 'scripted'
@@ -60,189 +58,6 @@ CONTEXT = ElectionContext(
 
 
 # --- test doubles ---
-
-
-class VirtualClock:
-    """A clock whose time moves only to the next sleeper's wake time, once the event loop has nothing else to run.
-
-    ``drift`` lists, for each of the first sleeps, how many seconds it wakes
-    before it was asked to (negative: after), like ``asyncio.sleep`` rounding
-    or a clock that runs behind. The clock does not move past ``limit``;
-    when the next wake time is past it, ``parked`` is set and the sleepers
-    stay asleep.
-    """
-
-    def __init__(self, now: float, drift: tuple[float, ...] = ()) -> None:
-        self.now = now
-        self.drift = list(drift)
-        self.sleeps: list[float] = []
-        self.limit = math.inf
-        self.parked = asyncio.Event()
-        self._sleepers: list[tuple[float, int, asyncio.Future[None]]] = []
-        self._order = itertools.count()
-        self._check_scheduled = False
-
-    def time(self) -> float:
-        return self.now
-
-    async def sleep(self, seconds: float) -> None:
-        self.sleeps.append(seconds)
-        wake = self.now + seconds - (self.drift.pop(0) if self.drift else 0)
-        future = asyncio.get_running_loop().create_future()
-        heapq.heappush(self._sleepers, (wake, next(self._order), future))
-        self._schedule_check()
-        await future
-
-    def _schedule_check(self) -> None:
-        if not self._check_scheduled:
-            self._check_scheduled = True
-            asyncio.get_running_loop().call_soon(self._wake_next_when_idle)
-
-    def _wake_next_when_idle(self) -> None:
-        loop = asyncio.get_running_loop()
-        # asyncio has no public "idle" signal: the ready queue is empty only
-        # when every task waits, here on a sleeper's future.
-        if loop._ready:  # type: ignore[attr-defined]
-            loop.call_soon(self._wake_next_when_idle)
-            return
-        self._check_scheduled = False
-        while self._sleepers and self._sleepers[0][2].done():
-            heapq.heappop(self._sleepers)  # a sleeper whose task was cancelled
-        if not self._sleepers or self._sleepers[0][0] > self.limit:
-            self.parked.set()
-            return
-        wake = self._sleepers[0][0]
-        self.now = max(self.now, wake)
-        # Every sleeper due at this time wakes at once, so loops due
-        # in the same second really run side by side.
-        while self._sleepers and self._sleepers[0][0] == wake:
-            future = heapq.heappop(self._sleepers)[2]
-            if not future.done():
-                future.set_result(None)
-        self._schedule_check()
-
-
-class RecordingLogger:
-    """An async logger that keeps every line in memory, written on the event loop."""
-
-    def __init__(self, entries: list[dict] | None = None, context: dict | None = None) -> None:
-        self.entries: list[dict] = [] if entries is None else entries
-        self._context = context or {}
-
-    def bind(self, **fields: Any) -> 'RecordingLogger':
-        return RecordingLogger(self.entries, {**self._context, **fields})
-
-    def _write(self, level: str, event: str, fields: dict) -> None:
-        self.entries.append({'event': event, 'log_level': level, **self._context, **fields})
-
-    def debug(self, event: str, **fields: Any) -> None:
-        self._write('debug', event, fields)
-
-    async def ainfo(self, event: str, **fields: Any) -> None:
-        self._write('info', event, fields)
-
-    async def awarning(self, event: str, **fields: Any) -> None:
-        self._write('warning', event, fields)
-
-    async def aexception(self, event: str, **fields: Any) -> None:
-        self._write('error', event, fields)
-
-    def named(self, event: str) -> list[dict]:
-        return [entry for entry in self.entries if entry['event'] == event]
-
-
-class ScriptedElection(MemoryElection):
-    """A memory election whose answers can be scripted per call, recording the clock time of every call.
-
-    ``start_error`` makes every start raise. ``acquire`` and ``refresh`` list
-    the answers of the first calls (a bool, or an exception to raise); later
-    calls answer as the memory election does. ``start_yields``,
-    ``refresh_yields`` and ``is_held_yields`` make a call give the event loop
-    that many turns before it answers; ``start_seconds`` makes a start take
-    that long on the clock.
-    """
-
-    def __init__(
-        self,
-        clock: VirtualClock | None = None,
-        *,
-        start_error: Exception | None = None,
-        acquire: tuple[bool | Exception, ...] = (),
-        refresh: tuple[bool | Exception, ...] = (),
-        start_yields: int = 0,
-        refresh_yields: int = 0,
-        is_held_yields: int = 0,
-        start_seconds: float = 0.0,
-    ) -> None:
-        super().__init__(ElectionStore())
-        self._clock = clock
-        self._start_error = start_error
-        self._acquire = list(acquire)
-        self._refresh = list(refresh)
-        self._start_yields = start_yields
-        self._refresh_yields = refresh_yields
-        self._is_held_yields = is_held_yields
-        self._start_seconds = start_seconds
-        self.at: defaultdict[str, list[float]] = defaultdict(list)
-
-    @property
-    def store(self) -> ElectionStore:
-        return self._store
-
-    def _note(self, op: str) -> None:
-        self.at[op].append(self._clock.time() if self._clock is not None else 0.0)
-
-    async def start(self, ctx: ElectionContext) -> None:
-        self._note('start')
-        for _ in range(self._start_yields):
-            await asyncio.sleep(0)
-        if self._start_seconds and self._clock is not None:
-            await self._clock.sleep(self._start_seconds)
-        if self._start_error is not None:
-            self.calls['start'] += 1
-            raise self._start_error
-        await super().start(ctx)
-
-    async def acquire(self, scope: str, token: str, lease_seconds: float) -> bool:
-        self._note('acquire')
-        if self._acquire:
-            return self._scripted('acquire', self._acquire.pop(0))
-        return await super().acquire(scope, token, lease_seconds)
-
-    async def refresh(self, scope: str, token: str) -> bool:
-        self._note('refresh')
-        for _ in range(self._refresh_yields):
-            await asyncio.sleep(0)
-        if self._refresh:
-            return self._scripted('refresh', self._refresh.pop(0))
-        return await super().refresh(scope, token)
-
-    async def is_held(self, scope: str, token: str) -> bool:
-        for _ in range(self._is_held_yields):
-            await asyncio.sleep(0)
-        return await super().is_held(scope, token)
-
-    async def release(self, scope: str, token: str) -> None:
-        self._note('release')
-        await super().release(scope, token)
-
-    def _scripted(self, op: str, answer: bool | Exception) -> bool:
-        self.calls[op] += 1
-        if isinstance(answer, Exception):
-            raise answer
-        return answer
-
-
-class SpyCaller(ResilientCaller):
-    """A resilient caller that notes the deadline each operation was given."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.deadlines: list[tuple[str, float | None]] = []
-
-    async def call(self, op: str, make_call: Callable[[], Awaitable[Any]], **kwargs: Any) -> Any:
-        self.deadlines.append((op, kwargs.get('deadline_seconds')))
-        return await super().call(op, make_call, **kwargs)
 
 
 class FakeRecorder:
@@ -1012,6 +827,20 @@ async def test_cluster_election_after_stop_never_starts_the_provider():
     assert result.ok is False
     assert result.outcome == 'not_started'
     assert provider.calls['start'] == 0
+
+
+async def test_cluster_election_start_goes_through_the_given_caller(logs):
+    provider = ScriptedElection()
+    election = make_election(provider)
+    own_caller = make_caller(provider='own_start')
+
+    assert (await election.ensure_started(5.0, caller=own_caller)).ok
+
+    assert [op for op, _ in own_caller.deadlines] == ['start']
+    assert election.caller.deadlines == []
+    assert election.started
+    assert (await election.ensure_started(5.0)).ok
+    assert provider.calls['start'] == 1
 
 
 # --- the holder read and the last slot ---
