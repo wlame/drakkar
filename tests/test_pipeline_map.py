@@ -47,6 +47,7 @@ POLICY_KEYS = (
 TABLES_START = '<!-- pipeline-map-tables:start -->'
 TABLES_END = '<!-- pipeline-map-tables:end -->'
 METRIC_NAME = re.compile(r'\bdrakkar_[a-z0-9_]+')
+SINK_TYPE_PLACEHOLDER = '<type>'
 
 
 # ---------------------------------------------------------------- data shape
@@ -261,12 +262,31 @@ def test_pipeline_map_hooks_are_handler_attributes():
     assert missing == []
 
 
+def sink_types() -> list[str]:
+    """The sink types of the config model: every section under ``sinks`` but ``defaults``."""
+    sinks_model = unwrap(DrakkarConfig.model_fields['sinks'].annotation)
+    return sorted(name for name in sinks_model.model_fields if name != 'defaults')
+
+
+def expand_sink_type(ref: str) -> list[str]:
+    """A config ref with ``<type>`` stands for the same key of every sink type."""
+    if SINK_TYPE_PLACEHOLDER not in ref:
+        return [ref]
+    return [ref.replace(SINK_TYPE_PLACEHOLDER, sink_type) for sink_type in sink_types()]
+
+
 def test_pipeline_map_config_keys_are_metadata_paths():
     paths = metadata_paths()
     pipeline_map = load_map()
     refs = [entry.ref for step in pipeline_map.steps for entry in step.decided_by if entry.kind == 'config']
     refs += [o.policy.key for step in pipeline_map.steps for o in step.outcomes if o.policy is not None]
-    assert sorted(set(refs) - paths) == []
+    expanded = [path for ref in refs for path in expand_sink_type(ref)]
+    assert sorted(set(expanded) - paths) == []
+
+
+def test_pipeline_map_sink_type_placeholder_covers_every_sink_type():
+    assert sink_types() == ['filesystem', 'http', 'kafka', 'mongo', 'postgres', 'redis']
+    assert expand_sink_type('sinks.<type>.*.depends_on')[0] == 'sinks.filesystem.*.depends_on'
 
 
 def test_pipeline_map_policy_values_are_the_values_the_config_accepts():

@@ -200,3 +200,4 @@
 .md-typeset .pmap-legend dt, .md-typeset .pmap-legend dd { margin: 0; }
 .md-typeset .pmap-step-legend { margin: 0.7rem 0 0; display: flex; flex-direction: column; gap: 0.3rem; color: var(--md-default-fg-color--light); }
 .md-typeset .pmap-step-legend > span { display: block; }
+.md-typeset .pmap-status { margin: 0 0 0.6rem; font-weight: 600; color: var(--md-default-fg-color--light); }

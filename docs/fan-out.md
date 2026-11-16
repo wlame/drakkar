@@ -643,8 +643,9 @@ stays pending and the drain does not wait for it. The still-running tasks
 of a stream that failed earlier are cancelled too
 (`arrange_stream_tasks_cancelled`): that offset can never complete in this
 process. When a stop and a DLQ outcome meet, the DLQ outcome decides: the
-stream is ended, not abandoned, so the next owner writes no second DLQ
-record.
+stream is ended, not abandoned. When its running tasks end within
+`executor.drain_timeout`, the offset commits and the next owner writes no
+second DLQ record.
 
 ### Cleanup in the generator
 

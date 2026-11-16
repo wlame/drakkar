@@ -336,8 +336,11 @@
     var notes = el('div', 'pmap-notes');
     var flow = buildPath(data, select);
     var detail = el('section', 'pmap-detail');
-    detail.setAttribute('aria-live', 'polite');
     detail.setAttribute('aria-label', 'What can fail at the chosen step');
+    // A short line announces each change; the whole panel is redrawn and would be read in full.
+    var status = el('p', 'pmap-status');
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
     var hooksSection = el('section', 'pmap-hooks');
     hooksSection.appendChild(el('h3', '', 'Hooks of the chosen form'));
     hooksSection.appendChild(el('p', 'pmap-hooks-help', 'Bright cards run with the chosen form; dim cards do not. A marked card runs at the chosen step.'));
@@ -345,6 +348,7 @@
     hooksSection.appendChild(grid);
 
     container.appendChild(chooser);
+    container.appendChild(status);
     container.appendChild(notes);
     // The path and the chosen step sit side by side when the page is wide enough.
     var stage = el('div', 'pmap-stage');
@@ -367,6 +371,8 @@
       drawNotes(notes, data, state);
       drawPath(container, data, state);
       drawDetail(detail, data, state);
+      status.textContent = 'Showing ' + stepTitle(byId(data.steps, state.step), state.form)
+        + ' for ' + byId(data.forms, state.form).title + '.';
       drawHooks(grid, data, state, select);
     }
 

@@ -15,7 +15,7 @@ its offset. Your choice is kept in the address of the page, so a link shows
 the same view.
 
 <noscript>
-<p>The map needs JavaScript. Without it, the diagram and the reference tables below show the same facts.</p>
+<p>The map needs JavaScript. Without it, the reference tables below show the same facts.</p>
 </noscript>
 
 <div id="pipeline-map-app" class="pmap" hidden></div>
@@ -110,7 +110,7 @@ Each HTTP request becomes one virtual message. `arrange_http_request()` returns 
 | **commits** | The offset completes when the message ends, and the commit moves past the message. |
 | **stalls** | The offset is held and the partition is paused. Nothing is fetched from it until a restart or a reassignment; then the message is read again. |
 | **replays** | The offset is not committed. The next owner of the partition reads the message again from its start. |
-| **pending** | The offset stays pending in this process, so the partition commits nothing past it. The partition goes on with the next messages; after a restart or a rebalance the message is read again. |
+| **pending** | The offset stays pending in this process, so the partition commits nothing past it. The partition goes on with the next messages, unless the error marks it dead; after a restart or a rebalance the message is read again. |
 
 #### Parse
 
@@ -123,7 +123,7 @@ Decided by: `sources.kafka.on_parse_error` (Kafka + arrange, Kafka + arrange_str
 | The value fails parsing and `on_parse_error` is `skip`, the default. | Kafka + arrange, Kafka + arrange_stream | The arrange hook gets the message with `payload` set to None and `parse_error` set. The handler decides what to do with it. | **commits** | Nothing from the framework. |
 | The value fails parsing and `on_parse_error` is `dlq`. | Kafka + arrange, Kafka + arrange_stream | The message is left out of the arrange hook. One DLQ record with `dk-stage: parse` is written. When the record cannot be written, the DLQ write step decides. | **commits** | DLQ record; `message_dlq` event and log line. |
 | The value fails parsing and `on_parse_error` is `raise`. | Kafka + arrange, Kafka + arrange_stream | The error ends the partition loop. The first error restarts the loop, and the loop goes on with the next messages. A second error marks the partition dead, and `/readyz` fails. | **pending** | `partition_processor_restarting`, then `partition_processor_died` (critical); `drakkar_partition_processor_deaths_total`. |
-| The request body is missing, too large, or fails validation against the request model. | HTTP | The request is refused before any hook runs. | HTTP 422 `invalid_request`, or 413 `request_too_large`. | The HTTP response. |
+| The request body is missing, too large, does not arrive in time, or fails validation against the request model. | HTTP | The request is refused before any hook runs. | HTTP 422 `invalid_request`, 413 `request_too_large`, or 408 `request_timeout` when the body does not arrive in time. | The HTTP response. |
 
 #### Arrange
 
@@ -174,14 +174,16 @@ Decided by: `on_task_complete` (Kafka + arrange, Kafka + arrange_stream), `on_gr
 
 #### Sink delivery
 
-The payloads of a result go to their sinks, in parallel unless `depends_on` orders them.
+The payloads of a result go to their sinks, in parallel unless each sink's `depends_on` orders them. The failure policy keys of `sinks.defaults` apply to every sink that does not set its own.
 
-Decided by: `sinks.defaults.on_failure`, `sinks.defaults.max_retries`, `sinks.defaults.breaker_failures`, `sinks.kafka.*.depends_on`, `on_delivery_error`.
+Decided by: `sinks.defaults.on_failure`, `sinks.defaults.max_retries`, `sinks.defaults.breaker_failures`, `sinks.<type>.*.depends_on`, `on_delivery_error`.
 
 | When | Form | What happens | Offset or response | Record |
 |---|---|---|---|---|
 | `on_delivery_error` returns `RETRY` and retries are left. | Kafka + arrange, Kafka + arrange_stream | `deliver()` runs again with the whole original payload list, so payloads that landed the first time land again. | **commits** | `sink_delivery_retry`. |
 | `on_delivery_error` returns `RETRY` and retries are left. | HTTP | `deliver()` runs again with the whole original payload list, so payloads that landed the first time land again. | Each failed attempt is listed in the sink summary under `errors`. | `sink_delivery_retry`. |
+| `on_delivery_error` returns `RETRY` when no retry of the sink's `max_retries` is left. | Kafka + arrange, Kafka + arrange_stream | The sink's declared `on_failure` applies, as for `dlq` or `skip` below. | **commits** | `sink_retry_budget_spent` warning, at most one line per sink per minute. |
+| `on_delivery_error` returns `RETRY` when no retry of the sink's `max_retries` is left. | HTTP | The sink's declared `on_failure` applies, as for `dlq` or `skip` below. | As for `dlq` or `skip` below. | `sink_retry_budget_spent` warning, at most one line per sink per minute. |
 | A delivery fails for good and the sink's `on_failure` is `dlq`, the default. | Kafka + arrange | One DLQ record per source message, with `dk-stage: sink`. The message is done: no later delivery of it starts, and the hooks still run but their results are not delivered (`sink_not_started`, reason `message_dlq`). | **commits** | DLQ record; `message_dlq` event and log line. |
 | A delivery fails for good and the sink's `on_failure` is `dlq`, the default. | Kafka + arrange_stream | One DLQ record with `dk-stage: sink`. The message is done and the stream is closed: no further group is pulled, the running groups finish, and their hooks run without delivery (`sink_not_started`, reason `message_dlq`). | **commits** | DLQ record; `message_dlq` event and log line. |
 | A delivery of the request result fails for good and the sink's `on_failure` is `dlq`. | HTTP | One DLQ record for the request: the value is the raw request body. The sinks of the request that have not started do not start. | HTTP 200; the sink summary counts the payloads under `dlq`. | DLQ record with `dk-request-id`. |
@@ -208,7 +210,7 @@ Decided by: `dlq.on_send_failure`.
 | A DLQ record or a delivery cannot be confirmed and `on_send_failure` is `stall`. | Kafka + arrange | The offset is held and the partition is paused. Backpressure never resumes it. A message that comes back may get a second record. | **stalls** | `offset_stalled_on_delivery_failure`; `partition_paused_on_stall`; `partition_stalled` event; `drakkar_delivery_stalled_offsets_total`. |
 | A DLQ record or a delivery cannot be confirmed and `on_send_failure` is `stall`. | Kafka + arrange_stream | The message is marked as not delivered; the stream goes on, and when the message ends its offset is held and the partition is paused. Backpressure never resumes it. | **stalls** | `offset_stalled_on_delivery_failure`; `partition_paused_on_stall`; `partition_stalled` event; `drakkar_delivery_stalled_offsets_total`. |
 | The record of a request cannot be written and `on_send_failure` is `drop`. | HTTP | The loss is logged and counted. With the DLQ off by configuration (no Kafka source and no `dlq.topic`), the loss is counted on `drakkar_dlq_unconfigured_drops_total` instead. | HTTP 200; the sink shows `failed, no DLQ record`. | `dlq_failure_payloads_dropped`, or `drakkar_dlq_unconfigured_drops_total`. |
-| The record of a request cannot be written and `on_send_failure` is `stall`. | HTTP | The delivery stops. A request has no offset to hold, so the response is the only signal; prefer `drop` on a worker with only the HTTP source. | HTTP 200; every type of the sink summary shows `deliver_all_raised` and `delivered: 0`. | `webapp_sink_deliver_all_failed`. |
+| The record of a request cannot be written and `on_send_failure` is `stall`. | HTTP | The delivery stops. A request has no offset to hold, so the response is the only signal; prefer `drop` on a worker with only the HTTP source. | HTTP 200; every validated type of the sink summary shows `deliver_all_raised` and `delivered: 0`. | `webapp_sink_deliver_all_failed`. |
 
 #### Stop or revoke
 
@@ -222,7 +224,8 @@ Decided by: `executor.drain_timeout` (Kafka + arrange, Kafka + arrange_stream), 
 | The tasks of the message end within `executor.drain_timeout`. | Kafka + arrange_stream | A message whose stream has already ended drains as usual: the drain waits for its tasks, hooks and deliveries. | **commits** | Nothing extra. |
 | Tasks still run when `executor.drain_timeout` ends. | Kafka + arrange, Kafka + arrange_stream | The tasks are cancelled. The message is read again by the next owner of the partition. | **replays** | The drain log lines of the stop. |
 | The stream of the message is still open. | Kafka + arrange_stream | The stream is abandoned at once: the pull in progress is cancelled, then the tasks of the message, then the generator is closed. No further group hook, message hook or delivery runs, and the drain does not wait for the message. Groups that finished before the stop have already delivered. | **replays** | `arrange_stream_abandoned`. |
-| A stop and a DLQ outcome of the message meet. | Kafka + arrange_stream | The DLQ outcome decides: the stream is ended, not abandoned, so the next owner writes no second DLQ record. | **commits** | DLQ record. |
+| A stop and a DLQ outcome of the message meet. | Kafka + arrange_stream | The DLQ outcome decides: the stream is ended, not abandoned. When its running tasks end within `executor.drain_timeout`, the offset commits and the next owner writes no second DLQ record. | **commits** | DLQ record. |
+| Tasks of a stream that failed earlier still run. | Kafka + arrange_stream | They are cancelled at the stop, because their message can never complete in this process. The next owner of the partition runs the message again. | **replays** | `arrange_stream_tasks_cancelled`. |
 | Messages wait in the partition queue and were never arranged. | Kafka + arrange, Kafka + arrange_stream | They are dropped from the queue at the stop. | **replays** | `drakkar_queued_messages_dropped_at_stop_total`. |
 | The worker stops while requests arrive or run. | HTTP | New requests are refused at once. Requests in flight run on, bounded by `sources.http.request_timeout`. | HTTP 503 `shutdown` for new requests; HTTP 504 `timeout` for a request that runs out of time. | `drakkar_webapp_requests_total{status="shutdown"}`. |
 
