@@ -123,6 +123,9 @@ class KafkaSource:
         self._polls_started = 0
         self._polls_completed = 0
         self._poll_progress = asyncio.Event()
+        # Set when ``run()`` has ended, by a stop or by an error: no poll
+        # comes any more, so a leave or a join must not wait for one.
+        self._poll_loop_ended = False
 
     def bind(self, ctx: SourceContext) -> None:
         """Receive the worker context. Called once, before ``start``."""
@@ -290,6 +293,21 @@ class KafkaSource:
         max_executors = ctx.config.executor.max_executors
         high_watermark = ctx.config.sources.kafka.max_queued_messages
         low_watermark = high_watermark // 2
+        try:
+            await self._poll_until_stopped(consumer, max_executors, low_watermark, high_watermark)
+        finally:
+            self._poll_loop_ended = True
+            self._wake_poll_waiters()
+
+    async def _poll_until_stopped(
+        self,
+        consumer: KafkaConsumer,
+        max_executors: int,
+        low_watermark: int,
+        high_watermark: int,
+    ) -> None:
+        """The poll loop of ``run``: one poll per turn until a stop is requested."""
+        ctx = self._context()
         last_tick = time.monotonic()
 
         while not self._stop_requested:
@@ -366,8 +384,17 @@ class KafkaSource:
 
     @property
     def is_group_member(self) -> bool:
-        """Whether the consumer is a member of its group: False from a leave until a join."""
+        """Whether the consumer is known to be a member of its group.
+
+        False from the call to ``unsubscribe()`` until a join completes. False
+        means "not known to be a member": after a cancelled leave or join the
+        consumer may be subscribed or not, and the caller must join again.
+        """
         return self._group_member
+
+    def _poll_waits_end(self) -> bool:
+        """Whether no further poll can come: a stop was requested or the poll loop has ended."""
+        return self._stop_requested or self._poll_loop_ended
 
     def _wake_poll_waiters(self) -> None:
         """Wake every coroutine waiting for a poll, and arm a fresh event for the next one."""
@@ -378,9 +405,10 @@ class KafkaSource:
         """Wait for a completed poll numbered above ``after`` after which ``until()`` holds.
 
         Polls run one at a time, so poll ``after + 1`` started after the
-        caller read ``after``. Returns False when a stop was requested first.
+        caller read ``after``. Returns False when a stop was requested or the
+        poll loop ended first.
         """
-        while not self._stop_requested:
+        while not self._poll_waits_end():
             if self._polls_completed > after and until():
                 return True
             await self._poll_progress.wait()
@@ -400,17 +428,24 @@ class KafkaSource:
         partition gets no revoke at all; that poll alone ends its leave. The
         wait is bounded by ``executor.drain_timeout`` plus
         ``LEAVE_MARGIN_SECONDS``; on ``TIMED_OUT`` the source stays out of
-        the group until a join. A stop request ends the wait at once.
+        the group until a join. A stop request, or the end of the poll loop,
+        ends the wait at once with ``STOPPING``.
+
+        ``unsubscribe()`` returns at once also while a poll is in flight; the
+        client may then run the revoke inside that poll, and the leave ends on
+        the next one.
         """
-        if self._stop_requested:
+        if self._poll_waits_end():
             return LeaveOutcome.STOPPING
         assert self.consumer is not None
         bound = self._context().config.executor.drain_timeout + LEAVE_MARGIN_SECONDS
         self._group_member = False
         try:
             await self.consumer.unsubscribe()
-        except BaseException:
-            # Nothing was sent, so the consumer is still a member.
+        except Exception:
+            # The client refused the call, so the consumer is still a member.
+            # A cancellation is not caught: the client call runs on a worker
+            # thread and may still unsubscribe, so membership stays unknown.
             self._group_member = True
             raise
         after = self._polls_started
@@ -425,10 +460,12 @@ class KafkaSource:
         """Join the consumer group again and wait for one poll that started after ``subscribe()``.
 
         The assignment comes in a later poll and can be empty, so the join
-        does not wait for one. Returns False when a stop was requested
-        before the call or during the wait.
+        does not wait for one. Returns False when a stop was requested, or
+        the poll loop ended, before the call or during the wait. A join
+        cancelled after ``subscribe()`` leaves ``is_group_member`` False while
+        the consumer is subscribed; calling the join again is harmless.
         """
-        if self._stop_requested:
+        if self._poll_waits_end():
             return False
         assert self.consumer is not None
         await self.consumer.subscribe()

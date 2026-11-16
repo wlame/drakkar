@@ -73,6 +73,16 @@ async def test_consumer_subscribe(mock_cls, kafka_config, kafka_source_config):
 
 
 @patch('drakkar.consumer.AIOConsumer')
+async def test_consumer_unsubscribe_calls_the_client(mock_cls, kafka_config, kafka_source_config):
+    mock_inner = AsyncMock()
+    mock_cls.return_value = mock_inner
+
+    await KafkaConsumer(connection=kafka_config, source=kafka_source_config).unsubscribe()
+
+    mock_inner.unsubscribe.assert_awaited_once_with()
+
+
+@patch('drakkar.consumer.AIOConsumer')
 async def test_poll_batch_returns_messages(mock_cls, kafka_config, kafka_source_config):
     mock_inner = AsyncMock()
     mock_inner.consume.return_value = [

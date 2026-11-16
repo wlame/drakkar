@@ -38,6 +38,11 @@ class FakePolls:
         self.polls_completed = 0
         self._holds: list[asyncio.Event] = []
         self.held_polls = 0
+        # When set, the next held poll raises this error once its gate opens,
+        # which ends the poll loop.
+        self.held_poll_error: Exception | None = None
+        # When set, unsubscribe() waits until this event is set.
+        self.unsubscribe_gate: asyncio.Event | None = None
 
     def hold_next_poll(self) -> asyncio.Event:
         """Make the next poll wait until the returned event is set."""
@@ -53,6 +58,8 @@ class FakePolls:
 
     async def unsubscribe(self) -> None:
         self.unsubscribe_calls += 1
+        if self.unsubscribe_gate is not None:
+            await self.unsubscribe_gate.wait()
         self.unsubscribed = True
         self.revoke_ran = False
 
@@ -64,6 +71,9 @@ class FakePolls:
             gate = self._holds.pop(0)
             self.held_polls += 1
             await gate.wait()
+            error, self.held_poll_error = self.held_poll_error, None
+            if error is not None:
+                raise error
         if revoke_due:
             self.revoke_ran = True
             await self.source.on_revoke(sorted(self.source.processors))
@@ -343,3 +353,91 @@ async def test_revoke_of_some_partitions_keeps_the_backpressure_pause(running):
     assert source.paused is True
     assert backpressure_active._value.get() == 1
     await asyncio.gather(*source.background_tasks, return_exceptions=True)
+
+
+async def test_leave_group_cancelled_during_unsubscribe_is_not_a_member(running):
+    source, _, polls = running
+    run_task = await _start(source)
+    polls.unsubscribe_gate = asyncio.Event()
+    leave = asyncio.create_task(source.leave_group())
+    await _until(lambda: polls.unsubscribe_calls == 1)
+
+    leave.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await leave
+
+    # The client call may still run on its thread, so membership is not known.
+    assert source.is_group_member is False
+    await _end(source, run_task, polls.unsubscribe_gate)
+
+
+async def _end_after_failure(run_task: asyncio.Task) -> None:
+    with pytest.raises(RuntimeError, match='poll failed'):
+        await asyncio.wait_for(run_task, timeout=2)
+
+
+async def test_leave_group_returns_stopping_when_the_poll_loop_ends_during_the_wait(running):
+    source, fake, polls = running
+    run_task = await _start(source)
+    source.processors[0] = _processor()
+    gate = polls.hold_next_poll()
+    await _until(lambda: polls.held_polls == 1)
+    leave = asyncio.create_task(source.leave_group())
+    await _until(lambda: polls.unsubscribe_calls == 1)
+
+    polls.held_poll_error = RuntimeError('poll failed')
+    gate.set()
+
+    assert await asyncio.wait_for(leave, timeout=2) is LeaveOutcome.STOPPING
+    assert fake.subscribe.await_count == 1
+    await _end_after_failure(run_task)
+
+
+async def test_join_group_returns_false_when_the_poll_loop_ends_during_the_wait(running):
+    source, fake, polls = running
+    run_task = await _start(source)
+    assert await asyncio.wait_for(source.leave_group(), timeout=2) is LeaveOutcome.LEFT
+    gate = polls.hold_next_poll()
+    await _until(lambda: polls.held_polls == 1)
+    join = asyncio.create_task(source.join_group())
+    await _until(lambda: fake.subscribe.await_count == 2)
+
+    polls.held_poll_error = RuntimeError('poll failed')
+    gate.set()
+
+    assert await asyncio.wait_for(join, timeout=2) is False
+    assert source.is_group_member is False
+    await _end_after_failure(run_task)
+
+
+async def test_leave_and_join_answer_at_once_after_the_poll_loop_ended(running):
+    source, fake, polls = running
+    run_task = await _start(source)
+    gate = polls.hold_next_poll()
+    await _until(lambda: polls.held_polls == 1)
+    polls.held_poll_error = RuntimeError('poll failed')
+    gate.set()
+    await _end_after_failure(run_task)
+
+    assert await source.leave_group() is LeaveOutcome.STOPPING
+    assert await source.join_group() is False
+    fake.unsubscribe.assert_not_awaited()
+    assert fake.subscribe.await_count == 1
+
+
+async def test_join_group_returns_false_when_the_poll_loop_ends_on_a_stop_during_the_wait(running):
+    source, fake, polls = running
+    run_task = await _start(source)
+    assert await asyncio.wait_for(source.leave_group(), timeout=2) is LeaveOutcome.LEFT
+    gate = polls.hold_next_poll()
+    await _until(lambda: polls.held_polls == 1)
+    join = asyncio.create_task(source.join_group())
+    await _until(lambda: fake.subscribe.await_count == 2)
+
+    # The stop flag is set without signal_stop(), so only the end of run()
+    # can wake the join.
+    source._stop_requested = True
+    gate.set()
+    await asyncio.wait_for(run_task, timeout=2)
+
+    assert await asyncio.wait_for(join, timeout=2) is False
