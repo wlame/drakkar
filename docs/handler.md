@@ -3,6 +3,8 @@
 The handler is the user-facing entry point into Drakkar. You subclass
 `BaseDrakkarHandler`, override hooks, and the framework calls them at the
 right time during the message-processing pipeline. See [Configuration](configuration.md) for the full YAML reference.
+The [Pipeline Map](pipeline-map.md) shows which hooks run for each input form
+and what happens to a message when a step fails.
 
 ## Hook Reference
 

@@ -54,6 +54,7 @@ nav:
   - Home: index.md
   - Security Posture (read before deploying): security.md
   - Handler: handler.md
+  - Pipeline Map (inputs, hooks and failure outcomes): pipeline-map.md
   - Periodic Tasks (worker and cluster schedules): periodic-tasks.md
   - Cache: cache.md
   - Fan-out (one message → many tasks): fan-out.md
@@ -182,3 +183,4 @@ extra_css:
 
 extra_javascript:
   - javascripts/config-wizard.js
+  - javascripts/pipeline-map.js

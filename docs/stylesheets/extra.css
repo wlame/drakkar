@@ -92,3 +92,111 @@
 #calc .wizard-error { flex-basis: 100%; font-size: 13px; }
 #calc .wizard-error:empty { display: none; }
 #calc button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Pipeline map page (pipeline-map/) */
+.pmap {
+  --pmap-commits: #2e7d32;
+  --pmap-stalls: #c62828;
+  --pmap-replays: #1565c0;
+  --pmap-pending: #a35f00;
+  --pmap-http: #6a1b9a;
+  --pmap-line: var(--md-default-fg-color--lightest);
+  --pmap-card: var(--md-code-bg-color);
+  margin: 1rem 0 2rem;
+  font-size: 0.72rem;
+}
+[data-md-color-scheme="slate"] .pmap {
+  --pmap-commits: #81c784;
+  --pmap-stalls: #ef9a9a;
+  --pmap-replays: #90caf9;
+  --pmap-pending: #ffb74d;
+  --pmap-http: #ce93d8;
+}
+.pmap[hidden] { display: none !important; }
+.pmap code { font-size: 0.92em; }
+.pmap .pmap-offset-commits { --pmap-tone: var(--pmap-commits); }
+.pmap .pmap-offset-stalls { --pmap-tone: var(--pmap-stalls); }
+.pmap .pmap-offset-replays { --pmap-tone: var(--pmap-replays); }
+.pmap .pmap-offset-pending { --pmap-tone: var(--pmap-pending); }
+.pmap .pmap-offset-http { --pmap-tone: var(--pmap-http); }
+
+/* Form chooser: three cards that work as radio buttons */
+.pmap-forms { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0.6rem; border: 0; padding: 0; margin: 0 0 0.8rem; }
+.pmap-forms legend { font-weight: 700; margin-bottom: 0.4rem; padding: 0; }
+.pmap-form { display: flex; gap: 0.5rem; align-items: flex-start; padding: 0.6rem 0.7rem; border: 1px solid var(--pmap-line); border-radius: 8px; background: var(--pmap-card); cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; }
+.pmap-form:hover { border-color: var(--md-accent-fg-color); }
+.pmap-form.is-chosen { border-color: var(--md-accent-fg-color); box-shadow: inset 0 0 0 1px var(--md-accent-fg-color); }
+.pmap-form input { margin-top: 0.2rem; accent-color: var(--md-accent-fg-color); }
+.pmap-form:focus-within { outline: 2px solid var(--md-accent-fg-color); outline-offset: 2px; }
+.pmap-form-text { display: flex; flex-direction: column; gap: 0.15rem; }
+.pmap-form-title { font-weight: 600; }
+.pmap-form-unit { color: var(--md-default-fg-color--light); font-size: 0.9em; }
+.pmap-notes { margin-bottom: 1rem; color: var(--md-default-fg-color--light); }
+.pmap-notes p { margin: 0 0 0.3rem; }
+.pmap-notes ul { margin: 0; }
+
+/* The path: start, steps and end joined by arrows, beside the chosen step when there is room */
+.pmap { container-type: inline-size; }
+.pmap-stage { display: grid; grid-template-columns: 1fr; gap: 1rem; margin: 0.5rem 0 1.2rem; align-items: start; }
+@container (min-width: 34rem) {
+  .pmap-stage { grid-template-columns: minmax(12rem, 16rem) 1fr; }
+  .pmap-stage .pmap-detail { position: sticky; top: 3.4rem; }
+}
+.md-typeset ol.pmap-path { list-style: none; display: flex; flex-direction: column; gap: 1.1rem; margin: 0; padding: 0; }
+.md-typeset ol.pmap-path > li { margin: 0; position: relative; display: flex; }
+.md-typeset ol.pmap-path > li + li::before { content: "\2193"; position: absolute; left: 1rem; top: -1.05rem; line-height: 1; color: var(--md-default-fg-color--lighter); font-size: 0.9rem; }
+.pmap-cap { align-items: center; padding: 0.3rem 0.8rem; border-radius: 999px; border: 1px dashed var(--md-default-fg-color--lighter); color: var(--md-default-fg-color--light); font-weight: 600; }
+.pmap-step { display: flex; flex-direction: column; gap: 0.3rem; align-items: flex-start; text-align: left; width: 100%; padding: 0.5rem 0.7rem; border: 1px solid var(--md-default-fg-color--lighter); border-radius: 8px; background: var(--md-default-bg-color); color: var(--md-default-fg-color); font: inherit; cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; }
+.pmap-step:hover { border-color: var(--md-accent-fg-color); }
+.pmap-step:focus-visible { outline: 2px solid var(--md-accent-fg-color); outline-offset: 2px; }
+.pmap-step[aria-pressed="true"] { border-color: var(--md-accent-fg-color); box-shadow: 0 0 0 2px var(--md-accent-fg-color); }
+.pmap-step-title { font-weight: 700; }
+.pmap-dots, .pmap-chips { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+.pmap-dots:empty, .pmap-chips:empty { display: none; }
+.pmap-dot { font-size: 0.8em; padding: 0 0.4em; border-radius: 999px; color: var(--pmap-tone); border: 1px solid var(--pmap-tone); }
+.pmap-chip { font-family: var(--md-code-font-family, monospace); font-size: 0.8em; padding: 0.05em 0.4em; border-radius: 4px; background: var(--md-code-bg-color); border: 1px solid var(--pmap-line); color: var(--md-default-fg-color); }
+.pmap-side { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1rem; padding-top: 0.7rem; border-top: 1px dashed var(--pmap-line); }
+.pmap-side-label { color: var(--md-default-fg-color--light); font-weight: 600; }
+.pmap-side .pmap-step { border-style: dashed; }
+
+/* The chosen step: what can fail and each outcome */
+.pmap-detail { scroll-margin-top: 3.4rem; padding: 0.8rem 1rem; border: 1px solid var(--pmap-line); border-radius: 8px; background: var(--pmap-card); margin-bottom: 1.2rem; }
+.md-typeset .pmap-detail-title { margin: 0 0 0.2rem; }
+.pmap-detail-title:focus { outline: none; }
+.pmap-detail-title:focus-visible { outline: 2px solid var(--md-accent-fg-color); }
+.md-typeset .pmap-detail-form { margin: 0; color: var(--md-default-fg-color--light); }
+.pmap-decided { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
+.pmap-decided-label { font-weight: 600; }
+.pmap-ref { display: inline-flex; align-items: center; gap: 0.3rem; border: 1px solid var(--pmap-line); border-radius: 4px; padding: 0.05em 0.35em; background: var(--md-default-bg-color); }
+.pmap-ref-kind { font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.04em; color: var(--md-default-fg-color--light); }
+.md-typeset ul.pmap-outcomes { list-style: none; margin: 0.6rem 0 0; padding: 0; display: grid; gap: 0.6rem; }
+.md-typeset ul.pmap-outcomes > li.pmap-outcome { margin: 0; padding: 0.55rem 0.8rem; border-left: 4px solid var(--pmap-tone); border-radius: 4px; background: var(--md-default-bg-color); }
+.md-typeset .pmap-outcome p { margin: 0.2rem 0; }
+.pmap-when { font-weight: 600; }
+.pmap-foot { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: baseline; }
+.pmap-badge { display: inline-block; font-weight: 700; font-size: 0.85em; padding: 0.05em 0.5em; border-radius: 999px; color: var(--md-default-bg-color); background: var(--pmap-tone); white-space: nowrap; }
+.pmap-foot-text, .pmap-record { color: var(--md-default-fg-color--light); }
+.pmap-record-label { font-weight: 600; }
+
+/* Hooks: bright when they run with the chosen form, dim when not */
+.pmap-hook-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); gap: 0.6rem; }
+.md-typeset .pmap-hooks-help { color: var(--md-default-fg-color--light); }
+.pmap-hook { padding: 0.55rem 0.7rem; border: 1px solid var(--pmap-line); border-radius: 8px; background: var(--pmap-card); transition: opacity 0.2s; }
+.pmap-hook.is-off { opacity: 0.45; border-style: dashed; background: transparent; }
+.pmap-hook.is-here { border-color: var(--md-accent-fg-color); box-shadow: inset 0 0 0 1px var(--md-accent-fg-color); }
+.md-typeset .pmap-hook-name { margin: 0 0 0.3rem; font-family: var(--md-code-font-family, monospace); font-size: 0.95em; }
+.md-typeset .pmap-hook-facts { margin: 0; }
+.md-typeset .pmap-hook-facts dt { font-weight: 600; margin-top: 0.3rem; color: var(--md-default-fg-color--light); font-size: 0.9em; }
+.md-typeset .pmap-hook-facts dd { margin: 0; }
+.md-typeset .pmap-hook-off { margin: 0; }
+.pmap-hook-go { margin-top: 0.5rem; padding: 0.2rem 0.6rem; border: 1px solid var(--md-accent-fg-color); border-radius: 4px; background: transparent; color: var(--md-default-fg-color); font: inherit; font-size: 0.9em; cursor: pointer; }
+.pmap-hook-go:hover { background: var(--md-accent-fg-color); color: var(--md-accent-bg-color, #fff); }
+.pmap-hook-go:focus-visible { outline: 2px solid var(--md-accent-fg-color); outline-offset: 2px; }
+
+/* Offset legend */
+.pmap-legend-box { margin-top: 1rem; }
+.pmap-legend-box summary { cursor: pointer; font-weight: 600; }
+.md-typeset dl.pmap-legend { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 0.8rem; margin: 0.5rem 0 0; }
+.md-typeset .pmap-legend dt, .md-typeset .pmap-legend dd { margin: 0; }
+.md-typeset .pmap-step-legend { margin: 0.7rem 0 0; display: flex; flex-direction: column; gap: 0.3rem; color: var(--md-default-fg-color--light); }
+.md-typeset .pmap-step-legend > span { display: block; }

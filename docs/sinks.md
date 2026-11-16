@@ -6,6 +6,8 @@ returns a `CollectResult`, the framework routes each payload to the correct sink
 
 Drakkar ships with six sink types. You can configure any combination of them, and each type
 supports multiple named instances (e.g., two separate Kafka topics or three Postgres databases).
+The [Pipeline Map](pipeline-map.md) shows where sink delivery and the DLQ
+write sit on the path of a message, and what each failure does to the offset.
 
 ## Delivery Lifecycle
 

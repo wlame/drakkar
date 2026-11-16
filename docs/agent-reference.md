@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `99fa5e2cbf8fe309`.
+Registry version: `b236b63d8fad41ec`.
 
 ## Concepts
 
@@ -119,7 +119,7 @@ The budget counts the tasks that are created and not settled (waiting for a slot
 
 A partition loop checks the room and reserves the estimate of its next window before it calls `arrange`. While the budget is full, loops wait in a first-in, first-out list; the wait is counted in `drakkar_window_admission_wait_seconds_total`. The HTTP source uses the same budget.
 
-For a handler with `arrange_stream` the unit is a group: the loop waits for room and reserves the average size of a group before each pull. During the first 3 groups of a partition the reservation takes at least all the free room, and before the worker has measured a group with tasks only one unmeasured group is pulled at a time. Only "below the limits" is needed, so a group larger than the limits is still admitted when its turn comes. The limits are passed by at most one group for each message that streams.
+For a handler with `arrange_stream` the unit is a group: the loop waits for room and reserves the average size of a group before each pull. The warm-up covers the first 3 pulls of a partition, and a pull that gives an empty list counts as one: during it the reservation takes at least all the free room. Before the worker has measured a group with tasks only one unmeasured group is pulled at a time. Only "below the limits" is needed, so a group larger than the limits is still admitted when its turn comes. The limits are passed by at most one group for each message that streams.
 
 A full budget is the normal state of a busy worker. It is a problem only when the executor pool is not busy at the same time.
 
@@ -414,15 +414,15 @@ The completion hooks turn outcomes into sink payloads at four grains (task, grou
 
 | Hook | arrange (Kafka) | arrange_stream (Kafka) | HTTP request |
 |---|---|---|---|
-| `on_task_complete` | per task | per task | per task |
+| `on_task_complete` | per task | per task | no |
 | `on_group_complete` | refused at startup | per group | no |
-| `on_message_complete` | per message | per message, after every group hook | no |
+| `on_message_complete` | per message | per message, after every group hook | per request, only with `sources.http.deliver_to_sinks` |
 | `on_window_complete` | per window | refused at startup | no |
 | `on_http_request_complete` | no | no | per request |
 
 The framework keeps results and errors for a hook only when the handler class overrides it. A hook must be defined on the handler class; a function set on an instance is not seen. Kept output counts in `executor.max_pending_bytes` until the hook and its delivery end.
 
-A raise of `on_task_complete` is a task failure. A raise of `on_group_complete`, `on_message_complete` or `on_window_complete` is logged and ignored; the offset still completes. The results of a group hook and a message hook are delivered with the message context, so the sink failure policy and the DLQ apply to them.
+A raise of `on_task_complete` is a task failure. A raise of `on_group_complete`, `on_message_complete` or `on_window_complete` is logged and ignored; the offset still completes. On the HTTP source a raise of `on_message_complete` or `on_http_request_complete` answers 500. The results of a group hook and a message hook are delivered with the message context, so the sink failure policy and the DLQ apply to them.
 
 **Principles:**
 - Override only the hooks you need; each overridden aggregate hook keeps outcomes in memory.

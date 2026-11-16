@@ -596,7 +596,8 @@ its real tasks and bytes out of the reservation, and gives back the rest.
 - Admission needs only "below the limits", not "the group fits". A group
   larger than the limits is admitted when its turn comes, so a stream never
   waits for ever.
-- **Warm-up:** during the first 3 groups of a partition the reservation takes
+- **Warm-up:** it covers the first 3 pulls of a partition, and a pull that
+  gives an empty list counts as one. During it the reservation takes
   at least all the free room, so no other loop is admitted until that group
   has fanned out. Before the worker has measured a group with tasks, only one
   unmeasured group is pulled at a time. Unlike a window, a group has no floor

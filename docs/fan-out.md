@@ -9,6 +9,8 @@ Drakkar supports this natively via the `on_message_complete` hook and
 the `MessageGroup` dataclass. When one message makes so many tasks that they
 should not all exist at once, the handler can yield them in groups with
 `arrange_stream()` instead (see [Streaming a large message](#streaming-a-large-message)).
+The [Pipeline Map](pipeline-map.md) compares `arrange()`, `arrange_stream()`
+and the HTTP source side by side, with the outcome of each failure.
 
 !!! info "When to use this page"
     If your pipeline is strictly 1-in / 1-out (one input → one subprocess
@@ -574,9 +576,10 @@ reserves the average size of a group (tasks, stdin bytes, kept output),
 pulls the next group, charges its real tasks and bytes, and starts its tasks
 in chunks. Admission needs only "below the limits", not "the group fits": a
 group larger than the limits is admitted when its turn comes, so a stream
-never waits for ever. During the first 3 groups of a partition the
+never waits for ever. The warm-up covers the first 3 pulls of a
+partition, and a pull that gives an empty list counts as one: during it the
 reservation takes at least all the free room, so other loops wait until that
-group has fanned out; before the worker has measured a group with tasks,
+group has fanned out. Before the worker has measured a group with tasks,
 only one unmeasured group is pulled at a time.
 
 **You bound the memory by the size of your groups.** The pending limits
