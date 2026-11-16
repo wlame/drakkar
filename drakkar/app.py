@@ -12,7 +12,9 @@ a back-reference. See :mod:`drakkar.lifecycle` for the rationale.
 """
 
 import asyncio
+import contextlib
 import secrets
+import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -36,11 +38,12 @@ from drakkar.config.origins import ConfigOrigins
 from drakkar.config.sinks import POLICY_KEYS, SINK_TYPES
 from drakkar.consume_pause import ConsumePauseController
 from drakkar.consumer import KafkaConsumer
-from drakkar.detach import DetachController
+from drakkar.detach import REASON_MAX_CHARS, DetachController
 from drakkar.executor import ExecutorPool
 from drakkar.fleet.card import WorkerIdentity
 from drakkar.fleet.service import FleetRegistry
-from drakkar.handler import BaseDrakkarHandler, check_task_run_seconds_hook
+from drakkar.handler import BaseDrakkarHandler, check_exit_code, check_task_run_seconds_hook
+from drakkar.hook_scope import pipeline_hook
 from drakkar.logging import DeferredLog, setup_logging
 from drakkar.models import CollectResult, DeliveryAction, DeliveryError, ErrorAction
 from drakkar.partition import PartitionProcessor
@@ -397,6 +400,11 @@ class DrakkarApp:
         self._offload_pool: Any = None
 
         self._running = False
+        # The exit code of the first request_stop call, or None when nothing
+        # asked for a stop. The lock makes "the first call wins" hold for a
+        # call from a thread too.
+        self._stop_exit_code: int | None = None
+        self._stop_request_lock = threading.Lock()
         # Operator-driven timed pause (Live page control; opt-in via
         # ui.consume_pause.enabled). Constructed unconditionally — it is a
         # tiny state holder; the routes gate on the config flag.
@@ -650,6 +658,38 @@ class DrakkarApp:
         )
         self.emit_startup_log()
         asyncio.run(self._lifecycle._async_run())
+        # A failed startup or a source error raised above, as before. After
+        # a clean shutdown a stop request decides the exit code.
+        if self._stop_exit_code:
+            raise SystemExit(self._stop_exit_code)
+
+    def request_stop(self, reason: str, exit_code: int) -> None:
+        """Shut the worker down gracefully, as on SIGTERM, and exit with ``exit_code`` afterwards.
+
+        Returns at once. Every source stops taking input on the main loop;
+        from another thread the stop is handed to the loop. The first call
+        wins: a later call logs nothing and keeps the first exit code.
+
+        Raises:
+            ValueError: ``exit_code`` is not a whole number from 0 to 255.
+        """
+        check_exit_code(exit_code)
+        with self._stop_request_lock:
+            if self._stop_exit_code is not None:
+                return
+            self._stop_exit_code = exit_code
+        logger.warning('stop_requested', category='lifecycle', reason=reason[:REASON_MAX_CHARS], exit_code=exit_code)
+        loop = self._loop
+        try:
+            on_loop = asyncio.get_running_loop() is loop
+        except RuntimeError:
+            on_loop = False
+        if loop is None or on_loop:
+            self._lifecycle._signal_sources_stop()
+            return
+        # A loop that has already closed has nothing left to stop.
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(self._lifecycle._signal_sources_stop)
 
     def emit_startup_log(self) -> None:
         """Write the lines that the constructor's checks logged, oldest first.
@@ -889,7 +929,9 @@ class DrakkarApp:
         async def _on_delivery_error(error: DeliveryError) -> DeliveryAction:
             bind_contextvars(hook='on_delivery_error', sink_type=error.sink_type, sink_name=error.sink_name)
             try:
-                return await self._handler.on_delivery_error(error)
+                # Only partition deliveries come here; the HTTP source delivers through its own runner.
+                with pipeline_hook():
+                    return await self._handler.on_delivery_error(error)
             finally:
                 unbind_contextvars('hook', 'sink_type', 'sink_name')
 

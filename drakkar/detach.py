@@ -793,3 +793,36 @@ class DetachController:
             await coro
         except Exception:
             await logger.aexception(event, category='kafka')
+
+
+class HandlerDetachFront:
+    """The handler's way to the app: detach and attach with the origin ``handler``, and the stop request.
+
+    The app puts one on its handler when the worker starts; before that the
+    handler holds a stub that answers ``not_running``.
+    """
+
+    def __init__(self, app: DrakkarApp) -> None:
+        self._app = app
+
+    async def detach(self, *, duration: float | None, reason: str, in_pipeline_hook: bool) -> DetachResult:
+        """Ask the controller for a handler detach."""
+        return await self._app.detach.detach(
+            origin=DetachOrigin.HANDLER,
+            duration=duration,
+            reason=reason,
+            in_pipeline_hook=in_pipeline_hook,
+        )
+
+    async def attach(self, *, reason: str) -> AttachResult:
+        """Ask the controller for a handler attach."""
+        return await self._app.detach.attach(cause=CAUSE_HANDLER, reason=reason)
+
+    @property
+    def state(self) -> DetachState:
+        """The controller's detach state now."""
+        return self._app.detach.state
+
+    def request_stop(self, *, reason: str, exit_code: int) -> None:
+        """Ask the app for a graceful stop."""
+        self._app.request_stop(reason=reason, exit_code=exit_code)

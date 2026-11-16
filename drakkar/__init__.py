@@ -26,6 +26,7 @@ from drakkar.config import (
     WebClientConfig,
     load_config,
 )
+from drakkar.detach import AttachResult, DetachOrigin, DetachResult, DetachState
 from drakkar.handler import BaseDrakkarHandler, DrakkarHandler
 from drakkar.models import (
     CollectResult,
@@ -73,12 +74,16 @@ __all__ = [
     'AgentSnapshot',
     'AgentTopic',
     'AnnotatorLike',
+    'AttachResult',
     'BaseDrakkarHandler',
     'CacheLike',
     'CacheScope',
     'CollectResult',
     'DeliveryAction',
     'DeliveryError',
+    'DetachOrigin',
+    'DetachResult',
+    'DetachState',
     'DrakkarApp',
     'DrakkarConfig',
     'DrakkarHandler',

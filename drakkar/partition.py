@@ -32,6 +32,7 @@ from drakkar.handler import (
     task_run_seconds_hook,
     uses_arrange_stream,
 )
+from drakkar.hook_scope import PipelineHookScope, pipeline_hook
 from drakkar.hookctx import bind_hook_context, clear_hook_context
 from drakkar.metrics import (
     batch_duration,
@@ -1256,7 +1257,8 @@ class PartitionProcessor:
         self._arrange_start = time.monotonic()
         self._arrange_labels = [self._handler.message_label(msg) for msg in messages]
         try:
-            tasks = await self._handler.arrange(messages, pending_ctx)
+            with pipeline_hook():
+                tasks = await self._handler.arrange(messages, pending_ctx)
         finally:
             self._arranging = False
             arrange_labels = self._arrange_labels
@@ -1685,7 +1687,8 @@ class PartitionProcessor:
 
     def _open_stream(self, message: SourceMessage) -> AsyncIterator[list[ExecutorTask]]:
         """Call ``arrange_stream`` and return its async iterator; any other result is a stream error."""
-        return open_arrange_stream(self._handler, message)
+        with pipeline_hook():
+            return open_arrange_stream(self._handler, message)
 
     async def _pull_group(
         self, stream: AsyncIterator[list[ExecutorTask]], tracker: MessageTracker
@@ -1759,8 +1762,12 @@ class PartitionProcessor:
         stream_group_tasks.observe(len(tasks))
         return tasks
 
-    def _bind_pull_context(self, message: SourceMessage, window_id: int) -> tuple[Any, Any]:
-        """Bind the log fields, request id and hook context of one pull; run inside the stream's context."""
+    def _bind_pull_context(self, message: SourceMessage, window_id: int) -> tuple[Any, Any, PipelineHookScope]:
+        """Bind the log fields, request id, hook context and pipeline hook scope of one pull; run in the stream's context.
+
+        The generator's code runs only while a pull is in progress, so the
+        scope covers each pull, not the time between two pulls.
+        """
         offsets = [message.offset]
         bind_contextvars(partition=self._partition_id, hook='arrange_stream', window_id=window_id, offsets=offsets)
         request_id_tokens = self._request_ids.bind([message.request_id])
@@ -1770,12 +1777,14 @@ class PartitionProcessor:
             window_id=window_id,
             offsets=tuple(offsets),
         )
-        return request_id_tokens, hook_token
+        scope = pipeline_hook().__enter__()
+        return request_id_tokens, hook_token, scope
 
     @staticmethod
-    def _reset_pull_context(tokens: tuple[Any, Any]) -> None:
+    def _reset_pull_context(tokens: tuple[Any, Any, PipelineHookScope]) -> None:
         """Put back what ``_bind_pull_context`` bound; run inside the stream's context."""
-        request_id_tokens, hook_token = tokens
+        request_id_tokens, hook_token, scope = tokens
+        scope.end()
         unbind_contextvars('hook', 'window_id', 'offsets')
         reset_request_id(request_id_tokens)
         clear_hook_context(hook_token)
@@ -2226,7 +2235,8 @@ class PartitionProcessor:
         )
         collect_start = time.monotonic()
         try:
-            collect_result = await self._handler.on_task_complete(result)
+            with pipeline_hook():
+                collect_result = await self._handler.on_task_complete(result)
         finally:
             # Both releases belong in the ``finally``: this hook's
             # exception propagates (the caller synthesizes a failure from
@@ -2356,13 +2366,14 @@ class PartitionProcessor:
         """Call ``on_error`` and return its action; a hook that fails gives ``executor.on_failure``."""
         bind_contextvars(hook='on_error', task_id=task.task_id)
         try:
-            call = await taskflow.call_on_error(
-                self._handler,
-                task,
-                error,
-                partition=self._partition_id,
-                window_id=window.window_id,
-            )
+            with pipeline_hook():
+                call = await taskflow.call_on_error(
+                    self._handler,
+                    task,
+                    error,
+                    partition=self._partition_id,
+                    window_id=window.window_id,
+                )
         finally:
             # ``hook``/``task_id`` would otherwise leak into every later
             # log line emitted by this coroutine. (``call_on_error``
@@ -2480,7 +2491,8 @@ class PartitionProcessor:
             )
             wc_start = time.monotonic()
             try:
-                on_complete_result = await self._handler.on_window_complete(window.results, window.source_messages)
+                with pipeline_hook():
+                    on_complete_result = await self._handler.on_window_complete(window.results, window.source_messages)
             except Exception as e:
                 # Log and move on — mirrors on_message_complete below. This
                 # runs inside a fire-and-forget task, so a raising hook would
@@ -2615,7 +2627,8 @@ class PartitionProcessor:
         try:
             # Copies, as on_message_complete gets: the window's lists are
             # cleared after the hook, and a hook may keep what it was given.
-            collect_result = await self._handler.on_group_complete(group, list(window.results), list(window.errors))
+            with pipeline_hook():
+                collect_result = await self._handler.on_group_complete(group, list(window.results), list(window.errors))
         except Exception as e:
             # Log and move on, as for on_message_complete: the group counts as
             # finished, so a handler bug cannot hold its message open.
@@ -2750,7 +2763,8 @@ class PartitionProcessor:
         )
         mc_start = time.monotonic()
         try:
-            on_complete_result = await self._handler.on_message_complete(group)
+            with pipeline_hook():
+                on_complete_result = await self._handler.on_message_complete(group)
         except Exception as e:
             # Log and move on — raising here would block the offset from
             # committing, stalling the partition behind a handler bug.

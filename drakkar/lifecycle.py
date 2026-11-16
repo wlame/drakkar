@@ -69,6 +69,7 @@ from drakkar.cluster_tasks import (
 from drakkar.config.autodiscover import FILESYSTEM_PROVIDER
 from drakkar.config.recorder import PERSISTENCE_POSTGRES
 from drakkar.configmeta import dump_by_yaml_key
+from drakkar.detach import HandlerDetachFront
 from drakkar.detach_group import kafka_card_feature
 from drakkar.executor import ExecutorPool
 from drakkar.fleet.providers import BUILTIN_PROVIDERS
@@ -326,6 +327,8 @@ class AppLifecycle:
         # Capture the running loop so the debug server (separate thread)
         # can dispatch probes back here for ExecutorPool access.
         app._loop = asyncio.get_running_loop()
+        # From here on the handler's detach, attach and request_stop reach the app.
+        self._wire_detach_front()
 
         log = logger.bind(worker_id=app._worker_id)
 
@@ -1376,9 +1379,17 @@ class AppLifecycle:
         SIGKILL. In-flight work is untouched — the drain settles it.
         """
         logger.info('shutdown_signal_received', category='lifecycle')
+        self._signal_sources_stop()
+
+    def _signal_sources_stop(self) -> None:
+        """Tell every source to stop taking input; the run phase ends and the shutdown drains in-flight work."""
         self._app._running = False
         for source in self._app.sources:
             source.signal_stop()
+
+    def _wire_detach_front(self) -> None:
+        """Replace the handler's not-running detach stub with the app's front."""
+        self._app._handler._detach_front = HandlerDetachFront(self._app)
 
     async def _shutdown(self) -> None:
         """Graceful shutdown: stop taking input, drain and stop the sources, close everything else.

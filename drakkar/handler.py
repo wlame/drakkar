@@ -22,6 +22,7 @@ from pydantic import BaseModel, ValidationError
 # heavy module, so there is no circular-import risk.
 from drakkar.annotations import AnnotatorLike
 from drakkar.cache.protocol import CacheLike
+from drakkar.hook_scope import inside_pipeline_hook
 from drakkar.offload import OffloaderLike
 from drakkar.timeline_events import NoOpTimelineEventEmitter, TimelineEventEmitter, TimelineMatch
 
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
 
     from drakkar.agent.notes import AgentNotes
     from drakkar.config import DrakkarConfig
+    from drakkar.detach import AttachResult, DetachResult, DetachState
     from drakkar.uipages import Page
 
 from drakkar.metrics import message_parse_failures
@@ -52,6 +54,9 @@ from drakkar.models import (
 from drakkar.utils import make_request_id
 
 logger = structlog.get_logger()
+
+# The largest exit code a process can report.
+MAX_EXIT_CODE = 255
 
 # PEP 696 default TypeVars (Python 3.13+). These let the handler stay 2-param
 # for non-webapp users (``BaseDrakkarHandler[InputT, OutputT]``) while extending
@@ -304,6 +309,13 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     # recorder events), and the framework replaces it per-instance with the
     # worker's ``OffloadPool`` at startup.
     _offloader: OffloaderLike
+
+    # Backs :meth:`detach`, :meth:`attach`, :attr:`detach_state` and
+    # :meth:`request_stop`. Same lifecycle again: the class-level
+    # ``NotRunningDetachFront`` stub answers ``not_running`` and stops
+    # nothing, and the framework replaces it per-instance with the app's
+    # front when the worker starts.
+    _detach_front: DetachFrontLike
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
@@ -825,6 +837,57 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         return await self._offloader.run(fn, *args, **kwargs)
 
     # ------------------------------------------------------------------
+    # Detach, attach and the stop request.
+
+    async def detach(self, duration: float | None = None, reason: str = '') -> DetachResult:
+        """Leave the Kafka consumer group for ``duration`` seconds, or learn why not.
+
+        ``None`` means ``sources.kafka.detach.default_duration``. ``reason``
+        is free text, cut at 200 characters. Returns when the revoke drain
+        has ended and no partition is left on this worker, or with a
+        refusal in ``result.reason``. A call made as part of a partition's
+        work (``arrange``, ``arrange_stream``, the completion hooks,
+        ``on_error``, ``on_delivery_error``), also through
+        ``asyncio.gather`` or ``asyncio.wait_for``, answers
+        ``inside_pipeline_hook`` at once: the drain would wait for the call
+        itself.
+
+        Raises:
+            ValueError: ``duration`` is below 10 seconds or above ``max_duration``.
+        """
+        # Read in the caller's context before any await: a task that the
+        # call starts inherits the context, so this is the hook's own scope.
+        in_pipeline_hook = inside_pipeline_hook()
+        return await self._detach_front.detach(duration=duration, reason=reason, in_pipeline_hook=in_pipeline_hook)
+
+    async def attach(self, reason: str = '') -> AttachResult:
+        """Join the Kafka consumer group again after a handler detach.
+
+        Returns when the join was sent and the budget slot was given back. It
+        does not wait for an assignment. An operator detach answers
+        ``held_by_operator``.
+        """
+        return await self._detach_front.attach(reason=reason)
+
+    @property
+    def detach_state(self) -> DetachState:
+        """The detach state of this worker: ``state``, ``origin``, ``reason``, ``since`` and ``until``."""
+        return self._detach_front.state
+
+    def request_stop(self, reason: str = '', exit_code: int = 0) -> None:
+        """Ask the worker to shut down gracefully, as on SIGTERM, then exit with ``exit_code``.
+
+        Returns at once; safe to call from a hook and from a thread (a
+        function run through :meth:`offload`). The first call wins: a later
+        call changes nothing. Before the worker runs it does nothing.
+
+        Raises:
+            ValueError: ``exit_code`` is not a whole number from 0 to 255.
+        """
+        check_exit_code(exit_code)
+        self._detach_front.request_stop(reason=reason, exit_code=exit_code)
+
+    # ------------------------------------------------------------------
     # Webapp hooks (optional — only invoked when sources.http.enabled=True).
     #
     # Users opt in by declaring concrete types in the HttpRequestT /
@@ -982,6 +1045,52 @@ def check_task_run_seconds_hook(handler: object) -> None:
 # assignment runs once at import; every ``BaseDrakkarHandler`` subclass instance
 # reads the shared stubs through the class attributes unless the framework
 # replaces them with real objects at runtime.
+def check_exit_code(exit_code: int) -> None:
+    """Refuse an exit code that is not a whole number from 0 to 255 (a ``bool`` is refused too).
+
+    Raises:
+        ValueError: the exit code is out of range or not an ``int``.
+    """
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int) or not 0 <= exit_code <= MAX_EXIT_CODE:
+        raise ValueError(f'exit_code must be a whole number from 0 to {MAX_EXIT_CODE}, got {exit_code!r}')
+
+
+class DetachFrontLike(Protocol):
+    """What the handler's detach methods call: the app's front once the worker runs, a stub before."""
+
+    async def detach(self, *, duration: float | None, reason: str, in_pipeline_hook: bool) -> DetachResult: ...
+
+    async def attach(self, *, reason: str) -> AttachResult: ...
+
+    @property
+    def state(self) -> DetachState: ...
+
+    def request_stop(self, *, reason: str, exit_code: int) -> None: ...
+
+
+class NotRunningDetachFront:
+    """The front of a handler the app has not wired: no detach, no attach, no stop."""
+
+    async def detach(self, *, duration: float | None, reason: str, in_pipeline_hook: bool) -> DetachResult:
+        from drakkar.detach import REFUSED_NOT_RUNNING, DetachResult
+
+        return DetachResult(detached=False, reason=REFUSED_NOT_RUNNING, until=None)
+
+    async def attach(self, *, reason: str) -> AttachResult:
+        from drakkar.detach import REFUSED_NOT_RUNNING, AttachResult
+
+        return AttachResult(attached=False, reason=REFUSED_NOT_RUNNING)
+
+    @property
+    def state(self) -> DetachState:
+        from drakkar.detach import ATTACHED_STATE
+
+        return ATTACHED_STATE
+
+    def request_stop(self, *, reason: str, exit_code: int) -> None:
+        """Do nothing: there is no worker to stop."""
+
+
 def _install_default_cache() -> None:
     """Attach the stateless default stubs as class attributes.
 
@@ -998,6 +1107,7 @@ def _install_default_cache() -> None:
     BaseDrakkarHandler._timeline_events = NoOpTimelineEventEmitter()
     BaseDrakkarHandler._annotator = NoOpAnnotator()
     BaseDrakkarHandler._offloader = InlineOffloader()
+    BaseDrakkarHandler._detach_front = NotRunningDetachFront()
 
 
 _install_default_cache()
