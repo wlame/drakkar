@@ -36,6 +36,7 @@ from drakkar.config.origins import ConfigOrigins
 from drakkar.config.sinks import POLICY_KEYS, SINK_TYPES
 from drakkar.consume_pause import ConsumePauseController
 from drakkar.consumer import KafkaConsumer
+from drakkar.detach import DetachController
 from drakkar.executor import ExecutorPool
 from drakkar.fleet.card import WorkerIdentity
 from drakkar.fleet.service import FleetRegistry
@@ -435,6 +436,11 @@ class DrakkarApp:
         from drakkar.lifecycle import AppLifecycle
 
         self._lifecycle = AppLifecycle(self)
+        # Leaves the consumer group for a bounded time and joins it again
+        # (sources.kafka.detach). Built for every app, like the pause control;
+        # the card reads its state at each publish.
+        self._detach = DetachController(self)
+        self._lifecycle._is_detached = lambda: self._detach.is_detached
 
     @property
     def config(self) -> DrakkarConfig:
@@ -444,6 +450,11 @@ class DrakkarApp:
     def consume_pause(self) -> ConsumePauseController:
         """The operator-driven timed pause controller (Live page control)."""
         return self._consume_pause
+
+    @property
+    def detach(self) -> DetachController:
+        """The controller that detaches this worker from its consumer group and attaches it again."""
+        return self._detach
 
     @property
     def handler(self) -> BaseDrakkarHandler:

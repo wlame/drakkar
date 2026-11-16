@@ -72,7 +72,7 @@ from drakkar.configmeta import dump_by_yaml_key
 from drakkar.detach_group import kafka_card_feature
 from drakkar.executor import ExecutorPool
 from drakkar.fleet.providers import BUILTIN_PROVIDERS
-from drakkar.fleet.service import FleetRegistry
+from drakkar.fleet.service import FleetRegistry, PeerView
 from drakkar.hostinfo import effective_cpu_count
 from drakkar.kafka_security import describe_mixed_security
 from drakkar.logging import close_logging
@@ -908,10 +908,30 @@ class AppLifecycle:
             provider_options=options,
             features=self._card_features,
             connections=app._connections,
-            on_refresh=ClusterHashChecker(app.cluster_tasks_hash, app._cluster_name).check,
+            on_refresh=self._registry_refresh_callback(),
         )
         await app._fleet.check_name_free()
         await app._fleet.start()
+
+    def _registry_refresh_callback(self) -> Callable[[list[PeerView]], Awaitable[None]]:
+        """The one callback of each registry refresh: the cluster hash check, then the detach watchdog.
+
+        An error of one is logged and does not keep the other from running.
+        """
+        app = self._app
+        hash_checker = ClusterHashChecker(app.cluster_tasks_hash, app._cluster_name)
+
+        async def on_refresh(views: list[PeerView]) -> None:
+            try:
+                await hash_checker.check(views)
+            except Exception:
+                await logger.aexception('registry_refresh_check_failed', category='periodic', check='cluster_hash')
+            try:
+                await app.detach.on_registry_refresh(views)
+            except Exception:
+                await logger.aexception('registry_refresh_check_failed', category='kafka', check='detach')
+
+        return on_refresh
 
     def _card_features(self) -> dict[str, Any]:
         """The card's ``features``: the cluster task hash, the UI switch, the cache marks while the cache serves,
@@ -1553,6 +1573,12 @@ class AppLifecycle:
         # its lease has ended or been left: one attempt in the time left.
         # Its caller counts and logs a failed call; anything else it
         # raises is logged here, so the card withdraw and the closes below still run.
+        # A held detach slot is given back with one attempt before the
+        # election provider stops; the sources have stopped, so nothing
+        # subscribes again. A crash leaves the slot to end with its lease.
+        if app._cluster_election is not None:
+            detach = app.detach
+            steps.append(StopStep('detach_slot_release_failed', 'kafka', lambda: detach.release_at_stop(time_left())))
         if app._cluster_election is not None:
             election = app._cluster_election
             steps.append(StopStep('periodic_election_stop_failed', 'periodic', lambda: election.stop(time_left())))
