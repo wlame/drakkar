@@ -251,6 +251,18 @@ async def test_leases_of_a_worker_without_a_cluster_task_answer_no_election():
     assert resp.json() == {'election': None, 'leases': []}
 
 
+async def test_leases_of_a_worker_with_an_election_for_detach_only_answer_no_election():
+    """The detach budget gives a worker an election with no cluster task; the view lists cluster tasks only."""
+    provider = MemoryElection(ElectionStore())
+
+    async with _client(_config(), election=_election(provider), roster=SimpleNamespace(definitions=())) as client:
+        resp = await client.get(LEASES)
+
+    assert resp.status_code == 200
+    assert resp.json() == {'election': None, 'leases': []}
+    assert provider.calls['holder'] == 0
+
+
 async def test_leases_before_the_election_started_make_no_store_call():
     provider = MemoryElection(ElectionStore())
     election = _election(provider)

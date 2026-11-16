@@ -186,6 +186,7 @@ def mock_app():
     app._executor_pool = pool
 
     app._consumer = None
+    app.detach.is_detached = False
 
     sink_mgr = MagicMock()
     sink_mgr.get_sink_info.return_value = [
@@ -1376,7 +1377,22 @@ async def test_api_workers_current_worker_row_has_every_contract_field(client):
         'cluster_tasks_hash': OWN_CLUSTER_TASKS_HASH,
         'cluster_tasks_match': True,
         'ui_enabled': True,
+        'detached': False,
     }
+
+
+async def test_api_workers_current_worker_row_reads_the_detach_controller(client, mock_app):
+    mock_app.detach.is_detached = True
+
+    (me,) = (await client.get('/api/v1/workers')).json()
+
+    assert me['detached'] is True
+
+
+async def test_api_workers_current_worker_row_without_a_kafka_source_has_no_detached_value(http_only_client):
+    (me,) = (await http_only_client.get('/api/v1/workers')).json()
+
+    assert me['detached'] is None
 
 
 async def test_api_workers_current_worker_debug_url_is_the_public_url(debug_config, mock_recorder, mock_app):
@@ -1421,6 +1437,7 @@ async def test_api_workers_peer_row_comes_from_the_card(client, mock_app):
         'cluster_tasks_hash': None,
         'cluster_tasks_match': None,
         'ui_enabled': None,
+        'detached': None,
         'backend': 'python',
         'version': '2.4.0',
         'state': 'draining',

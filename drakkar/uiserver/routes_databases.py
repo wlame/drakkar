@@ -413,6 +413,10 @@ def create_databases_router(deps: UIDeps) -> APIRouter:
             now=time.time(),
             last_slots=election.last_slots,
         )
+        if not skeletons:
+            # The detach budget alone gives a worker an election; with no cluster task
+            # the view has nothing to show, as for a worker with no election.
+            return JSONResponse({'election': None, 'leases': []})
         started = election.started and not election.stopped
         results: dict[str, Any] = {}
         busy = False

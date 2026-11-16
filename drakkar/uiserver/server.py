@@ -20,6 +20,7 @@ the drakkar-ui bundle through ``routes_spa``, not rendered here.
   * ``routes_cache``  — ``/api/v1/debug/cache/*``.
   * ``routes_kafka_read``    — ``/api/v1/debug/kafka/*``.
   * ``routes_consume_pause`` — ``/api/v1/debug/consume-pause``.
+  * ``routes_detach`` — ``/api/v1/debug/detach`` and ``/api/v1/debug/attach``.
   * ``routes_runtime``       — ``/api/v1/debug/runtime/*``.
   * ``routes_renderers``     — ``/api/v1/ui/renderers.js``.
   * ``routes_config_reference`` — ``/api/v1/config-reference``.
@@ -664,6 +665,7 @@ def create_ui_app(
     from drakkar.uiserver.routes_consume_pause import create_consume_pause_router
     from drakkar.uiserver.routes_databases import create_databases_router
     from drakkar.uiserver.routes_debug import create_debug_router
+    from drakkar.uiserver.routes_detach import create_detach_router
     from drakkar.uiserver.routes_docs import create_docs_router
     from drakkar.uiserver.routes_kafka_read import create_kafka_read_router
     from drakkar.uiserver.routes_live import create_live_router
@@ -709,6 +711,7 @@ def create_ui_app(
         create_databases_router(deps),
         create_cache_router(deps),
         create_consume_pause_router(deps),
+        create_detach_router(deps),
         create_kafka_read_router(deps),
         create_runtime_router(deps),
         create_config_reference_router(deps),

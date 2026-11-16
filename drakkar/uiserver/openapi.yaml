@@ -12,7 +12,7 @@
 openapi: 3.1.0
 info:
   title: Drakkar Backend API
-  version: "1.32"
+  version: "1.33"
   description: >-
     The JSON surface every Drakkar backend (Python reference and Go port)
     serves identically under /api/v1, plus the unprefixed Kubernetes probes.
@@ -1329,6 +1329,86 @@ paths:
               schema: {$ref: '#/components/schemas/ConsumePauseState'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
+  /api/v1/debug/detach:
+    get:
+      tags: [debug-tools]
+      operationId: getDetach
+      summary: Detach state of the worker's Kafka source
+      description: >-
+        v1.33. Always 200, also when the feature is off: enabled false in the
+        body is the signal the UI hides its detach control on. Python only for
+        now; a backend without the feature answers 404, and a client hides the
+        control then too.
+      responses:
+        '200':
+          description: The detach state.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DetachState'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      tags: [debug-tools]
+      operationId: postDetach
+      summary: Detach the worker from its consumer group for a bounded time
+      description: >-
+        v1.33. An operator detach. The route does not wait for the detach,
+        which can take executor.drain_timeout and more: it starts the
+        transition and answers 202 with the state at once. The outcome shows
+        later in last_request. An operator detach of a worker that the
+        handler detached takes the origin and replaces the deadline. 403
+        when ui.detach_enabled is false; 422 for a duration out of range or
+        a body that does not parse.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                duration_seconds:
+                  type: number
+                  minimum: 10
+                  description: From 10 to max_duration_seconds of the state.
+                reason:
+                  type: string
+                  description: Free text, cut at 200 characters.
+              required: [duration_seconds]
+      responses:
+        '202':
+          description: The transition started; the state at once.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DetachState'}
+        '403':
+          description: ui.detach_enabled is false; detail carries the hint.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Detail'}
+        '422': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
+  /api/v1/debug/attach:
+    post:
+      tags: [debug-tools]
+      operationId: postAttach
+      summary: Join the consumer group again
+      description: >-
+        v1.33. An operator attach, started like a detach; answers 202 with
+        the state at once. Idempotent: on an attached worker it changes
+        nothing. 403 when ui.detach_enabled is false.
+      responses:
+        '202':
+          description: The transition started; the state at once.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DetachState'}
+        '403':
+          description: ui.detach_enabled is false; detail carries the hint.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Detail'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
   /api/v1/debug/kafka/topics:
     get:
       tags: [kafka-read]
@@ -1815,7 +1895,7 @@ paths:
       security:
         - agentBearer: []
       description: >-
-        v1.31. Health, budget, partitions, sinks, recorder, autodiscover and the last 20 failed tasks. Payload text (stderr_tail, args) only when agent.include_payloads is true.
+        v1.31. Health, budget, partitions, sinks, recorder, autodiscover, detach (v1.33) and the last 20 failed tasks. Payload text (stderr_tail, args) only when agent.include_payloads is true.
         Checks in order: agent.enabled (404), the agent token (401), the
         parameters (400). Needs api.enabled only; served with ui.enabled false.
       parameters:
@@ -1823,7 +1903,7 @@ paths:
           in: query
           required: false
           description: >-
-            Comma list of health, budget, partitions, sinks, recorder, autodiscover, recent_failures. Absent: all parts. An unknown or
+            Comma list of health, budget, partitions, sinks, recorder, autodiscover, detach (v1.33), recent_failures. Absent: all parts. An unknown or
             empty item answers 400 "unknown part '<p>'; known: <sorted list>".
           schema: {type: string}
         - name: detail
@@ -1867,7 +1947,7 @@ paths:
       security:
         - agentBearer: []
       description: >-
-        v1.31. Runs every diagnose rule on one state snapshot. A rule that raises or exceeds 1 s (handler rules) is listed in failed and does not stop the others. Rules that compare with the previous call keep one in-memory baseline per worker process.
+        v1.31. Runs every diagnose rule on one state snapshot (14 framework rules since v1.33, worker-detached included). A rule that raises or exceeds 1 s (handler rules) is listed in failed and does not stop the others. Rules that compare with the previous call keep one in-memory baseline per worker process.
         Checks in order: agent.enabled (404), the agent token (401), the
         parameters (400). Needs api.enabled only; served with ui.enabled false.
       parameters:
@@ -2384,6 +2464,10 @@ components:
         # A worker with ui_enabled false serves no UI routes; clients leave
         # it out of their fan-out and switcher links.
         ui_enabled: {type: [boolean, 'null']}
+        # v1.33, optional: from the card's features.kafka.detached. True while
+        # that worker is detached from its consumer group. Absent or null:
+        # unknown (no Kafka source, or a backend that does not publish it).
+        detached: {type: [boolean, 'null']}
       required: [worker_name, url, is_current]
 
     ProcessorsReport:
@@ -3559,6 +3643,54 @@ components:
         requested_seconds: {type: [integer, 'null']}
       required: [enabled, durations_seconds, active, resume_at_ms, requested_seconds]
 
+    DetachState:
+      type: object
+      description: >-
+        v1.33. The detach state of the worker's Kafka source. enabled is true
+        when the Kafka source is on and sources.kafka.detach.enabled is true;
+        ui_enabled is ui.detach_enabled. Times are epoch milliseconds.
+      properties:
+        enabled: {type: boolean}
+        ui_enabled: {type: boolean}
+        state: {type: string, enum: [attached, detaching, detached, attaching]}
+        origin:
+          type: [string, 'null']
+          enum: [handler, operator, null]
+          description: null while attached.
+        reason:
+          type: string
+          description: The free text of the detach (at most 200 characters); empty when none.
+        since_ms:
+          type: [integer, 'null']
+          description: When the detach began; null while attached.
+        until_ms:
+          type: [integer, 'null']
+          description: The deadline while detached; null in every other state.
+        max_duration_seconds: {type: number}
+        default_duration_seconds: {type: number}
+        last_request:
+          type: [object, 'null']
+          description: >-
+            The last detach or attach that the handler or an operator asked
+            for; null before the first. An attach that the deadline or a
+            safety rule starts does not change it.
+          properties:
+            origin: {type: string, enum: [handler, operator]}
+            action: {type: string, enum: [detach, attach]}
+            outcome:
+              type: string
+              description: >-
+                detached or attached on success, else a refusal reason:
+                not_running, stopping, disabled, inside_pipeline_hook,
+                already_detached, join_failed, cooldown, too_few_workers, budget_full,
+                store_unavailable, leave_failed (detach); not_running,
+                stopping, held_by_operator, join_failed (attach). A client shows an
+                unknown value as it is.
+            at_ms: {type: integer}
+          required: [origin, action, outcome, at_ms]
+      required: [enabled, ui_enabled, state, origin, reason, since_ms, until_ms,
+                 max_duration_seconds, default_duration_seconds, last_request]
+
     KafkaReadTopics:
       type: object
       properties:
@@ -3995,6 +4127,16 @@ components:
             peers_offline: {type: [integer, 'null']}
             cluster_tasks_match: {type: [boolean, 'null']}
           required: [enabled, provider, peers_online, peers_offline, cluster_tasks_match]
+        detach:
+          type: object
+          description: v1.33. The detach state; since and until in epoch seconds.
+          properties:
+            state: {type: string, enum: [attached, detaching, detached, attaching]}
+            origin: {type: [string, 'null'], enum: [handler, operator, null]}
+            reason: {type: string}
+            since: {type: [number, 'null']}
+            until: {type: [number, 'null']}
+          required: [state, origin, reason, since, until]
         recent_failures:
           type: [object, 'null']
           properties:

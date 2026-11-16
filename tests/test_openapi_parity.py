@@ -476,7 +476,11 @@ async def test_workers_payload_matches_schema():
     class StubFleet:
         def peer_views(self) -> list[PeerView]:
             return [
-                peer('w-same', 'search', {'periodic': {'cluster_hash': own_hash}}),
+                peer(
+                    'w-same',
+                    'search',
+                    {'periodic': {'cluster_hash': own_hash}, 'kafka': {'group': 'g', 'detached': True}},
+                ),
                 peer('w-unknown', 'search', {'cache': {}}),
             ]
 
@@ -491,6 +495,7 @@ async def test_workers_payload_matches_schema():
     app.lifecycle_state = 'running'
     app.cluster_tasks_hash = own_hash
     app.fleet = StubFleet()
+    app.detach.is_detached = False
     app.worker_identity = WorkerIdentity(
         worker='schema-worker',
         instance='abcdef0123456789',
@@ -514,6 +519,11 @@ async def test_workers_payload_matches_schema():
         'schema-worker': (own_hash, True),
         'w-same': (own_hash, True),
         'w-unknown': (None, None),
+    }
+    assert {row['worker_name']: row['detached'] for row in workers} == {
+        'schema-worker': False,
+        'w-same': True,
+        'w-unknown': None,
     }
 
 

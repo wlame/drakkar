@@ -387,6 +387,9 @@
     - event:worker_attached
     - rule:worker-detached
     - recipe:worker-detached
+    - route:GET /api/v1/debug/detach
+    - route:POST /api/v1/debug/detach
+    - route:POST /api/v1/debug/attach
 
 - key: cache-exchange
   summary: The cache exchange lets each worker pull the cluster and global cache rows that its peers wrote, over HTTP.

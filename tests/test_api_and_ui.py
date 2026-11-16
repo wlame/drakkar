@@ -511,6 +511,23 @@ def test_worker_row_carries_ui_enabled_from_the_card(view, expected):
     assert row['ui_enabled'] is expected
 
 
+@pytest.mark.parametrize(
+    ('view', 'expected'),
+    [
+        (_peer(kafka={'group': 'g', 'detached': True}), True),
+        (_peer(kafka={'group': 'g', 'detached': False}), False),
+        (_peer(kafka={'group': 'g'}), None),
+        (_peer(kafka={'group': 'g', 'detached': 'yes'}), None),
+        (_peer(kafka='g'), None),
+        (_peer(), None),
+    ],
+)
+def test_worker_row_carries_detached_from_the_card(view, expected):
+    row = peer_worker_row(view, own_cluster='search', own_hash='0123456789abcdef')
+
+    assert row['detached'] is expected
+
+
 @pytest.mark.parametrize('ui_enabled', [True, False])
 def test_card_features_say_whether_the_ui_is_on(ui_enabled):
     app = DrakkarApp(handler=KafkaOnlyHandler(), config=_config(ui={'enabled': ui_enabled}), worker_id='w-1')

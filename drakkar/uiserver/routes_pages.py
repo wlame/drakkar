@@ -149,11 +149,15 @@ def peer_worker_row(view: PeerView, *, own_cluster: str, own_hash: str) -> dict[
     carries one in the contract form, else ``None``. ``cluster_tasks_match``
     compares it with ``own_hash`` for a peer of ``own_cluster``; it is
     ``None`` for a peer of another cluster or with no hash. ``ui_enabled``
-    is the card's ``features.ui`` when it is a boolean, else ``None``.
+    is the card's ``features.ui`` when it is a boolean, else ``None``, and
+    ``detached`` the card's ``features.kafka.detached`` the same way.
     """
     card = view.card
     peer_hash = card_cluster_hash(card)
-    ui_feature = card.get('features', {}).get('ui')
+    features = card.get('features', {})
+    ui_feature = features.get('ui')
+    kafka_feature = features.get('kafka')
+    detached = kafka_feature.get('detached') if isinstance(kafka_feature, dict) else None
     same_cluster = card['cluster'] == own_cluster
     row: dict[str, Any] = {
         'worker_name': card['worker'],
@@ -170,6 +174,7 @@ def peer_worker_row(view: PeerView, *, own_cluster: str, own_hash: str) -> dict[
         'cluster_tasks_hash': peer_hash,
         'cluster_tasks_match': peer_hash == own_hash if peer_hash is not None and same_cluster else None,
         'ui_enabled': ui_feature if isinstance(ui_feature, bool) else None,
+        'detached': detached if isinstance(detached, bool) else None,
     }
     for key in _OPTIONAL_PEER_FIELDS:
         if key in card:
@@ -525,6 +530,8 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
             'cluster_tasks_match': True,
             # This row is the answer of a UI route.
             'ui_enabled': True,
+            # Unknown (None) for a worker with no Kafka source: it has no group to leave.
+            'detached': drakkar_app.detach.is_detached if drakkar_app._config.sources.kafka.enabled else None,
         }
 
     @router.get('/api/v1/workers')

@@ -467,3 +467,6 @@
     - event:worker_detached
     - event:worker_attached
     - rule:worker-detached
+    - route:GET /api/v1/debug/detach
+    - route:POST /api/v1/debug/detach
+    - route:POST /api/v1/debug/attach

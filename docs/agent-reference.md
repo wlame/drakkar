@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `36764bc76bd9eeb9`.
+Registry version: `03d0e9ce03e445a0`.
 
 ## Concepts
 
@@ -317,7 +317,7 @@ While detached, the worker reads no Kafka message and has no `drakkar_consumer_l
 - Each return makes the other workers of the group give partitions back through a revoke drain.
 - Every worker of one group should use the same max_detached and min_attached.
 
-**Related:** `concept:autodiscover`, `config:sources.kafka.detach.enabled`, `config:sources.kafka.detach.max_detached`, `config:sources.kafka.detach.min_attached`, `config:sources.kafka.detach.default_duration`, `config:sources.kafka.detach.max_duration`, `config:sources.kafka.detach.cooldown`, `config:sources.kafka.detach.lease`, `config:ui.detach_enabled`, `metric:drakkar_detached`, `metric:drakkar_detach_requests_total`, `metric:drakkar_attach_total`, `event:worker_detached`, `event:worker_attached`, `rule:worker-detached`, `recipe:worker-detached`
+**Related:** `concept:autodiscover`, `config:sources.kafka.detach.enabled`, `config:sources.kafka.detach.max_detached`, `config:sources.kafka.detach.min_attached`, `config:sources.kafka.detach.default_duration`, `config:sources.kafka.detach.max_duration`, `config:sources.kafka.detach.cooldown`, `config:sources.kafka.detach.lease`, `config:ui.detach_enabled`, `metric:drakkar_detached`, `metric:drakkar_detach_requests_total`, `metric:drakkar_attach_total`, `event:worker_detached`, `event:worker_attached`, `rule:worker-detached`, `recipe:worker-detached`, `route:GET /api/v1/debug/detach`, `route:POST /api/v1/debug/detach`, `route:POST /api/v1/debug/attach`
 
 ### `concept:cache-exchange`
 
@@ -3331,7 +3331,7 @@ Find out why a worker is detached from its consumer group, when it comes back, a
 - The detach was refused with inside_pipeline_hook. Check: The handler called detach from code that runs as part of a partition's work, which would wait for itself. Fix: Call detach from a periodic task, from on_assign or on_revoke, or from a task the handler started itself.
 - The detach was refused with already_detached, join_failed, not_running, stopping or disabled. Check: already_detached means an operator detach is active; join_failed means the worker is still on its way back; not_running and stopping mean the Kafka source is not running; disabled means sources.kafka.detach.enabled is false or there is no Kafka source. Fix: Wait for the state to change, or turn the feature on.
 
-**Related:** `concept:detach`, `config:sources.kafka.detach.max_detached`, `config:sources.kafka.detach.min_attached`, `metric:drakkar_detached`, `metric:drakkar_detach_requests_total`, `metric:drakkar_attach_total`, `event:worker_detached`, `event:worker_attached`, `rule:worker-detached`
+**Related:** `concept:detach`, `config:sources.kafka.detach.max_detached`, `config:sources.kafka.detach.min_attached`, `metric:drakkar_detached`, `metric:drakkar_detach_requests_total`, `metric:drakkar_attach_total`, `event:worker_detached`, `event:worker_attached`, `rule:worker-detached`, `route:GET /api/v1/debug/detach`, `route:POST /api/v1/debug/detach`, `route:POST /api/v1/debug/attach`
 
 ## Routes
 
@@ -3704,6 +3704,36 @@ Resumes consuming now.
 **Cost:** cheap
 
 **Related:** `rule:partition-paused-by-debug`
+
+### `route:GET /api/v1/debug/detach`
+
+The detach state of the worker, its deadline and the outcome of the last detach or attach request.
+
+**Use:** Check whether the worker is detached from its consumer group, by whom, until when, and why the last request ended as it did.
+
+**Cost:** cheap
+
+**Related:** `concept:detach`, `recipe:worker-detached`
+
+### `route:POST /api/v1/debug/detach`
+
+Starts an operator detach from the consumer group for a bounded time and answers at once.
+
+**Use:** Take the worker out of its consumer group for a while; it changes the worker, so only an operator should call it.
+
+**Cost:** cheap
+
+**Related:** `concept:detach`
+
+### `route:POST /api/v1/debug/attach`
+
+Starts an operator attach to the consumer group and answers at once.
+
+**Use:** End a detach now; it changes the worker, so only an operator should call it.
+
+**Cost:** cheap
+
+**Related:** `concept:detach`
 
 ### `route:GET /api/v1/debug/kafka/topics`
 
