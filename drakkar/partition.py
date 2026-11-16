@@ -16,6 +16,7 @@ from drakkar import taskflow
 from drakkar.budget import TASKS_LIMIT, BudgetAccount, MessageShape, PendingBudget, output_bytes, text_bytes
 from drakkar.executor import ExecutorPool, ExecutorTaskError
 from drakkar.groups import (
+    STREAM_CLOSE_TIMEOUT,
     check_stream_item,
     drop_invalid_notes,
     new_task_group,
@@ -145,11 +146,6 @@ PARTITION_RESTART_LIMIT = 1
 # message shape after the first sample passes the cap by one message, not by a
 # whole window sized on that sample.
 WARM_UP_WINDOWS = 3
-
-# How long closing a stream may take: cancelling the pull in progress, then
-# ``aclose()`` of the generator. A generator that ignores both is left behind
-# after this bound, so it cannot spend the drain budget of the whole worker.
-STREAM_CLOSE_TIMEOUT = 5.0
 
 
 class _StreamInterrupted(Exception):

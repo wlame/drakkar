@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import time
 from contextlib import ExitStack
 from typing import Any
@@ -3988,7 +3989,7 @@ async def test_probe_drops_group_notes_of_other_types_and_reports_them():
     assert 'bad' in error.message
 
 
-async def test_probe_reports_a_stream_whose_close_raises():
+async def test_probe_reports_a_finally_that_raises_at_the_natural_end_as_a_stream_error():
     class RaisesOnClose(_StreamHandler):
         async def arrange_stream(self, message):
             try:
@@ -3997,18 +3998,15 @@ async def test_probe_reports_a_stream_whose_close_raises():
             finally:
                 raise RuntimeError('close broke')
 
-    from drakkar.uiserver import runner as runner_module
-
     report = await _stream_runner(RaisesOnClose(group_count=2)).run(ProbeInput(value='{}'))
 
-    # The stream ended by itself; its close raised in the ``finally`` of the
-    # last pull, which is an error of the stream.
-    assert runner_module.PROBE_MAX_STREAM_GROUPS == 5
+    # The stream ended by itself, and its ``finally`` raised inside the last
+    # pull: an error of the stream, not of the close.
     assert len(report.groups) == 2
     assert 'close broke' in (report.arrange.error or '')
 
 
-async def test_probe_reports_a_close_that_raises_after_truncation(monkeypatch):
+async def test_probe_reports_a_close_that_raises_after_truncation():
     class RaisesOnClose(_StreamHandler):
         async def arrange_stream(self, message):
             index = 0
@@ -4049,6 +4047,10 @@ async def test_probe_leaves_a_stream_whose_close_does_not_end(monkeypatch):
 
     assert report.stream_truncated is True
     assert 'timed out' in report.errors[-1].message
+    # Let the generator left behind finish, so no task stays pending.
+    never.set()
+    for _ in range(3):
+        await asyncio.sleep(0)
 
 
 async def test_probe_closes_the_stream_when_the_run_is_cancelled():
@@ -4128,3 +4130,135 @@ async def test_probe_runs_a_stream_that_is_a_plain_async_iterator():
     assert [group.index for group in report.groups] == [0]
     assert report.stream_truncated is False
     assert report.errors == []
+
+
+async def test_probe_runs_every_pull_and_the_close_of_a_stream_in_one_context():
+    """A token the generator took before a yield resets in its ``finally``, and its variable stays in the stream."""
+    span: contextvars.ContextVar[str | None] = contextvars.ContextVar('probe_test_span', default=None)
+    seen_by_hooks: list[str | None] = []
+
+    class SetsAVariable(_StreamHandler):
+        async def arrange_stream(self, message):
+            token = span.set('stream')
+            index = 0
+            try:
+                while True:
+                    yield self.make_group(message, index)
+                    index += 1
+            finally:
+                span.reset(token)
+                self.finally_ran = True
+
+        async def on_task_complete(self, result):
+            seen_by_hooks.append(span.get())
+            return None
+
+        async def on_message_complete(self, group):
+            seen_by_hooks.append(span.get())
+            return None
+
+    handler = SetsAVariable(group_count=0, group_size=1)
+
+    report = await _stream_runner(handler).run(ProbeInput(value='{}'))
+
+    assert report.stream_truncated is True
+    assert report.errors == []
+    assert handler.finally_ran
+    assert seen_by_hooks == [None] * 6
+    assert span.get() is None
+
+
+async def test_a_generator_that_swallows_the_cancel_and_yields_does_not_keep_the_probe_running():
+    pulled_after_cancel = asyncio.Event()
+
+    class SwallowsTheCancel(_StreamHandler):
+        async def arrange_stream(self, message):
+            try:
+                yield self.make_group(message, 0)
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    pulled_after_cancel.set()
+                index = 1
+                while True:
+                    yield self.make_group(message, index)
+                    index += 1
+            finally:
+                self.finally_ran = True
+
+    handler = SwallowsTheCancel(group_count=0)
+    runner = _stream_runner(handler)
+    state = runner._make_run_state(ProbeInput(value='{}'))
+    run = asyncio.create_task(runner._run_with_state(state))
+    await wait_for(lambda: state.groups is not None and len(state.groups) == 1 and state.cache_proxy is not None)
+    await asyncio.sleep(0.01)
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    assert pulled_after_cancel.is_set()
+    assert handler.finally_ran
+    # No group ran after the cancel: the probe left when it was cancelled.
+    assert len(state.groups) == 1
+
+
+async def test_a_generator_that_swallows_the_cancel_and_waits_is_left_behind_within_the_close_bound(monkeypatch):
+    from drakkar.uiserver import runner as runner_module
+
+    monkeypatch.setattr(runner_module, 'STREAM_CLOSE_TIMEOUT', 0.05)
+    never = asyncio.Event()
+
+    class SwallowsTheCancelAndWaits(_StreamHandler):
+        async def arrange_stream(self, message):
+            yield self.make_group(message, 0)
+            with contextlib.suppress(asyncio.CancelledError):
+                await never.wait()
+            with contextlib.suppress(asyncio.CancelledError):
+                await never.wait()
+            await never.wait()
+            yield self.make_group(message, 1)
+
+    runner = _stream_runner(SwallowsTheCancelAndWaits(group_count=0))
+    state = runner._make_run_state(ProbeInput(value='{}'))
+    run = asyncio.create_task(runner._run_with_state(state))
+    await wait_for(lambda: state.groups is not None and len(state.groups) == 1)
+    await asyncio.sleep(0.01)
+    started = time.monotonic()
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+
+    assert time.monotonic() - started < 1.0
+    assert 'timed out' in state.errors[-1].message
+    assert state.errors[-1].stage == 'arrange'
+    never.set()
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+
+async def test_a_cancel_during_the_close_cancels_the_close():
+    closing_started = asyncio.Event()
+    close_cancelled = asyncio.Event()
+
+    class SlowClose(_StreamHandler):
+        async def arrange_stream(self, message):
+            index = 0
+            try:
+                while True:
+                    yield self.make_group(message, index)
+                    index += 1
+            finally:
+                closing_started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    close_cancelled.set()
+                    raise
+
+    runner = _stream_runner(SlowClose(group_count=0, group_size=1))
+    run = asyncio.create_task(runner.run(ProbeInput(value='{}')))
+    await asyncio.wait_for(closing_started.wait(), timeout=5)
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    await asyncio.wait_for(close_cancelled.wait(), timeout=1)

@@ -39,6 +39,7 @@ The architecture splits responsibility across three pieces:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import time
 import traceback
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -52,7 +53,13 @@ import drakkar.probe as probe_module
 import drakkar.taskflow as taskflow
 from drakkar.cache import CacheScope
 from drakkar.executor import ExecutorTaskError
-from drakkar.groups import check_stream_item, drop_invalid_notes, new_task_group, open_arrange_stream
+from drakkar.groups import (
+    STREAM_CLOSE_TIMEOUT,
+    check_stream_item,
+    drop_invalid_notes,
+    new_task_group,
+    open_arrange_stream,
+)
 from drakkar.handler import overridden_completion_hooks, uses_arrange_stream
 from drakkar.models import (
     CollectResult,
@@ -68,7 +75,6 @@ from drakkar.models import (
     SourceMessage,
     TaskGroup,
 )
-from drakkar.partition import STREAM_CLOSE_TIMEOUT
 from drakkar.probe import _DetailsState, build_layout
 from drakkar.uiserver.runner_helpers import (
     _build_source_message,
@@ -115,6 +121,21 @@ PROBE_MAX_STREAM_GROUPS = 5
 
 # What a pull of the stream gives when the generator has no group left.
 _STREAM_END = object()
+
+
+@dataclass
+class _ProbeStream:
+    """The generator of one probe run, the one context its pulls and close run in, and the pull in progress.
+
+    As on a worker, every pull and the close run in one context copied for
+    the stream: a context variable the generator sets lives across its
+    yields, a token it took before a yield can be reset after it, and nothing
+    it sets reaches the probe's other stages.
+    """
+
+    iterator: AsyncIterator[list[ExecutorTask]]
+    context: contextvars.Context
+    pull: asyncio.Task | None = None
 
 
 class ProbeBusyError(RuntimeError):
@@ -1669,12 +1690,15 @@ class DebugRunner:
         state.stream_truncated = False
         started_at = time.monotonic()
         groups: list[TaskGroup] = []
-        stream: AsyncIterator[list[ExecutorTask]] | None = None
+        stream: _ProbeStream | None = None
         error: str | None = None
         try:
             try:
                 with _stage('arrange'):
-                    stream = open_arrange_stream(self._handler, msg)
+                    stream = _ProbeStream(
+                        iterator=open_arrange_stream(self._handler, msg),
+                        context=contextvars.copy_context(),
+                    )
             except Exception as exc:
                 error = self._record_stream_error(state=state, exc=exc)
             else:
@@ -1701,7 +1725,7 @@ class DebugRunner:
         *,
         state: RunState,
         msg: SourceMessage,
-        stream: AsyncIterator[list[ExecutorTask]],
+        stream: _ProbeStream,
         groups: list[TaskGroup],
     ) -> str | None:
         """Pull and run groups until the stream ends or the limit is reached; the error summary, if the stream failed."""
@@ -1723,14 +1747,22 @@ class DebugRunner:
                 groups.append(await self._run_stream_group(state=state, msg=msg, tasks=tasks, index=len(groups)))
 
     @staticmethod
-    async def _pull_stream_item(*, state: RunState, stream: AsyncIterator[list[ExecutorTask]]) -> Any:
-        """The next item of the stream, or ``_STREAM_END``; the pull time is added to the arrange timing."""
+    async def _pull_stream_item(*, state: RunState, stream: _ProbeStream) -> Any:
+        """The next item of the stream, or ``_STREAM_END``; the pull time is added to the arrange timing.
+
+        The pull runs as a task in the stream's context. ``asyncio.wait``
+        does not hand the probe's cancellation to the pull, so a generator
+        that swallows a cancel cannot keep the probe running: the probe
+        leaves at once, and the close cancels the pull within its bound.
+        """
         pull_start = time.monotonic()
+        pull = asyncio.create_task(_next_stream_item(stream.iterator), context=stream.context)
+        pull.add_done_callback(_retrieve_task_outcome)
+        stream.pull = pull
         try:
-            with _stage('arrange'):
-                return await anext(stream)
-        except StopAsyncIteration:
-            return _STREAM_END
+            await asyncio.wait({pull})
+            stream.pull = None
+            return pull.result()
         finally:
             state.timing['arrange'] = state.timing.get('arrange', 0.0) + (time.monotonic() - pull_start)
 
@@ -1849,43 +1881,70 @@ class DebugRunner:
         self._record_error(state=state, error=self._build_probe_error(state=state, stage='arrange', exc=exc))
         return _one_line_summary(exc)
 
-    async def _close_probe_stream(self, *, state: RunState, stream: AsyncIterator[list[ExecutorTask]]) -> None:
-        """``aclose()`` the generator within ``STREAM_CLOSE_TIMEOUT``; a failure is reported, never raised.
+    async def _close_probe_stream(self, *, state: RunState, stream: _ProbeStream) -> None:
+        """Cancel the pull in progress, then ``aclose()`` the generator, within ``STREAM_CLOSE_TIMEOUT``.
 
-        ``asyncio.wait`` does not cancel what it waits for, so a generator
-        that catches the cancellation and keeps awaiting cannot hold the
-        probe past the time bound: it is left behind, and the report says so.
+        Both run in the stream's context, and a failure is reported, never
+        raised. ``asyncio.wait`` does not cancel what it waits for, so a
+        generator that catches the cancellation and keeps awaiting cannot
+        hold the probe past the time bound: it is left behind, and the report
+        says so. A cancel of the probe during the close cancels the close.
         """
-        aclose = getattr(stream, 'aclose', None)
+        deadline = time.monotonic() + STREAM_CLOSE_TIMEOUT
+        pull, stream.pull = stream.pull, None
+        if pull is not None:
+            pull.cancel()
+            if not await self._wait_until(pull, deadline):
+                self._record_close_failure(state, 'TimeoutError', self._close_timeout_text())
+                return
+            pull_error = None if pull.cancelled() else pull.exception()
+            if pull_error is not None:
+                # A generator that raised when its pull was cancelled.
+                self._record_close_failure(
+                    state, type(pull_error).__name__, f'the close of arrange_stream failed: {pull_error}'
+                )
+                return
+        aclose = getattr(stream.iterator, 'aclose', None)
         if aclose is None:
             return
-        with _stage('arrange'):
-            closing = asyncio.create_task(_await_close(aclose))
+        closing = asyncio.create_task(_await_close(aclose), context=stream.context)
         closing.add_done_callback(_retrieve_task_outcome)
-        await asyncio.wait({closing}, timeout=STREAM_CLOSE_TIMEOUT)
-        if not closing.done():
-            closing.cancel()
-            self._record_error(
-                state=state,
-                error=self._plain_probe_error(
-                    state=state,
-                    stage='arrange',
-                    exception_class='TimeoutError',
-                    message=f'the close of arrange_stream timed out after {STREAM_CLOSE_TIMEOUT:g} s',
-                ),
-            )
+        if not await self._wait_until(closing, deadline):
+            self._record_close_failure(state, 'TimeoutError', self._close_timeout_text())
             return
         error = None if closing.cancelled() else closing.exception()
         if error is not None:
-            self._record_error(
-                state=state,
-                error=self._plain_probe_error(
-                    state=state,
-                    stage='arrange',
-                    exception_class=type(error).__name__,
-                    message=f'the close of arrange_stream failed: {error}',
-                ),
-            )
+            self._record_close_failure(state, type(error).__name__, f'the close of arrange_stream failed: {error}')
+
+    @staticmethod
+    async def _wait_until(task: asyncio.Task, deadline: float) -> bool:
+        """Wait for ``task`` until ``deadline``; true when it ended. A task still running then is cancelled.
+
+        A cancel of the caller while it waits cancels ``task`` too, and goes on.
+        """
+        try:
+            await asyncio.wait({task}, timeout=max(0.0, deadline - time.monotonic()))
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        if task.done():
+            return True
+        task.cancel()
+        return False
+
+    @staticmethod
+    def _close_timeout_text() -> str:
+        """The error text of a close that passed ``STREAM_CLOSE_TIMEOUT``."""
+        return f'the close of arrange_stream timed out after {STREAM_CLOSE_TIMEOUT:g} s'
+
+    def _record_close_failure(self, state: RunState, exception_class: str, message: str) -> None:
+        """Report a close of the stream that failed, on the arrange stage."""
+        self._record_error(
+            state=state,
+            error=self._plain_probe_error(
+                state=state, stage='arrange', exception_class=exception_class, message=message
+            ),
+        )
 
     # -- error-capture helpers ----------------------------------------------
 
@@ -1930,9 +1989,19 @@ class DebugRunner:
         state.errors.append(error)
 
 
+async def _next_stream_item(iterator: AsyncIterator[list[ExecutorTask]]) -> Any:
+    """The next item of ``iterator``, or ``_STREAM_END`` when it has none; a coroutine, so it can run as a task."""
+    with _stage('arrange'):
+        try:
+            return await anext(iterator)
+        except StopAsyncIteration:
+            return _STREAM_END
+
+
 async def _await_close(aclose: Callable[[], Awaitable[Any]]) -> None:
     """Await ``aclose()`` inside a coroutine, so it can run as a task."""
-    await aclose()
+    with _stage('arrange'):
+        await aclose()
 
 
 def _retrieve_task_outcome(task: asyncio.Task) -> None:

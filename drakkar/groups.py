@@ -8,6 +8,11 @@ from typing import Any
 
 from drakkar.models import ExecutorTask, SourceMessage, TaskGroup
 
+# How long closing a stream may take: cancelling the pull in progress, then
+# ``aclose()`` of the generator. A generator that ignores both is left behind
+# after this bound, so it cannot hold the worker's stop or a probe for longer.
+STREAM_CLOSE_TIMEOUT = 5.0
+
 # Exact types, not isinstance: a subclass of str or int can carry attributes,
 # and so a reference to a task or a result, which a note must never hold.
 _NOTE_VALUE_TYPES = frozenset({str, int, float, bool})
