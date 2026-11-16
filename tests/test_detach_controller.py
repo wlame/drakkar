@@ -1056,7 +1056,7 @@ async def test_a_lease_lost_while_the_detach_is_logged_attaches(worker, logs, mo
 
 async def test_an_undo_that_raises_still_releases_the_slot_and_attaches(worker, logs, clock, monkeypatch):
     worker.source.leave_outcomes = [LeaveOutcome.TIMED_OUT]
-    original = worker.controller._join_until_member
+    original = worker.controller._join_attempt
     tries: list[int] = []
 
     async def join_raising_once(source):
@@ -1065,7 +1065,7 @@ async def test_an_undo_that_raises_still_releases_the_slot_and_attaches(worker, 
             raise RuntimeError('join log broke')
         return await original(source)
 
-    monkeypatch.setattr(worker.controller, '_join_until_member', join_raising_once)
+    monkeypatch.setattr(worker.controller, '_join_attempt', join_raising_once)
 
     result = await worker.detach()
 
@@ -1157,3 +1157,115 @@ async def test_with_the_feature_off_a_hash_check_error_reaches_the_registry(work
 
     with pytest.raises(RuntimeError, match='hash check broke'):
         await on_refresh([])
+
+
+# --- the undo and the join retry -------------------------------------------------------------
+
+
+async def test_an_attach_waiting_behind_a_failed_undo_answers_join_failed(worker):
+    worker.source.leave_gate = asyncio.Event()
+    worker.source.leave_outcomes = [LeaveOutcome.TIMED_OUT]
+    worker.source.join_answers = [False] * 10
+    detach = asyncio.create_task(worker.detach())
+    await wait_for(lambda: 'leave_group' in worker.calls)
+    attach = asyncio.create_task(worker.controller.attach(cause='operator'))
+    await asyncio.sleep(0)
+
+    worker.source.leave_gate.set()
+
+    assert (await asyncio.wait_for(detach, timeout=2)).reason == 'leave_failed'
+    assert await asyncio.wait_for(attach, timeout=2) == AttachResult(attached=False, reason='join_failed')
+    assert worker.controller.state.state == 'attaching'
+    assert worker.held_scopes() == [worker.scopes[0]]
+
+
+async def test_a_detach_during_the_undo_join_answers_join_failed_at_once(worker):
+    worker.source.leave_outcomes = [LeaveOutcome.TIMED_OUT]
+    worker.source.join_answers = [HANG]
+    first = asyncio.create_task(worker.detach())
+    await wait_for(lambda: 'join_group' in worker.calls)
+
+    second = await asyncio.wait_for(worker.detach(origin=DetachOrigin.OPERATOR), timeout=2)
+
+    assert second == DetachResult(detached=False, reason='join_failed', until=None)
+    assert worker.controller.wire_state()['last_request']['outcome'] == 'join_failed'
+    await worker.controller.release_at_stop(1.0)
+    with contextlib.suppress(asyncio.CancelledError):
+        await first
+
+
+async def test_a_join_retry_cancelled_from_outside_starts_again(worker, clock, logs):
+    await worker.detach()
+    worker.source.join_answers = [False, True]
+    assert (await worker.controller.attach(cause='operator')).reason == 'join_failed'
+
+    worker.controller._join_retry.cancel()
+    await asyncio.sleep(0)
+    await run_clock_until(clock, NOW + 6)
+
+    assert worker.controller.state.state == 'attached'
+    assert len(logs.named('detach_join_retry_restarted')) == 1
+
+
+async def test_a_join_retry_whose_sleep_raises_goes_on(worker, clock, logs, monkeypatch):
+    await worker.detach()
+    worker.source.join_answers = [False, True]
+    real_sleep = clock.sleep
+    raised: list[int] = []
+
+    async def sleep_raising_once(seconds):
+        if seconds == 5.0 and not raised:
+            raised.append(1)
+            raise RuntimeError('sleep broke')
+        await real_sleep(seconds)
+
+    monkeypatch.setattr(clock, 'sleep', sleep_raising_once)
+    assert (await worker.controller.attach(cause='operator')).reason == 'join_failed'
+    await run_clock_until(clock, NOW + 6)
+
+    assert worker.controller.state.state == 'attached'
+    assert raised
+
+
+async def test_a_new_attaching_period_gets_its_own_retry_and_cause(worker, clock):
+    await worker.detach(origin=DetachOrigin.OPERATOR)
+    worker.source.join_answers = [False]
+    assert (await worker.controller.attach(cause='operator')).reason == 'join_failed'
+    old_retry = worker.controller._join_retry
+    # The first period ends without its retry: the worker is attached again by other means.
+    await worker.controller._release_slot(worker.controller._slot)
+    worker.controller._state = detach_module.ATTACHED_STATE
+    worker.source._group_member = True
+    assert (await worker.detach(origin=DetachOrigin.OPERATOR)).detached
+    worker.source.join_answers = [False, True]
+
+    assert (await worker.controller.attach(cause='handler')).reason == 'held_by_operator'
+    assert (await worker.controller.attach(cause='operator', reason='second')).reason == 'join_failed'
+
+    assert worker.controller._join_retry is not old_retry
+    await run_clock_until(clock, NOW + 6)
+    assert worker.controller.state.state == 'attached'
+    worker.recorder.record_worker_attached.assert_called_once()
+    assert old_retry.done()
+
+
+async def test_an_undone_detach_writes_no_attach_row_and_logs_detach_undone(worker, clock, logs):
+    before = attached_by('handler')
+    worker.source.leave_outcomes = [LeaveOutcome.TIMED_OUT]
+    worker.source.join_answers = [False, True]
+
+    assert (await worker.detach()).reason == 'leave_failed'
+    await run_clock_until(clock, NOW + 6)
+
+    assert worker.controller.state.state == 'attached'
+    assert worker.held_scopes() == []
+    worker.recorder.record_worker_attached.assert_not_called()
+    assert attached_by('handler') == before
+    assert not logs.named('worker_attached')
+    (undone,) = logs.named('detach_undone')
+    assert (undone['log_level'], undone['category'], undone['origin'], undone['outside_seconds']) == (
+        'info',
+        'kafka',
+        'handler',
+        5.0,
+    )

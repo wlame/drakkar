@@ -34,9 +34,11 @@ is one immutable object, safe to read from any thread.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -218,8 +220,13 @@ class DetachController:
         self._current: _Transition | None = None
         self._timer: asyncio.Task[None] | None = None
         self._timer_stop: _TimerStop | None = None
-        # The background retry of a join that failed; at most one runs.
+        # The background retry of a join that failed: at most one runs, and it belongs to one ``attaching``
+        # period. The period number grows each time the state enters ``attaching``.
         self._join_retry: asyncio.Task[None] | None = None
+        self._join_retry_period = 0
+        self._attaching_period = 0
+        # Whether the ``worker_detached`` row of the current detach was written; only then is its end an attach.
+        self._detached_row = False
         # Clock times: when the worker became detached, and when it last attached (for the cooldown).
         self._detached_at: float | None = None
         self._last_attach_at: float | None = None
@@ -524,6 +531,7 @@ class DetachController:
         recorder = self._app.recorder
         if recorder is not None:
             recorder.record_worker_detached(origin=str(origin), reason=reason, until=until, slot=slot_index)
+        self._detached_row = True
         await logger.awarning(
             'worker_detached',
             category='kafka',
@@ -543,19 +551,39 @@ class DetachController:
         self._cancel_timer()
         detached.set(0)
         state = self._state
+        self._enter_attaching(state)
+        joined = False
+        retrying = False
+        try:
+            source = self._source()
+            joined = (
+                source is None
+                or source.is_group_member
+                or (not self._is_stopping() and await self._join_attempt(source))
+            )
+            if not joined and not self._is_stopping():
+                # One bounded join here; the retry goes on in the background with the slot held.
+                retrying = True
+                self._start_join_retry(cause=self._origin_cause(state), reason='')
+        finally:
+            if not retrying:
+                # A slot left held with no retry would be refreshed for ever.
+                await self._release_slot(slot)
+            if joined:
+                await self._finish_attached(cause=self._origin_cause(state), reason='')
+            else:
+                self._publish_card()
+
+    def _enter_attaching(self, state: DetachState) -> None:
+        """Enter ``attaching`` (no deadline) and start a new period: a retry of an earlier period ends."""
+        self._attaching_period += 1
         self._state = DetachState(
             state=STATE_ATTACHING, origin=state.origin, reason=state.reason, since=state.since, until=None
         )
-        joined = False
-        try:
-            source = self._source()
-            joined = source is None or source.is_group_member or await self._join_until_member(source)
-        finally:
-            # Released whatever the join did: a slot left held would be refreshed for ever.
-            await self._release_slot(slot)
-            if joined:
-                self._state = ATTACHED_STATE
-            self._publish_card()
+
+    @staticmethod
+    def _origin_cause(state: DetachState) -> str:
+        return CAUSE_OPERATOR if state.origin == DetachOrigin.OPERATOR else CAUSE_HANDLER
 
     # --- the attach transition -------------------------------------------------
 
@@ -603,9 +631,7 @@ class DetachController:
             return AttachResult(attached=False, reason=REFUSED_HELD_BY_OPERATOR)
         self._cancel_timer()
         # No deadline while attaching: the timer has ended.
-        self._state = DetachState(
-            state=STATE_ATTACHING, origin=state.origin, reason=state.reason, since=state.since, until=None
-        )
+        self._enter_attaching(state)
         result = await self._join_and_finish(cause=cause, reason=reason)
         if result.reason == REFUSED_JOIN_FAILED:
             self._start_join_retry(cause=cause, reason=reason)
@@ -630,49 +656,95 @@ class DetachController:
         slot = self._slot
         if slot is not None:
             await self._release_slot(slot)
+        await self._finish_attached(cause=cause, reason=reason)
+        return AttachResult(attached=True, reason='')
+
+    async def _finish_attached(self, *, cause: str, reason: str) -> None:
+        """Enter ``attached`` after a join that succeeded; the slot is already released.
+
+        A detach that wrote its ``worker_detached`` row ends as an attach: the
+        metric, the recorder row and ``worker_attached``. One that never got
+        that far was undone: it logs ``detach_undone`` and writes neither.
+        """
         now = self._clock.time()
+        state = self._state
+        reached_detached = self._detached_row
         detached_seconds = round(now - (self._detached_at if self._detached_at is not None else now), 3)
-        self._last_attach_at = now
         self._detached_at = None
+        self._detached_row = False
         self._state = ATTACHED_STATE
         detached.set(0)
-        attach_total.labels(cause=cause).inc()
         self._publish_card()
+        if not reached_detached:
+            outside_seconds = round(now - state.since.timestamp(), 3) if state.since is not None else 0.0
+            await logger.ainfo(
+                'detach_undone',
+                category='kafka',
+                origin=None if state.origin is None else str(state.origin),
+                outside_seconds=outside_seconds,
+            )
+            return
+        self._last_attach_at = now
+        attach_total.labels(cause=cause).inc()
         recorder = self._app.recorder
         if recorder is not None:
             recorder.record_worker_attached(cause=cause, detached_seconds=detached_seconds)
         await logger.awarning(
             'worker_attached', category='kafka', cause=cause, detached_seconds=detached_seconds, reason=reason
         )
-        return AttachResult(attached=True, reason='')
 
-    def _start_join_retry(self, *, cause: str, reason: str) -> None:
-        """Start the background join retry unless one runs; it keeps the cause of the attach that started it."""
-        if self._join_retry is not None and not self._join_retry.done():
+    def _start_join_retry(self, *, cause: str, reason: str, restarted: bool = False) -> None:
+        """Start the join retry of the current ``attaching`` period unless it runs; it keeps its starting cause."""
+        period = self._attaching_period
+        running = self._join_retry
+        if running is not None and not running.done() and self._join_retry_period == period:
             return
-        self._join_retry = self._spawn(
-            self._guarded(self._retry_join(cause=cause, reason=reason), event='attach_transition_failed'),
+        task = self._spawn(
+            self._retry_join(period=period, cause=cause, reason=reason, restarted=restarted),
             name='drakkar-attach-retry',
         )
+        self._join_retry = task
+        self._join_retry_period = period
+        task.add_done_callback(partial(self._on_join_retry_done, period=period, cause=cause, reason=reason))
 
-    async def _retry_join(self, *, cause: str, reason: str) -> None:
-        """Try the join every :data:`JOIN_RETRY_SECONDS` until the worker is attached or stops.
+    def _on_join_retry_done(self, task: asyncio.Task[None], *, period: int, cause: str, reason: str) -> None:
+        """Start the retry again when it ended while its period still runs and the worker does not stop."""
+        if self._join_retry is not task or period != self._attaching_period:
+            return
+        if self._state.state != STATE_ATTACHING or self._is_stopping():
+            return
+        self._start_join_retry(cause=cause, reason=reason, restarted=True)
 
-        Each try takes the lock only for its own join, so a caller is never
-        held behind the retries.
+    async def _retry_join(self, *, period: int, cause: str, reason: str, restarted: bool) -> None:
+        """Try the join every :data:`JOIN_RETRY_SECONDS` until its ``attaching`` period ends.
+
+        The period ends when the worker is attached, stops, or enters another
+        ``attaching`` period. Each try takes the lock only for its own join,
+        so a caller is never held behind the retries. An error anywhere in a
+        try is logged and the next try follows.
         """
-        while True:
-            await self._clock.sleep(JOIN_RETRY_SECONDS)
-            async with self._lock:
-                if self._state.state != STATE_ATTACHING:
-                    return
-                try:
+        if restarted:
+            with contextlib.suppress(Exception):
+                await logger.aerror('detach_join_retry_restarted', category='kafka', cause=cause)
+        while self._retry_period_runs(period):
+            try:
+                await self._clock.sleep(JOIN_RETRY_SECONDS)
+                async with self._lock:
+                    if not self._retry_period_runs(period):
+                        break
                     result = await self._join_and_finish(cause=cause, reason=reason)
-                except Exception:
+                if result.reason != REFUSED_JOIN_FAILED:
+                    return
+            except Exception:
+                with contextlib.suppress(Exception):
                     await logger.aexception('attach_transition_failed', category='kafka', cause=cause)
-                    continue
-            if result.reason != REFUSED_JOIN_FAILED:
-                return
+        slot = self._slot
+        if self._is_stopping() and period == self._attaching_period and slot is not None:
+            # The worker stops outside its group: nothing subscribes again, and the slot goes back.
+            await self._release_slot(slot)
+
+    def _retry_period_runs(self, period: int) -> bool:
+        return self._state.state == STATE_ATTACHING and period == self._attaching_period and not self._is_stopping()
 
     async def _join_attempt(self, source: KafkaSource) -> bool:
         """One join bounded by ``executor.drain_timeout`` plus the leave margin; a failure is logged."""
@@ -685,20 +757,6 @@ class DetachController:
         if not joined and not self._is_stopping():
             await logger.awarning('detach_join_failed', category='kafka', error='the join did not complete')
         return joined
-
-    async def _join_until_member(self, source: KafkaSource) -> bool:
-        """Join until the source is a member; False when the worker stops first.
-
-        Each try is :meth:`_join_attempt`; a failed try is followed by another
-        one :data:`JOIN_RETRY_SECONDS` later.
-        """
-        while not self._is_stopping():
-            if await self._join_attempt(source):
-                return True
-            if self._is_stopping():
-                return False
-            await self._clock.sleep(JOIN_RETRY_SECONDS)
-        return False
 
     async def _join_once(self, source: KafkaSource, bound: float) -> bool:
         """One join, bounded by ``bound`` seconds of the clock; False when it passes its bound."""
@@ -831,6 +889,9 @@ class DetachController:
             return REFUSED_DISABLED
         if in_pipeline_hook:
             return REFUSED_INSIDE_PIPELINE_HOOK
+        if self._state.state == STATE_ATTACHING:
+            # A join retry runs: the worker is returning to its group, and the attach ends first.
+            return REFUSED_JOIN_FAILED
         return None
 
     def _refused(self, reason: str) -> DetachResult:

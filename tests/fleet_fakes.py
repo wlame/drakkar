@@ -205,6 +205,9 @@ class RecordingLogger:
     async def awarning(self, event: str, **fields: Any) -> None:
         self._write('warning', event, fields)
 
+    async def aerror(self, event: str, **fields: Any) -> None:
+        self._write('error', event, fields)
+
     async def aexception(self, event: str, **fields: Any) -> None:
         self._write('error', event, fields)
 
