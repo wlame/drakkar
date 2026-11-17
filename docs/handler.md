@@ -1297,9 +1297,13 @@ async def leave_the_group_while_the_disk_is_slow(self):
     seconds = await asyncio.to_thread(time_disk_write, DISK_PROBE_FILE)
     if self.detach_state.state == 'attached' and seconds > SLOW_DISK_SECONDS:
         result = await self.detach(duration=15 * 60, reason=f'disk write took {seconds:.1f}s')
-        if not result.detached and result.reason in ('budget_full', 'store_unavailable'):
-            self.request_stop(reason=f'detach refused: {result.reason}', exit_code=3)
+        if not result.detached:
+            # The next probe asks again; a refusal never stops the worker.
+            await logger.awarning('slow_disk_detach_refused', reason=result.reason)
 ```
+
+The names come from the full example on
+[Detach](detach.md#example-leave-the-group-while-the-disk-is-slow).
 
 A handler class that defines its own attribute named `detach`, `attach`,
 `detach_state` or `request_stop` hides the framework member of the same name.

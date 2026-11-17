@@ -126,7 +126,7 @@ state.reason      # the text of the detach request
 state.since       # datetime (UTC), or None when attached
 state.until       # datetime (UTC) of the deadline; set only while the state is 'detached'
 
-self.request_stop(reason='cannot detach', exit_code=1)   # not awaited, returns at once
+self.request_stop(reason='work directory is gone', exit_code=1)   # not awaited, returns at once
 ```
 
 The types `DetachResult`, `AttachResult`, `DetachState` and `DetachOrigin` are
@@ -144,6 +144,7 @@ exported from `drakkar`.
 - A detach of a worker that is already detached by the same origin replaces
   the deadline: now plus the new duration. An operator detach of a worker
   that the handler detached takes over the origin and replaces the deadline.
+  Both log `detach_extended` and publish the registry card again.
   A handler detach of a worker that an operator detached changes nothing and
   answers `already_detached`.
 
@@ -172,9 +173,9 @@ undone.
 
 A periodic task probes the disk every 30 seconds. When a write is slow, it
 detaches the worker for 15 minutes. When the disk is fast again, it attaches
-the worker before the deadline. When the framework refuses the detach for a
-reason that a later try will not change, it stops the worker, so that a
-supervisor can start a new one.
+the worker before the deadline. When the framework refuses the detach, the
+task logs the reason and asks again at the next probe. It never stops the
+worker for a refusal.
 
 ```python
 import asyncio
@@ -182,7 +183,11 @@ import os
 import time
 from pathlib import Path
 
+import structlog
+
 import drakkar as dk
+
+logger = structlog.get_logger()
 
 # The probe writes on the same disk as the working files of the tasks.
 DISK_PROBE_FILE = Path('/data/work/.disk-probe')
@@ -190,8 +195,6 @@ DISK_PROBE_BYTES = 4 * 1024 * 1024
 # A probe write that takes longer than this means the disk is too slow for the tasks.
 SLOW_DISK_SECONDS = 2.0
 DETACH_SECONDS = 15 * 60
-# The refusals after which this worker stops and lets its supervisor start a new one.
-STOP_ON_REFUSAL = frozenset({'budget_full', 'store_unavailable', 'leave_failed', 'cooldown'})
 
 
 def time_disk_write(path: Path) -> float:
@@ -215,8 +218,9 @@ class SearchHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
 
         if state.state == 'attached' and disk_is_slow:
             result = await self.detach(duration=DETACH_SECONDS, reason=f'disk write took {seconds:.1f}s')
-            if not result.detached and result.reason in STOP_ON_REFUSAL:
-                self.request_stop(reason=f'slow disk, detach refused: {result.reason}', exit_code=3)
+            if not result.detached:
+                # The next probe asks again; a refusal never stops the worker.
+                await logger.awarning('slow_disk_detach_refused', reason=result.reason, write_seconds=seconds)
             return
 
         detached_by_handler = state.state == 'detached' and state.origin == dk.DetachOrigin.HANDLER
@@ -226,15 +230,37 @@ class SearchHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
 
 Notes on the example:
 
-- The task does not stop on `too_few_workers`. That refusal means that the
-  group needs this worker. A stop would take the worker away all the same.
+- The task stops the worker on no refusal. `too_few_workers` and
+  `budget_full` mean that the group needs this worker now; a stop would take
+  the worker away all the same. `store_unavailable` comes on every worker
+  while the autodiscover store is down, so a stop on it would stop the whole
+  group. `cooldown` and `leave_failed` pass by themselves.
 - The task does not attach a worker that an operator detached. That attach
   would answer `held_by_operator`.
 - When the disk is still slow at the deadline, the framework attaches the
   worker. The next probe asks for a detach again, which answers `cooldown`
-  for the first 5 minutes, and the task then stops the worker.
-- The disk call can hang. Then the task waits, and nothing else is held:
-  the probe runs on a thread.
+  for the first 5 minutes; the worker keeps working in its group meanwhile.
+- The disk call can hang. Then the task waits; only that task and one thread
+  of the `threads.io` pool are held.
+
+`request_stop` is for a worker that cannot work at all, for example when its
+work directory is gone:
+
+```python
+WORK_DIR = Path('/data/work')
+
+
+class SearchHandler(dk.BaseDrakkarHandler[SearchRequest, SearchResult]):
+    @dk.periodic(30)
+    async def stop_when_the_work_directory_is_gone(self):
+        if not await asyncio.to_thread(WORK_DIR.is_dir):
+            self.request_stop(reason=f'{WORK_DIR} is gone', exit_code=3)
+```
+
+`request_stop` checks neither the budget of detached workers nor
+`min_attached`. A rule that stops every worker that cannot detach can stop a
+whole group, so do not use a detach refusal as a reason to stop. A store
+outage must never lead to a stop.
 
 A shorter working example is the periodic task `detach_on_request` of the
 harness handler (`integration/worker/handler.py`). It detaches the worker
@@ -354,15 +380,18 @@ A detach runs these steps after the checks of the answer table:
    at the same moment each wrote their slot before they read the others, so
    at least one of them sees both slots and gives its slot back. Both can
    give back; then both are refused, which is safe.
-4. **Leave.** The worker calls `unsubscribe()` on its consumer and keeps
-   polling. The client runs the revoke inside the next poll: `on_revoke`
+4. **Leave.** The worker starts the lease refresher of the slot, and the
+   state is `detaching`. The registry card is published at once with
+   `detached: true`, so peers count the worker as detached while its
+   partitions drain. Then the worker calls `unsubscribe()` on its consumer
+   and keeps polling. The client runs the revoke inside the next poll: `on_revoke`
    runs, the partition loops drain and commit within
    `executor.drain_timeout`, and the partitions move. The wait ends when no
    partition and no revoke is left. A worker that holds no partition leaves
    with its next poll.
-5. **Detached.** The state is `detached`. The lease refresher and the
-   deadline timer start, the registry card is published at once with
-   `detached: true`, and the worker records `worker_detached`.
+5. **Detached.** The state is `detached`. The deadline timer starts, the
+   registry card is published again, and the worker records
+   `worker_detached`.
 
 An attach runs these steps:
 
@@ -410,8 +439,9 @@ A safety rule never waits behind a slow detach: a detach that is still in
 progress is told to stop, and undoes itself.
 
 **A stop.** A stop while detached needs no attach. The worker stops as usual
-and makes one attempt to give the slot back, after the sources stopped and
-before the election provider stops. A detach never survives a restart: a
+and makes one attempt to give the slot back, right after the sources
+stopped: before the recorder stops, so the recorder's seal cannot spend the
+time of that attempt, and before the election provider stops. A detach never survives a restart: a
 started worker is always attached and holds no slot.
 
 **A crash or a kill** leaves the slot held until its lease ends. Until then
@@ -504,8 +534,9 @@ The POST routes answer:
 - `422` in the usual validation shape for a `duration_seconds` below
   10 seconds or above `max_duration`;
 - `503` when the worker's main loop does not answer within 5 seconds, or is
-  closed. Such a request is not run later. The worker logs
-  `ui_detach_request_unanswered`.
+  closed. Such a request is not started later; only one whose start was
+  already running at that moment still takes effect, and `last_request`
+  shows it. The worker logs `ui_detach_request_unanswered`.
 
 ```bash
 curl -X POST 'http://worker:8080/api/v1/debug/detach' \
@@ -522,8 +553,8 @@ card does not say). The [agent surface](agent.md) has the state part
 ## Stop the worker: `request_stop`
 
 `self.request_stop(reason='', exit_code=0)` asks for a graceful stop, the
-same as `SIGTERM`. It is a fallback for a refused detach, and it works also
-with the detach feature off.
+same as `SIGTERM`. It is for a worker that cannot work at all, not an answer
+to a refused detach, and it works also with the detach feature off.
 
 - It returns at once and is not awaited. It is safe from a hook, from
   `on_startup`, and from a thread (a function that runs through
@@ -536,6 +567,9 @@ with the detach feature off.
 - The first call wins. A later call changes nothing and logs nothing.
 - Before the worker runs it does nothing. Inside a Message Probe run it only
   logs `stop_request_suppressed`.
+- It checks neither the budget of detached workers nor `min_attached`. A
+  rule that stops every worker that cannot detach can stop a whole group,
+  and a store outage must never lead to a stop.
 
 What happens next is the job of the supervisor. Kubernetes starts the
 container again (on the same node), with any exit code, under the default
@@ -575,19 +609,20 @@ Log events, all in category `kafka` unless the table says otherwise:
 | `worker_detached` | warning | The worker is detached. `origin`, `reason`, `until`, `slot`. |
 | `worker_attached` | warning | A detach ended. `cause`, `detached_seconds`, `reason` (the text of the attach request). |
 | `detach_refused` | info | A detach request did not detach the worker. `origin`, `reason` (the answer). |
+| `detach_extended` | info | A detach of a detached worker replaced the deadline or took over the origin. `origin`, `until` (the new deadline), `reason`. |
 | `detach_undone` | info | A detach ended before the state `detached` and was taken back. `origin`, `outside_seconds`. |
 | `detach_lease_unconfirmed` | warning | A refresh of the slot lease failed or did not answer. `scope`, `seconds_left`. |
 | `detach_join_failed` | warning | A join of the group did not succeed. `error`. The join is tried again every 5 seconds. |
 | `detach_join_retry_restarted` | error | The background retry of a join ended while the worker was still outside its group, and started again. `cause`. |
 | `detach_config_mismatch` | warning | An online peer of the group has other limits. `peer`, `peer_max_detached`, `peer_min_attached`, `max_detached`, `min_attached`. Once per peer and value pair. |
 | `detach_transition_failed` | error | A detach raised. `origin`; carries the exception. The worker returns to its group. |
-| `attach_transition_failed` | error | An attach raised. `cause`; carries the exception. The join is tried again. |
+| `attach_transition_failed` | error | An attach raised. `cause` when the attach came from a request or a retry; carries the exception. The join is tried again. |
 | `detach_request_failed` | error | An operator request raised outside the transition; carries the exception. |
 | `detach_deadline_timer_failed` | error | The deadline timer raised; the worker attaches at once. |
 | `detach_lease_refresh_failed` | error | The lease refresher raised outside a store call. `scope`. The slot counts as lost. |
 | `detach_lease_loss_report_failed` | error | The report of a lost slot raised. `scope`, `reason`. |
 | `detach_slot_release_failed` | error | A release of the slot raised. The lease then ends by itself. |
-| `registry_refresh_check_failed` | error | The detach check after a registry refresh raised. `check` (`detach`). |
+| `registry_refresh_check_failed` | error | A check after a registry refresh raised. `check` (`detach`, category `kafka`; or `cluster_hash`, category `periodic`). |
 | `ui_detach_request_unanswered` | warning | A POST route got no answer from the main loop (category `debug`). `error_type`, `error`. |
 | `stop_requested` | warning | `request_stop` was called (category `lifecycle`). `reason`, `exit_code`. |
 | `stop_request_suppressed` | info | `request_stop` was called inside a Message Probe run (category `debug`). `reason`, `exit_code`. |

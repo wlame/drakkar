@@ -214,7 +214,7 @@ Up to the number of Kafka partitions. Extra workers sit idle (Kafka only assigns
 
 ### Can a slow worker step aside without a restart?
 
-Yes, with [detach](detach.md) (`sources.kafka.detach.enabled`, off by default; it needs `autodiscover`). The handler calls `await self.detach(duration=..., reason=...)`, usually from a periodic task that probes something of this worker, such as its disk. The worker leaves its consumer group, Kafka gives its partitions to the other workers, and the worker stays alive and ready. It joins the group again when the handler calls `attach()`, when an operator attaches it from the Live page, or at the deadline. At most `max_detached` workers of a group are away at once, and at least `min_attached` others stay attached. When a detach is refused, `self.request_stop(reason, exit_code)` stops the worker gracefully and exits with the code. Do not base the decision on lag: lag belongs to a partition, and the partition moves with the detach. See [Risks](detach.md#risks).
+Yes, with [detach](detach.md) (`sources.kafka.detach.enabled`, off by default; it needs `autodiscover`). The handler calls `await self.detach(duration=..., reason=...)`, usually from a periodic task that probes something of this worker, such as its disk. The worker leaves its consumer group, Kafka gives its partitions to the other workers, and the worker stays alive and ready. It joins the group again when the handler calls `attach()`, when an operator attaches it from the Live page, or at the deadline. At most `max_detached` workers of a group are away at once, and at least `min_attached` others stay attached. A refused detach leaves the worker in its group; ask again later. `self.request_stop(reason, exit_code)` stops the worker gracefully and exits with the code, for a worker that cannot work at all; it checks neither the budget nor `min_attached`, so never use it as the answer to a refused detach. Do not base the decision on lag: lag belongs to a partition, and the partition moves with the detach. See [Risks](detach.md#risks).
 
 ### Can I hot-reload config without restarting?
 
@@ -276,7 +276,7 @@ Even with auth, the read-only pages expose task stdout/stderr, task env (after [
 
 ### Why does my worker emit a `ui_unauthenticated` warning at startup?
 
-You have `ui.enabled=true` and `ui.auth_token` is empty (the default). That's an intentional, supported configuration — Drakkar treats the UI as opt-in-auth because no endpoint touches the pipeline and it is meant for private-network deployments. The warning is informational; the worker continues starting normally. It also names any side-effecting endpoint still enabled (`probe`, `merge`) so the exposure is explicit rather than implied.
+You have `ui.enabled=true` and `ui.auth_token` is empty (the default). That's an intentional, supported configuration — Drakkar treats the UI as opt-in-auth because no endpoint touches the pipeline and it is meant for private-network deployments. The warning is informational; the worker continues starting normally. It also names any side-effecting endpoint still enabled (`probe`, `merge`, the delete of a merge result, the debug consume pause, and detach and attach) so the exposure is explicit rather than implied.
 
 To silence it (i.e. require auth), pick one of:
 

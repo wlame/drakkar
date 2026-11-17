@@ -412,11 +412,15 @@ never processed, so committing past them would lose them.
 A worker that is [detached](detach.md) from its Kafka consumer group stays
 healthy and ready: ``/healthz`` and ``/readyz`` keep answering ``200``. Its
 partitions are on the other workers of the group, so there is nothing to
-fail over. A probe that failed on a detached worker would only make the
-kubelet restart a worker that is working as asked.
+fail over. A failing ``/readyz`` would only take the pod out of the Service
+endpoints, and a failing ``/healthz`` would make the kubelet restart a
+worker that is working as asked.
 
-The handler can stop the worker with ``self.request_stop(reason, exit_code)``,
-for example when a detach is refused. The stop is the same graceful shutdown
+The handler can stop the worker with ``self.request_stop(reason, exit_code)``
+when it cannot work at all, for example when its work directory is gone. A
+refused detach is no reason to stop: ``request_stop`` checks neither the
+budget of detached workers nor ``min_attached``, so a rule that stops every
+worker that cannot detach can stop a whole group. The stop is the same graceful shutdown
 as on ``SIGTERM``: ``/readyz`` answers ``503`` from its start, the drain
 settles the work in progress, and the process exits with ``exit_code``
 (0 to 255) after a clean shutdown. The worker logs ``stop_requested`` with
