@@ -1,0 +1,91 @@
+{
+  "_comment": "The detach contract. states, origins, actions and attach_causes are closed sets. detach_answers are the refusals of a detach in the order their checks run (the first that applies answers); handler_only_answers come only from the handler front inside a Message Probe run. attach_answers are the answers of an attach; an empty text is a success. slot_scopes: the election scope of slot <index> of a consumer group in a cluster, <sanitized cluster>/detach.g<first 12 hex characters of the SHA-256 of the UTF-8 group id>_<index>; a cluster name is sanitized as for every task scope (each character outside [a-zA-Z0-9_-] becomes one underscore, an empty name is default). Every worker of a group must compute the same scopes, or they do not share the budget.",
+  "states": [
+    "attached",
+    "detaching",
+    "detached",
+    "attaching"
+  ],
+  "origins": [
+    "handler",
+    "operator"
+  ],
+  "actions": [
+    "detach",
+    "attach"
+  ],
+  "detach_answers": [
+    "not_running",
+    "stopping",
+    "disabled",
+    "inside_pipeline_hook",
+    "join_failed",
+    "already_detached",
+    "cooldown",
+    "too_few_workers",
+    "budget_full",
+    "store_unavailable",
+    "leave_failed"
+  ],
+  "handler_only_answers": [
+    "probe"
+  ],
+  "attach_answers": [
+    "",
+    "not_running",
+    "stopping",
+    "held_by_operator",
+    "join_failed"
+  ],
+  "attach_causes": [
+    "handler",
+    "operator",
+    "deadline",
+    "lease_lost",
+    "too_few_workers"
+  ],
+  "slot_scopes": [
+    {
+      "name": "plain",
+      "cluster": "search",
+      "consumer_group": "search-workers",
+      "index": 0,
+      "scope": "search/detach.g740b670895e9_0"
+    },
+    {
+      "name": "cluster_needs_sanitizing",
+      "cluster": "search eu/1",
+      "consumer_group": "search-workers",
+      "index": 1,
+      "scope": "search_eu_1/detach.g740b670895e9_1"
+    },
+    {
+      "name": "non_ascii_group",
+      "cluster": "search",
+      "consumer_group": "поиск-группа",
+      "index": 0,
+      "scope": "search/detach.g31ac4e4e46da_0"
+    },
+    {
+      "name": "index_above_nine",
+      "cluster": "search",
+      "consumer_group": "search-workers",
+      "index": 12,
+      "scope": "search/detach.g740b670895e9_12"
+    },
+    {
+      "name": "default_group",
+      "cluster": "search",
+      "consumer_group": "drakkar-workers",
+      "index": 0,
+      "scope": "search/detach.g4a073acc9b91_0"
+    },
+    {
+      "name": "empty_cluster_and_default_group",
+      "cluster": "",
+      "consumer_group": "drakkar-workers",
+      "index": 2,
+      "scope": "default/detach.g4a073acc9b91_2"
+    }
+  ]
+}

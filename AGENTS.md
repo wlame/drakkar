@@ -53,8 +53,9 @@ breaking change, never a refactor:
   (`tests/fixtures/history_meta.json`) — workers that share a folder must not
   take each other's files
 - the worker registry card (schema 1, `tests/fixtures/fleet_card.json`,
-  including `features.periodic.cluster_hash` and `features.kafka`, which
-  the detach size check of other workers reads) and the filesystem provider
+  including `features.periodic.cluster_hash` and `features.kafka` in both
+  forms, detach off and on, which the detach size check of other workers
+  reads) and the filesystem provider
   layout (`<dir>/workers/<sanitized worker>.json`, temp file plus rename) —
   workers of other releases read these cards
 - periodic schedules (`tests/fixtures/periodic_contract.json`): the
@@ -65,6 +66,11 @@ breaking change, never a refactor:
   a cluster must compute the same slot for the same moment, or a slot runs
   twice. `cronsim` is pinned exactly (`==`) because the fixture pins its
   fire times; upgrade it only together with a fixture run
+- the detach budget (`tests/fixtures/detach_contract.json`): the slot
+  scopes `<sanitized cluster>/detach.g<12 hex>_<i>`, and the closed sets of
+  states, origins, answers (detach answers in check order), attach causes
+  and actions — workers of other releases share the slots of one group and
+  must compute the same scopes
 - the election providers' stored shapes (`tests/fixtures/fleet_providers.json`:
   the `task_locks` DDL and statements, the `task-locks` Redis keys and
   scripts, the Consul paths and session names) — workers of one cluster

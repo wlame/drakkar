@@ -98,6 +98,26 @@ OUTCOME_ATTACHED = 'attached'
 ACTION_DETACH = 'detach'
 ACTION_ATTACH = 'attach'
 
+# The closed sets of the contract, pinned by ``tests/fixtures/detach_contract.json``.
+STATES = (STATE_ATTACHED, STATE_DETACHING, STATE_DETACHED, STATE_ATTACHING)
+# The refusals of a detach in the order its checks run; the first that applies answers.
+DETACH_REFUSALS = (
+    REFUSED_NOT_RUNNING,
+    REFUSED_STOPPING,
+    REFUSED_DISABLED,
+    REFUSED_INSIDE_PIPELINE_HOOK,
+    REFUSED_JOIN_FAILED,
+    REFUSED_ALREADY_DETACHED,
+    REFUSED_COOLDOWN,
+    REFUSED_TOO_FEW_WORKERS,
+    REFUSED_BUDGET_FULL,
+    REFUSED_STORE_UNAVAILABLE,
+    REFUSED_LEAVE_FAILED,
+)
+ATTACH_REFUSALS = (REFUSED_NOT_RUNNING, REFUSED_STOPPING, REFUSED_HELD_BY_OPERATOR, REFUSED_JOIN_FAILED)
+ATTACH_CAUSES = (CAUSE_HANDLER, CAUSE_OPERATOR, CAUSE_DEADLINE, CAUSE_LEASE_LOST, CAUSE_TOO_FEW_WORKERS)
+ACTIONS = (ACTION_DETACH, ACTION_ATTACH)
+
 MIN_DURATION_SECONDS = 10.0
 REASON_MAX_CHARS = 200
 # The pause between two tries of a join that failed.
@@ -295,10 +315,11 @@ class DetachController:
         """Leave the consumer group for ``duration`` seconds, or answer why not.
 
         Returns when the revoke drain has ended and no partition is left on
-        this worker, or with a refusal, checked in this order: ``not_running``,
-        ``stopping``, ``disabled``, ``inside_pipeline_hook``,
-        ``already_detached``, ``cooldown``, ``too_few_workers``,
-        ``budget_full``, ``store_unavailable``, ``leave_failed``.
+        this worker, or with a refusal, checked in the order of
+        :data:`DETACH_REFUSALS`: ``not_running``, ``stopping``, ``disabled``,
+        ``inside_pipeline_hook``, ``join_failed``, ``already_detached``,
+        ``cooldown``, ``too_few_workers``, ``budget_full``,
+        ``store_unavailable``, ``leave_failed``.
 
         Raises:
             ValueError: ``duration`` is out of range (:func:`check_duration`).
