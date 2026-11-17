@@ -1528,6 +1528,16 @@ class AppLifecycle:
         def time_left() -> float:
             return max(deadline - time.monotonic(), 0.0)
 
+        # A held detach slot is given back first, with one attempt: the
+        # sources have stopped, so nothing subscribes again, and the
+        # recorder's seal and publish below cannot spend its time. A slot
+        # left held would answer budget_full to the group until its lease
+        # ends. It runs before the election provider stops. A crash leaves
+        # the slot to end with its lease.
+        if app._cluster_election is not None:
+            detach = app.detach
+            steps.append(StopStep('detach_slot_release_failed', 'kafka', lambda: detach.release_at_stop(time_left())))
+
         # Shut the offload pool down first among the observability-
         # adjacent subsystems: hooks have finished draining by now, so
         # anything still queued belongs to abandoned work — drop it
@@ -1589,12 +1599,6 @@ class AppLifecycle:
         # its lease has ended or been left: one attempt in the time left.
         # Its caller counts and logs a failed call; anything else it
         # raises is logged here, so the card withdraw and the closes below still run.
-        # A held detach slot is given back with one attempt before the
-        # election provider stops; the sources have stopped, so nothing
-        # subscribes again. A crash leaves the slot to end with its lease.
-        if app._cluster_election is not None:
-            detach = app.detach
-            steps.append(StopStep('detach_slot_release_failed', 'kafka', lambda: detach.release_at_stop(time_left())))
         if app._cluster_election is not None:
             election = app._cluster_election
             steps.append(StopStep('periodic_election_stop_failed', 'periodic', lambda: election.stop(time_left())))

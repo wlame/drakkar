@@ -36,6 +36,7 @@ from drakkar.metrics import attach_total, detach_requests, detached
 from drakkar.providers.resilience import ResilientCaller
 from drakkar.recorder.election import ElectionContext
 from drakkar.sources.kafka import KafkaSource, LeaveOutcome
+from drakkar.timefmt import format_rfc3339_micro
 from tests.clocks import VirtualClock
 from tests.conftest import kafka_connections, wait_for
 from tests.fleet_fakes import ElectionStore, MemoryElection, RecordingLogger, ScriptedElection, SpyCaller
@@ -238,6 +239,12 @@ def clock() -> VirtualClock:
     # Time moves only when a test runs the clock.
     clock.limit = NOW
     return clock
+
+
+@pytest.fixture(autouse=True)
+def short_join_error_pause(monkeypatch) -> None:
+    # The pause after an error in the join retry is real time, not clock time.
+    monkeypatch.setattr(detach_module, 'JOIN_ERROR_PAUSE_SECONDS', 0.01, raising=False)
 
 
 @pytest.fixture
@@ -1087,7 +1094,8 @@ async def test_a_failed_publish_clears_the_gauge_the_timer_and_the_card(worker, 
     assert worker.controller.state.state == 'attached'
     assert detached._value.get() == 0
     assert worker.controller._timer is None
-    assert worker.calls.count('publish') == 2
+    # At detaching, at detached, and at the attach of the undo.
+    assert worker.calls.count('publish') == 3
 
 
 async def test_the_leave_task_is_owned_by_the_controller(worker):
@@ -1222,6 +1230,8 @@ async def test_a_join_retry_whose_sleep_raises_goes_on(worker, clock, logs, monk
     monkeypatch.setattr(clock, 'sleep', sleep_raising_once)
     assert (await worker.controller.attach(cause='operator')).reason == 'join_failed'
     await run_clock_until(clock, NOW + 6)
+    # After the error the retry pauses on the event loop, not on the clock.
+    await wait_for(lambda: worker.controller.state.state == 'attached')
 
     assert worker.controller.state.state == 'attached'
     assert raised
@@ -1269,3 +1279,161 @@ async def test_an_undone_detach_writes_no_attach_row_and_logs_detach_undone(work
         'handler',
         5.0,
     )
+
+
+# --- the stop, cancelled callers and the card ---------------------------------------------------
+
+
+async def test_a_detach_caller_whose_job_the_stop_cancels_answers_stopping(worker):
+    worker.source.leave_gate = asyncio.Event()
+    caller = asyncio.create_task(worker.detach())
+    await wait_for(lambda: 'leave_group' in worker.calls)
+
+    await worker.controller.release_at_stop(1.0)
+
+    assert await caller == DetachResult(detached=False, reason='stopping', until=None)
+
+
+async def test_an_attach_caller_whose_job_the_stop_cancels_answers_stopping(worker):
+    await worker.detach()
+    worker.source.join_answers = [HANG]
+    caller = asyncio.create_task(worker.controller.attach(cause='operator'))
+    await wait_for(lambda: 'join_group' in worker.calls)
+
+    await worker.controller.release_at_stop(1.0)
+
+    assert await caller == AttachResult(attached=False, reason='stopping')
+
+
+async def test_a_caller_cancelled_while_the_worker_stops_is_counted_as_stopping(worker):
+    stopping_before = counted('handler', 'stopping')
+    failed_before = counted('handler', 'leave_failed')
+    worker.source.leave_gate = asyncio.Event()
+    caller = asyncio.create_task(worker.detach())
+    await wait_for(lambda: 'leave_group' in worker.calls)
+
+    worker.app._stopping = True
+    caller.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await caller
+    worker.source.leave_gate.set()
+    await wait_for(lambda: all(task.done() for task in worker.controller._tasks))
+
+    assert counted('handler', 'stopping') == stopping_before + 1
+    assert counted('handler', 'leave_failed') == failed_before
+    assert 'join_group' not in worker.calls
+
+
+async def test_a_caller_cancelled_before_its_job_took_the_lock_is_not_counted(worker, logs):
+    failed_before = counted('handler', 'leave_failed')
+    worker.source.leave_gate = asyncio.Event()
+    first = asyncio.create_task(worker.detach())
+    await wait_for(lambda: 'leave_group' in worker.calls)
+    second = asyncio.create_task(worker.detach())
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    second.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await second
+    worker.source.leave_gate.set()
+    assert (await first).detached
+    await wait_for(lambda: not any(task.get_name() == 'drakkar-detach' for task in worker.controller._tasks))
+
+    assert counted('handler', 'leave_failed') == failed_before
+    assert not logs.named('detach_refused')
+    assert worker.controller.state.state == 'detached'
+    assert worker.calls.count('leave_group') == 1
+
+
+async def test_the_card_is_published_when_the_detach_starts(worker):
+    worker.source.leave_gate = asyncio.Event()
+    task = asyncio.create_task(worker.detach())
+    await wait_for(lambda: 'leave_group' in worker.calls)
+
+    assert worker.calls.index('publish') < worker.calls.index('leave_group')
+    assert worker.app._lifecycle._card_features()['kafka']['detached'] is True
+    worker.source.leave_gate.set()
+    assert (await task).detached
+
+
+async def test_a_replaced_deadline_or_origin_is_logged_and_published(worker, logs):
+    await worker.detach(duration=3600)
+    worker.calls.clear()
+
+    result = await worker.detach(origin=DetachOrigin.OPERATOR, duration=100, reason='look at it')
+
+    assert logs.named('detach_extended') == [
+        {
+            'event': 'detach_extended',
+            'log_level': 'info',
+            'category': 'kafka',
+            'origin': 'operator',
+            'until': format_rfc3339_micro(result.until),
+            'reason': 'look at it',
+        }
+    ]
+    assert 'publish' in worker.calls
+    worker.recorder.record_worker_detached.assert_called_once()
+
+
+async def test_an_already_detached_answer_logs_no_extension(worker, logs):
+    await worker.detach(origin=DetachOrigin.OPERATOR, duration=600)
+
+    assert (await worker.detach(duration=60)).reason == 'already_detached'
+
+    assert not logs.named('detach_extended')
+
+
+async def test_a_size_read_that_raises_releases_the_slot_without_a_join(worker, logs, monkeypatch):
+    async def broken_held_count(self):
+        raise RuntimeError('holder read broke')
+
+    monkeypatch.setattr(DetachSlot, 'held_count', broken_held_count)
+    states: list[str] = []
+    original_enter = worker.controller._enter_attaching
+    monkeypatch.setattr(
+        worker.controller, '_enter_attaching', lambda state: (states.append('attaching'), original_enter(state))
+    )
+
+    result = await worker.detach()
+
+    assert result.reason == 'leave_failed'
+    assert states == []
+    assert 'join_group' not in worker.calls
+    assert not logs.named('detach_undone')
+    assert worker.held_scopes() == []
+    assert worker.controller.state.state == 'attached'
+
+
+async def test_the_slot_release_runs_before_the_recorder_stops(worker):
+    await worker.detach()
+    events = [step.event for step in worker.app._lifecycle._stop_steps(time.monotonic() + 5)]
+
+    assert events[0] == 'detach_slot_release_failed'
+    assert events.index('detach_slot_release_failed') < events.index('recorder_stop_failed')
+
+
+async def test_a_join_retry_whose_sleep_always_raises_waits_on_the_loop(worker, clock, monkeypatch):
+    monkeypatch.setattr(detach_module, 'JOIN_ERROR_PAUSE_SECONDS', 0.05, raising=False)
+    await worker.detach()
+    worker.source.join_answers = [False] * 1000
+    real_sleep = clock.sleep
+    sleeps: list[int] = []
+
+    async def retry_sleep_raises(seconds):
+        if seconds != detach_module.JOIN_RETRY_SECONDS:
+            await real_sleep(seconds)
+            return
+        sleeps.append(1)
+        if len(sleeps) >= 1000:
+            # Ends the period, so a loop that spins still stops.
+            worker.controller._attaching_period += 1
+        raise RuntimeError('sleep broke')
+
+    monkeypatch.setattr(clock, 'sleep', retry_sleep_raises)
+    assert (await worker.controller.attach(cause='operator')).reason == 'join_failed'
+    await asyncio.sleep(0.3)
+
+    assert 1 <= len(sleeps) < 50
+    worker.controller._attaching_period += 1

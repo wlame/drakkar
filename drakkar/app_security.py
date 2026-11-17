@@ -52,6 +52,26 @@ SIDE_EFFECTING_ENDPOINTS: tuple[SideEffectingEndpoint, ...] = (
         field='delete_enabled',
         effect='deletes a merge result from the merged folder of the shared folder',
     ),
+    SideEffectingEndpoint(
+        route='POST /api/v1/debug/consume-pause',
+        field='consume_pause.enabled',
+        effect='stops this worker fetching from Kafka for the chosen time, while consumer lag grows',
+    ),
+    SideEffectingEndpoint(
+        route='POST /api/v1/debug/consume-resume',
+        field='consume_pause.enabled',
+        effect='ends a debug consume pause',
+    ),
+    SideEffectingEndpoint(
+        route='POST /api/v1/debug/detach',
+        field='detach_enabled',
+        effect='takes this worker out of its consumer group for up to sources.kafka.detach.max_duration',
+    ),
+    SideEffectingEndpoint(
+        route='POST /api/v1/debug/attach',
+        field='detach_enabled',
+        effect='brings a detached worker back into its consumer group',
+    ),
 )
 
 
@@ -68,7 +88,8 @@ def _exposure_clause(config: DrakkarConfig) -> str:
             'live event stream); the side-effecting endpoints are disabled by config.'
         )
     effects = '; '.join(f'{e.route} {e.effect}' for e in live)
-    keys = ', '.join(f'{e.config_key}=false' for e in live)
+    # One switch can close several routes; each switch is named once.
+    keys = ', '.join(dict.fromkeys(f'{e.config_key}=false' for e in live))
     return (
         f'Most endpoints are read-only, but not all: {effects}. Set {keys} to close them independently of auth_token.'
     )
@@ -83,7 +104,7 @@ def warn_if_ui_unauthenticated(config: DrakkarConfig) -> None:
     commits offsets. That makes "unauthenticated by default" a reasonable
     starting point — operators who need a token opt in via ``ui.auth_token``.
 
-    What it does **not** make the UI is read-only. Two endpoints have real
+    What it does **not** make the UI is read-only. Some endpoints have real
     side effects (see :data:`SIDE_EFFECTING_ENDPOINTS`), so the warning
     names whichever of them is still enabled rather than making the blanket
     claim that no endpoint can affect the worker.

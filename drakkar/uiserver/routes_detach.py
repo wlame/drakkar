@@ -80,8 +80,10 @@ async def _dispatch_start(
     not a request that hangs. A timeout does not remove ``coro`` from the
     main loop's queue: the loop runs it whenever it wakes. So ``abandoned``
     is set before the 503 goes out, and ``coro`` checks it before it starts
-    anything; a request answered 503 is not run later. Only a request whose
-    step had already begun on the main loop when the limit passed still runs.
+    anything; a request answered 503 is not started later. A request whose
+    step began on the main loop before ``abandoned`` was set still runs. That
+    window is the limit itself plus one turn of this server loop: the time
+    from the timeout to the ``except`` block below, which sets the flag.
     A closed loop (a stop) raises ``RuntimeError`` before ``coro`` is
     scheduled; it is closed then, so no warning about a coroutine that was
     never awaited is raised.

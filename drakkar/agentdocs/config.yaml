@@ -68,7 +68,7 @@
     - concept:detach
 
 - key: sources.kafka.detach.cooldown
-  summary: The shortest time between the return of a handler detach and the next handler detach.
+  summary: The shortest time between the return of any detach, handler or operator, and the next handler detach. It binds handler detaches only.
   advice: Raise it when handler detaches repeat often; each return makes the other workers of the group run a revoke drain.
   related:
     - concept:detach

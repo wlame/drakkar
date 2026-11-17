@@ -102,12 +102,19 @@ MIN_DURATION_SECONDS = 10.0
 REASON_MAX_CHARS = 200
 # The pause between two tries of a join that failed.
 JOIN_RETRY_SECONDS = 5.0
+# The pause of the join retry after an error, on the event loop's own clock: a clock whose sleep
+# raises cannot make the retry spin.
+JOIN_ERROR_PAUSE_SECONDS = JOIN_RETRY_SECONDS
 
-# What a detach in progress answers when a safety rule or a cancelled caller stops it.
+# The abort of a detach whose caller was cancelled before the job took the lock: nothing was tried,
+# so the job ends with no store call, no count and no log line. It is never an answer.
+_CALLER_GONE = 'caller_gone'
+
+# What a detach in progress answers when a safety rule stops it. The deadline has no entry: a
+# deadline timer runs only while ``detached``, which ``_safety_attach`` handles before it aborts.
 _ABORT_REASONS = {
     CAUSE_LEASE_LOST: REFUSED_STORE_UNAVAILABLE,
     CAUSE_TOO_FEW_WORKERS: REFUSED_TOO_FEW_WORKERS,
-    CAUSE_DEADLINE: REFUSED_LEAVE_FAILED,
 }
 
 # The causes a caller of ``attach`` may give; the other causes are the framework's own.
@@ -182,11 +189,19 @@ def _epoch_ms(moment: datetime | None) -> int | None:
     return None if moment is None else int(moment.timestamp() * 1000)
 
 
+def _cancelled_by_the_stop(job: asyncio.Task[Any]) -> bool:
+    """Whether ``job`` was cancelled while the task awaiting it was not: only the stop cancels a job."""
+    current = asyncio.current_task()
+    return job.cancelled() and (current is None or not current.cancelling())
+
+
 class _Transition:
     """One detach request in progress; :meth:`abort` tells it to stop and undo itself."""
 
     def __init__(self) -> None:
         self.stopped: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        # Set when the job takes the lock; before that, nothing of the detach was tried.
+        self.locked = False
 
     def abort(self, reason: str) -> None:
         """Ask the detach to stop and answer ``reason``; the first reason wins."""
@@ -304,8 +319,10 @@ class DetachController:
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
+            if _cancelled_by_the_stop(task):
+                return DetachResult(detached=False, reason=REFUSED_STOPPING, until=None)
             # The caller cannot learn the outcome any more: a detach still in progress is undone.
-            transition.abort(REFUSED_LEAVE_FAILED)
+            transition.abort(self._caller_gone_reason(transition))
             raise
 
     async def attach(self, *, cause: str, reason: str = '') -> AttachResult:
@@ -341,7 +358,12 @@ class DetachController:
             self._attach_job(cause=cause, reason=reason[:REASON_MAX_CHARS], asked_at=asked_at),
             name='drakkar-attach',
         )
-        return await asyncio.shield(task)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if _cancelled_by_the_stop(task):
+                return AttachResult(attached=False, reason=REFUSED_STOPPING)
+            raise
 
     def request(self, *, action: str, duration: float | None = None, reason: str = '') -> None:
         """Start an operator detach or attach on the main loop and return at once.
@@ -397,6 +419,10 @@ class DetachController:
     ) -> DetachResult:
         try:
             async with self._lock:
+                transition.locked = True
+                if transition.abort_reason == _CALLER_GONE:
+                    # The caller gave up before anything was tried; nobody reads this answer.
+                    return self._refused(_CALLER_GONE)
                 self._current = transition
                 try:
                     result = await self._detach_locked(transition, origin=origin, seconds=seconds, reason=reason)
@@ -429,7 +455,7 @@ class DetachController:
         config = self._detach_config()
         state = self._state
         if state.state == STATE_DETACHED:
-            return self._detach_again(state, origin=origin, seconds=seconds, reason=reason)
+            return await self._detach_again(state, origin=origin, seconds=seconds, reason=reason)
         if state.state == STATE_ATTACHING:
             # A join retry is in progress: the worker is returning to its group, and the attach ends first.
             return self._refused(REFUSED_JOIN_FAILED)
@@ -458,11 +484,21 @@ class DetachController:
             raise
         except Exception:
             await logger.aexception('detach_transition_failed', category='kafka', origin=str(origin))
-            await self._undo_leave(slot)
+            if self._state.state == STATE_ATTACHED:
+                # The worker never began to leave: the slot goes back, and there is nothing to join.
+                await self._release_slot(slot)
+            else:
+                await self._undo_leave(slot)
             return self._refused(REFUSED_LEAVE_FAILED)
 
-    def _detach_again(self, state: DetachState, *, origin: DetachOrigin, seconds: float, reason: str) -> DetachResult:
-        """A detach of a detached worker: a handler leaves an operator detach alone, else the deadline is replaced."""
+    async def _detach_again(
+        self, state: DetachState, *, origin: DetachOrigin, seconds: float, reason: str
+    ) -> DetachResult:
+        """A detach of a detached worker: a handler leaves an operator detach alone, else the deadline is replaced.
+
+        A replaced deadline or origin is logged as ``detach_extended`` and the
+        registry card is published; no recorder row is written.
+        """
         if origin == DetachOrigin.HANDLER and state.origin == DetachOrigin.OPERATOR:
             return DetachResult(detached=True, reason=REFUSED_ALREADY_DETACHED, until=state.until)
         until = self._clock.time() + min(seconds, self._detach_config().max_duration)
@@ -470,6 +506,14 @@ class DetachController:
             state=STATE_DETACHED, origin=origin, reason=reason, since=state.since, until=_utc(until)
         )
         self._start_timer(until)
+        self._publish_card()
+        await logger.ainfo(
+            'detach_extended',
+            category='kafka',
+            origin=str(origin),
+            until=format_rfc3339_micro(_utc(until)),
+            reason=reason,
+        )
         return DetachResult(detached=True, reason='', until=_utc(until))
 
     async def _leave_with_slot(
@@ -494,6 +538,8 @@ class DetachController:
         self._state = DetachState(
             state=STATE_DETACHING, origin=origin, reason=reason, since=_utc(self._clock.time()), until=None
         )
+        # Peers count this worker as detached from now on, also while its partitions drain.
+        self._publish_card()
         leave = self._spawn(source.leave_group(), name='drakkar-detach-leave')
         await asyncio.wait({leave, transition.stopped}, return_when=asyncio.FIRST_COMPLETED)
         if not leave.done():
@@ -726,9 +772,12 @@ class DetachController:
         if restarted:
             with contextlib.suppress(Exception):
                 await logger.aerror('detach_join_retry_restarted', category='kafka', cause=cause)
+        paused_after_error = False
         while self._retry_period_runs(period):
             try:
-                await self._clock.sleep(JOIN_RETRY_SECONDS)
+                if not paused_after_error:
+                    await self._clock.sleep(JOIN_RETRY_SECONDS)
+                paused_after_error = False
                 async with self._lock:
                     if not self._retry_period_runs(period):
                         break
@@ -738,6 +787,9 @@ class DetachController:
             except Exception:
                 with contextlib.suppress(Exception):
                     await logger.aexception('attach_transition_failed', category='kafka', cause=cause)
+                # The pause runs on the event loop itself, and it stands for the next clock sleep.
+                await asyncio.sleep(JOIN_ERROR_PAUSE_SECONDS)
+                paused_after_error = True
         slot = self._slot
         if self._is_stopping() and period == self._attaching_period and slot is not None:
             # The worker stops outside its group: nothing subscribes again, and the slot goes back.
@@ -896,6 +948,14 @@ class DetachController:
 
     def _refused(self, reason: str) -> DetachResult:
         return DetachResult(detached=False, reason=reason, until=None)
+
+    def _caller_gone_reason(self, transition: _Transition) -> str:
+        """How a detach whose caller was cancelled ends: stopping at a stop, unseen before the lock, else leave_failed."""
+        if self._is_stopping():
+            return REFUSED_STOPPING
+        if not transition.locked:
+            return _CALLER_GONE
+        return REFUSED_LEAVE_FAILED
 
     def _group_now(self) -> GroupView:
         """The group as the last registry refresh shows it; with no registry, this worker alone."""

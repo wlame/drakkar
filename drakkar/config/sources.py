@@ -81,8 +81,9 @@ class KafkaDetachConfig(ConfigModel):
     cooldown: Duration = Field(
         default=300.0,
         description=(
-            'The shortest time between the return of a handler detach and the next handler detach, '
-            'from 0 (none) to 1d. An operator detach does not wait for it.'
+            'The shortest time between the return of a detach, handler or operator, and the next '
+            'handler detach, from 0 (none) to 1d. Every attach after a detach starts the time; it binds '
+            'handler detaches only, and an operator detach does not wait for it.'
         ),
     )
     lease: WholeSeconds = Field(

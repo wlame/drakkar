@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `16fd24e36fc20e48`.
+Registry version: `ffd82976f427a85a`.
 
 ## Concepts
 
@@ -557,7 +557,7 @@ The longest detach a request may ask for.
 
 ### `config:sources.kafka.detach.cooldown`
 
-The shortest time between the return of a handler detach and the next handler detach.
+The shortest time between the return of any detach, handler or operator, and the next handler detach. It binds handler detaches only.
 
 **Advice:** Raise it when handler detaches repeat often; each return makes the other workers of the group run a revoke drain.
 

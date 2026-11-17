@@ -998,7 +998,9 @@ class EventWriter:
         """Record that this worker joined its consumer group again after a detach.
 
         ``cause`` says what ended the detach; ``detached_seconds`` is how long
-        the worker was away. ``partition`` is -1, as for every worker row.
+        the worker was away, rounded to 3 decimals (the ``worker_attached``
+        log line carries the same value). ``partition`` is -1, as for every
+        worker row.
         """
         self._record(
             {

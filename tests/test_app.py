@@ -1259,7 +1259,9 @@ def test_warn_if_ui_unauthenticated_names_the_side_effecting_endpoints(config_wi
     caller-supplied bytes and merge writes files. Each live endpoint is
     named alongside the key that closes it.
     """
-    config = config_with_ui(UIConfig(enabled=True, auth_token='', delete_enabled=True))
+    config = config_with_ui(
+        UIConfig(enabled=True, auth_token='', delete_enabled=True, detach_enabled=True, consume_pause={'enabled': True})
+    )
     with capture_logs() as cap:
         warn_if_ui_unauthenticated(config)
 
@@ -1309,6 +1311,39 @@ def test_warn_if_ui_unauthenticated_reports_a_fully_read_only_ui(config_with_ui)
     message = _captured_unauth_events(cap)[0]['message']
     assert 'Every endpoint still served is read-only' in message
     assert 'but not all' not in message
+
+
+def test_warn_if_ui_unauthenticated_names_the_detach_routes(config_with_ui):
+    """With the detach routes on, the warning does not call the UI read-only and names what they do."""
+    config = config_with_ui(
+        UIConfig(enabled=True, auth_token='', probe={'enabled': False}, merge_enabled=False, detach_enabled=True)
+    )
+    with capture_logs() as cap:
+        warn_if_ui_unauthenticated(config)
+
+    message = _captured_unauth_events(cap)[0]['message']
+    assert 'Every endpoint still served is read-only' not in message
+    assert 'POST /api/v1/debug/detach' in message
+    assert 'POST /api/v1/debug/attach' in message
+    assert 'takes this worker out of its consumer group for up to sources.kafka.detach.max_duration' in message
+    # One switch closes both routes, and the warning names it once.
+    assert message.count('ui.detach_enabled=false') == 1
+
+
+def test_warn_if_ui_unauthenticated_names_the_consume_pause_routes(config_with_ui):
+    """With the debug consume pause on, the warning names its two routes and its switch."""
+    config = config_with_ui(
+        UIConfig(
+            enabled=True, auth_token='', probe={'enabled': False}, merge_enabled=False, consume_pause={'enabled': True}
+        )
+    )
+    with capture_logs() as cap:
+        warn_if_ui_unauthenticated(config)
+
+    message = _captured_unauth_events(cap)[0]['message']
+    assert 'POST /api/v1/debug/consume-pause' in message
+    assert 'POST /api/v1/debug/consume-resume' in message
+    assert message.count('ui.consume_pause.enabled=false') == 1
 
 
 def test_warn_if_ui_unauthenticated_silent_when_token_set(config_with_ui):
