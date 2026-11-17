@@ -32,9 +32,13 @@ of a peer leaves that worker out.
 A **provider** is the part of the feature that talks to a store or a service.
 One provider serves both the registry (this page) and the
 [election of cluster periodic tasks](local-databases.md#the-election-provider),
-the archive included. Each has its own caller with its own circuit breaker, and
-both take their settings from one [`autodiscover.resilience`](#resilience)
-block. The metrics keep the labels `feature="registry"` and `feature="election"`.
+the archive included. The same store also keeps the budget of
+[detached workers](detach.md#the-budget-of-detached-workers): `max_detached`
+leases per cluster and consumer group, with the scopes
+`<cluster>/detach.<group key>_<i>`. Each has its own caller with its own
+circuit breaker, and all take their settings from one
+[`autodiscover.resilience`](#resilience) block. The metrics keep the labels
+`feature="registry"`, `feature="election"` and `feature="detach"`.
 The rest of this page is about the registry.
 
 `autodiscover.provider` selects where cards live:
@@ -655,7 +659,7 @@ A card is a JSON object, at most 4096 bytes:
 | `version` | no | The worker's release, as `/api/v1/identity` reports it. |
 | `state` | no | `starting`, `running` or `draining`. |
 | `started_at`, `heartbeat_at` | no | Process start and the time of this publish, on the writer's clock. Informational only: liveness never uses them. |
-| `features` | no | An object for optional capabilities. Unknown keys are ignored. `features.cache` is present while the worker serves the [cache exchange](cache.md#cache-exchange) (the cache, `storage.dir` and `cache.exchange` are on): for each scope (`cluster`, `global`), `{"ms": <updated_at_ms>, "key": <key>}` of the newest row this worker originated. A scope with no such row is absent. A peer pulls only when a mark is past its cursor for this worker. A mark carries at most the first 128 characters of its key, so a long cache key never pushes the card over its 4096-byte limit. `features.periodic` is on every card from the first publish: `{"cluster_hash": "<16 hex>"}`, the hash of the worker's cluster periodic task definitions (see [Definition hash](periodic-tasks.md#definition-hash)). Peers of the same cluster compare it after each refresh and warn on a difference; a hash in any other form counts as unknown. |
+| `features` | no | An object for optional capabilities. Unknown keys are ignored. `features.cache` is present while the worker serves the [cache exchange](cache.md#cache-exchange) (the cache, `storage.dir` and `cache.exchange` are on): for each scope (`cluster`, `global`), `{"ms": <updated_at_ms>, "key": <key>}` of the newest row this worker originated. A scope with no such row is absent. A peer pulls only when a mark is past its cursor for this worker. A mark carries at most the first 128 characters of its key, so a long cache key never pushes the card over its 4096-byte limit. `features.periodic` is on every card from the first publish: `{"cluster_hash": "<16 hex>"}`, the hash of the worker's cluster periodic task definitions (see [Definition hash](periodic-tasks.md#definition-hash)). Peers of the same cluster compare it after each refresh and warn on a difference; a hash in any other form counts as unknown. `features.kafka` is on the card of a worker with the Kafka source on: `{"group": "<consumer group>", "detached": <bool>}`, plus `max_detached` and `min_attached` when `sources.kafka.detach.enabled` is on. The workers of a group count each other from it before a [detach](detach.md); a peer without it, or with a `detached` value that is not exactly `false`, does not count as attached. A detach and an attach publish the card at once. |
 
 A card whose required field is missing, empty (`worker`, `url`) or of the
 wrong type, or whose optional field has the wrong type, is skipped; the
@@ -742,6 +746,9 @@ unknown.
 current worker plus the peers of the last refresh. The current worker is
 always listed and always `online: true`. A peer row carries the fields of
 its card that are present; see the UI contract for the full row shape.
+A row also has `detached` (`true` or `false` from `features.kafka.detached`
+of the card, `null` when the card does not carry it), which the worker
+switcher shows as a "detached" mark (see [Detach](detach.md)).
 Every row also has `cluster_tasks_hash` and `cluster_tasks_match`, which
 compare the worker's cluster periodic task definitions with this worker's
 (see [Definition hash](periodic-tasks.md#definition-hash)). The cluster-wide
@@ -788,7 +795,8 @@ this worker (`history.archive` included when it runs as one): the task, its
 scope, its lease length, its next slot, the outcome of its last slot on this
 worker (`won`, `held_elsewhere`, `late` or `election_failed`), and the holder
 as the store reports it. `election` is `null` on a worker with no cluster
-task.
+task, also when its election serves only the budget of
+[detached workers](detach.md). The view does not list the detach slots.
 
 The holder read is part of every election provider: `holder(scope)` answers
 the worker, the instance and the `acquired_at` text of the stored lease, or
@@ -1086,7 +1094,7 @@ also counted by the three provider metrics:
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `drakkar_provider_calls_total` | counter | `feature` (`registry`, `election`, `ui` for the holder reads of the [Autodiscover view](#autodiscover-view)), `provider`, `op`, `outcome` (`ok`, `error`, `timeout`, `skipped_open`, `not_started`) | Provider operations by feature, provider, operation and [outcome](#resilience). |
+| `drakkar_provider_calls_total` | counter | `feature` (`registry`, `election`, `detach` for the budget slots of a [detach](detach.md), `ui` for the holder reads of the [Autodiscover view](#autodiscover-view)), `provider`, `op`, `outcome` (`ok`, `error`, `timeout`, `skipped_open`, `not_started`) | Provider operations by feature, provider, operation and [outcome](#resilience). |
 | `drakkar_provider_call_duration_seconds` | histogram | `feature`, `provider`, `op` | Duration of one provider operation with its retries. One sample per operation that made an attempt. Buckets run from 5 ms to 30 s. |
 | `drakkar_provider_breaker_open` | gauge | `feature`, `provider` | `1` while the circuit breaker of that provider is open, else `0`. |
 

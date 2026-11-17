@@ -14,7 +14,19 @@ this release. Use the second first when you come from a release older than
   settings for files, archives, worker discovery and cache exchange into
   new sections.
 
-## Upgrading from 3.0.3 to this release {#from-3-0-3}
+## Upgrading from 3.1.0 to this release {#from-3-1-0}
+
+Nothing changes for a worker that does not turn the new features on.
+
+1. **`BaseDrakkarHandler` has four new members:** `detach`, `attach`,
+   `detach_state` and `request_stop` (see [Detach](detach.md)). A handler
+   class that already defines its own attribute or method with one of these
+   names hides the framework member. Rename yours to use the new ones.
+2. **The detach feature is off by default.** To use it, turn on
+   `autodiscover` and `sources.kafka.detach.enabled`; to give operators the
+   Live-page control, also `ui.detach_enabled`.
+
+## Upgrading from 3.0.3 to 3.1.0 {#from-3-0-3}
 
 Every message now has a request id, and one handler hook names it.
 

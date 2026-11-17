@@ -53,7 +53,8 @@ breaking change, never a refactor:
   (`tests/fixtures/history_meta.json`) — workers that share a folder must not
   take each other's files
 - the worker registry card (schema 1, `tests/fixtures/fleet_card.json`,
-  including `features.periodic.cluster_hash`) and the filesystem provider
+  including `features.periodic.cluster_hash` and `features.kafka`, which
+  the detach size check of other workers reads) and the filesystem provider
   layout (`<dir>/workers/<sanitized worker>.json`, temp file plus rename) —
   workers of other releases read these cards
 - periodic schedules (`tests/fixtures/periodic_contract.json`): the
@@ -200,6 +201,19 @@ parametrize).
     stream are cancelled at a stop, because waiting for them could spend the
     whole drain budget and cost every partition its final commit.
 
+13. Every failure of a detach ends in `attached` (`drakkar/detach.py`). A
+    worker leaves its consumer group only while it holds one of the
+    `max_detached` lease slots of the detach budget, which lives in the
+    election store under the scopes `<cluster>/detach.<group key>_<i>`
+    (`drakkar/detach_slots.py`); the providers and their stored shapes are
+    unchanged. No error path, cancelled caller, crashed timer or lost lease may
+    leave a worker detached without a live deadline timer and a live lease
+    refresher: an error attaches the worker, a join that fails is tried again
+    every 5 seconds with the slot still held, and the slot is released only
+    after the join. A `detach()` from a partition's work answers
+    `inside_pipeline_hook` (`drakkar/hook_scope.py`), because the revoke drain
+    would wait for the call itself. The state never survives a restart.
+
 ## API server footguns
 
 - The API server (`drakkar/uiserver/`) runs on its own thread and event loop. It is
@@ -248,6 +262,9 @@ drakkar/
   handler.py, models.py    user extension points + typed messages
   groups.py                task groups of arrange_stream: creation, label collection, note checks
   consumer.py, partition.py, offsets.py   poll loop, per-partition pipeline, watermarks
+  detach.py, detach_slots.py, detach_group.py   leave the consumer group for a bounded time: the state machine,
+                           the budget slots in the election store, the group size from the registry cards
+  hook_scope.py            marks the handler calls that are part of a partition's work, and Message Probe runs
   budget.py                the worker's pending budget: tasks and bytes, reservations, the FIFO of waiting loops
   executor.py              subprocess pool (argv exec, process-group kill)
   procwatch.py             the exit watcher: one daemon thread reads each task's exit time off the loop

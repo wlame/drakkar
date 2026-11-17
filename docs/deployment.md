@@ -407,6 +407,36 @@ a rebalance or restart hands those offsets to an owner that redelivers
 them. That is the correct at-least-once outcome — those messages were
 never processed, so committing past them would lose them.
 
+### Detached workers and stop requests
+
+A worker that is [detached](detach.md) from its Kafka consumer group stays
+healthy and ready: ``/healthz`` and ``/readyz`` keep answering ``200``. Its
+partitions are on the other workers of the group, so there is nothing to
+fail over. A probe that failed on a detached worker would only make the
+kubelet restart a worker that is working as asked.
+
+The handler can stop the worker with ``self.request_stop(reason, exit_code)``,
+for example when a detach is refused. The stop is the same graceful shutdown
+as on ``SIGTERM``: ``/readyz`` answers ``503`` from its start, the drain
+settles the work in progress, and the process exits with ``exit_code``
+(0 to 255) after a clean shutdown. The worker logs ``stop_requested`` with
+the reason and the code.
+
+What happens next is the job of the supervisor:
+
+- A Kubernetes ``Deployment`` or ``StatefulSet`` runs its pods with
+  ``restartPolicy: Always``: the kubelet starts the container again with any
+  exit code, **on the same node**. A stop does not move the worker away
+  from a slow host.
+- A supervisor that restarts only on failure (``restartPolicy: OnFailure``
+  for a ``Job``, ``Restart=on-failure`` for systemd) needs an exit code other
+  than ``0``.
+- Nomad moves an allocation to another node only after its restart
+  attempts on the same node.
+
+Read the exit code in your alerts: a code that your handler chose (for
+example ``3`` for "slow disk") says why the worker stopped.
+
 ### Example probe configuration
 
 ```yaml

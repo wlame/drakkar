@@ -24,6 +24,8 @@ Every feature is optional. A worker can run its main loop only: no API, no UI, n
 | Merge result delete | `ui.delete_enabled` | **off** | `DELETE /api/v1/debug/files/{path}`: deletes one merge result (`merged/<name>.db`) from the [Databases view](databases-view.md); nothing else can be deleted; `false` = 403, independently of `auth_token` |
 | Kafka read API | `ui.kafka_read_enabled` | **on** | `GET /api/v1/debug/kafka/*`: pipeline-invisible reads of the configured topics; `false` = 403, independently of `auth_token` |
 | Consume pause | `ui.consume_pause.enabled` | **off** | Timed Live-page pause of message intake (auto-resume); off because pausing is production-affecting |
+| [Detach](detach.md) | `sources.kafka.detach.enabled` | **off** | The worker can leave its Kafka consumer group for a bounded time and join it again (handler `detach()` / `attach()`); needs `autodiscover`, which keeps the budget of detached workers |
+| Operator detach | `ui.detach_enabled` | **off** | `POST /api/v1/debug/detach` and `/attach` and the Detach control on the Live page; needs `sources.kafka.detach.enabled`; `false` = 403 |
 | Flight recorder, memory store | `recorder.enabled` and `ui.enabled` | **on** | Recent events in memory for the UI (`recorder.memory.window`) |
 | Flight recorder, durable store | `recorder.enabled`, `recorder.provider` | **on**, `sqlite` | Event history in files in `storage.dir` (`sqlite`) or in a Postgres table (`postgres`) |
 | Own storage | `storage.dir` | `/tmp/drakkar` | Where this worker's event history, cache file and crash marker live |
@@ -143,6 +145,11 @@ names the key to change.
     Kafka, Postgres, Mongo and Redis sink, the DLQ, the Postgres recorder and
     the `consul`, `postgres` and `redis` autodiscover providers read their
     service from `connections.<kind>.<name>`; a missing entry fails the load.
+15. **Detach needs autodiscover; its operator routes need the feature.**
+    `sources.kafka.detach.enabled` with the Kafka source on fails the load
+    when `autodiscover.enabled` is false, because the budget of detached
+    workers is kept in the autodiscover store. `ui.detach_enabled` fails the
+    load without `sources.kafka.detach.enabled`. See [Detach](detach.md).
 
 ## Enable order: minimal to full-featured
 

@@ -126,7 +126,7 @@ a shared folder.
 | `history/<cluster>/<worker>-<YYYY-MM-DD__HH_MM_SS>.db.meta.json` | The [meta file](#the-meta-file) of that sealed file: its statistics, written once by the owner. |
 | `history/<cluster>/<cluster>-<from>__<to>.db.gz` | Archive of the whole cluster: gzip-compressed merge of one UTC window's sealed files. See [Archiving](#archiving). |
 | `history/<cluster>/<cluster>-<worker>-<from>__<to>.db.gz` | Archive of one worker's own files, with the sanitized worker name. See [The two scopes](#archive-scopes). |
-| `tasks/<cluster>/<task>.lock` | The [task lock](#the-task-lock) of a cluster periodic task (the archive's is `history.archive.lock`), made by the `filesystem` [election provider](#the-election-provider). It exists while one worker of the cluster holds the slot. The same folder holds the clock markers `.clock.<instance>`. |
+| `tasks/<cluster>/<task>.lock` | The [task lock](#the-task-lock) of a cluster periodic task (the archive's is `history.archive.lock`), made by the `filesystem` [election provider](#the-election-provider). It exists while one worker of the cluster holds the slot. The slots of the [detach](detach.md) budget are files of the same kind, `detach.<group key>_<i>.lock`. The same folder holds the clock markers `.clock.<instance>`. |
 | `merged/merged-<YYYY-MM-DD__HH_MM_SS>-<16 hex>.db` | The result of a merge started from the UI. Deleted after `recorder.archive.merged_retention`; see [Merge results expire](#merge-results-expire). |
 | `fleet/workers/<worker>.json` | Registry card of the `filesystem` provider. See [Fleet registry](fleet.md). |
 
@@ -995,6 +995,18 @@ recorder:
   connection](fleet.md#connections). The load fails for any other name:
   `autodiscover.provider must be one of consul, filesystem, postgres, redis, got 'etcd'`.
   One provider serves the election and the [worker registry](fleet.md).
+- **The budget of detached workers.** With
+  [`sources.kafka.detach.enabled`](detach.md), the same provider keeps the
+  slots of the detach budget: `max_detached` leases per cluster and consumer
+  group, with the scopes `<sanitized cluster>/detach.<group key>_<i>` (`g`
+  plus the first 12 hex characters of the SHA-256 of the consumer group id;
+  for example `main/detach.g740b670895e9_0`). They are stored like a task
+  lock, for example the file `tasks/<cluster>/detach.g740b670895e9_0.lock`
+  with the `filesystem` provider. Their lease is
+  `sources.kafka.detach.lease`. The calls go through a caller and a breaker
+  of their own (`feature="detach"`), and the provider is built also on a
+  worker with no cluster task. A detach that is the first user of the
+  provider starts it.
 - **Start and stop.** The provider starts at the first slot that needs it,
   not at worker start (so with the `postgres` provider the tables are first
   checked or created then, with the `redis` provider the server is first

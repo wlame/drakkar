@@ -212,6 +212,10 @@ Leave `sources.kafka.startup_align.enabled: true` (default). Each worker delays 
 
 Up to the number of Kafka partitions. Extra workers sit idle (Kafka only assigns one consumer per partition). See [Scaling Horizontally](performance.md#scaling-horizontally).
 
+### Can a slow worker step aside without a restart?
+
+Yes, with [detach](detach.md) (`sources.kafka.detach.enabled`, off by default; it needs `autodiscover`). The handler calls `await self.detach(duration=..., reason=...)`, usually from a periodic task that probes something of this worker, such as its disk. The worker leaves its consumer group, Kafka gives its partitions to the other workers, and the worker stays alive and ready. It joins the group again when the handler calls `attach()`, when an operator attaches it from the Live page, or at the deadline. At most `max_detached` workers of a group are away at once, and at least `min_attached` others stay attached. When a detach is refused, `self.request_stop(reason, exit_code)` stops the worker gracefully and exits with the code. Do not base the decision on lag: lag belongs to a partition, and the partition moves with the detach. See [Risks](detach.md#risks).
+
 ### Can I hot-reload config without restarting?
 
 No. Config is loaded once at startup and held in the `DrakkarApp` instance for its lifetime — there is no SIGHUP handler and no config-watch loop. The signal handlers today (`drakkar/app.py`) are `SIGINT` and `SIGTERM`, both of which trigger graceful shutdown. To change config, rely on rolling deploys: Kafka's cooperative-sticky rebalance keeps non-revoked partitions running during the rollout, and `sources.kafka.startup_align.enabled` (default on) prevents a fleet-wide cascade rejoin. See [Staggered startup alignment](configuration.md#staggered-startup-alignment).
@@ -228,7 +232,7 @@ Drakkar exposes metrics on `/metrics` at the configured port. See [Scrape Config
 
 Drakkar does not ship blessed Helm charts or Kustomize overlays yet — a reference chart is on the roadmap. What the framework *does* provide to make k8s easy:
 
-- **Graceful shutdown** on `SIGTERM` (drains in-flight windows, commits settled offsets, disconnects sinks).
+- **Graceful shutdown** on `SIGTERM` (drains in-flight windows, commits settled offsets, disconnects sinks). The handler can ask for the same stop with `self.request_stop(reason, exit_code)`; see [Detached workers and stop requests](deployment.md#detached-workers-and-stop-requests).
 - **Structured logs** on stdout (JSON via structlog) — ready for any k8s log collector.
 - **Prometheus metrics** on a configurable port for `prometheus-operator` `ServiceMonitor`.
 - **Stateful considerations**: each worker needs a unique `worker_id` (set via `worker.name`, or the env var named in `worker.name_env`, default `WORKER_ID`; with neither, the host name, which is the pod name). Its own files go to `<storage.dir>/<cluster>/<worker>/` (see [The own folder](local-databases.md#the-own-folder)). Use a `StatefulSet` with a `volumeClaimTemplate` mounted at `storage.dir` for each worker's own files, and mount one shared `ReadWriteMany` volume (NFS, EFS) at `storage.shared_dir` on every pod for the recorder history, archives, merge results and registry cards. A volume that survives a restart lets the next start with the same worker name move a file that a crash or a short stop left in `storage.dir`. The cache file stays private in `storage.dir`; the cache exchange runs over HTTP between the pods, so each pod's API port must be reachable from the others at the URL on its registry card (set `api.host: 0.0.0.0`, or `api.public_url`).
@@ -246,6 +250,7 @@ The UI runs on a separate thread with its own asyncio event loop, so most read-o
 - **Message Probe** monkey-patches `handler.cache` process-wide while a probe runs — production hooks during that window see a `DebugCacheProxy` and their `cache.set()` calls are silently suppressed.
 - **Probe consumes `ExecutorPool` slots** exactly like production messages. Close it with `ui.probe.enabled: false`.
 - **Merge writes files.** `POST /api/v1/debug/merge` creates a `merged-<ts>-<token>.db` in `<storage.shared_dir>/merged/`. The archive pass deletes it after `recorder.archive.merged_retention` (default `32d`); with archiving off nothing reclaims it. Close it with `ui.merge_enabled: false`.
+- **Detach moves partitions.** `POST /api/v1/debug/detach` takes the worker out of its Kafka consumer group for a bounded time, so the other workers take its partitions. Only with `ui.detach_enabled: true` (off by default). See [Detach](detach.md#the-operator-control).
 - **Delete removes a merge result.** `DELETE /api/v1/debug/files/merged/<name>.db` deletes one merge result, only with `ui.delete_enabled: true` (off by default). Sealed files and archives are never deleted from the UI.
 - **GIL contention** between the UI thread and the main loop under heavy UI use.
 - **aiosqlite connections** are per-thread workers; UI reads don't block pipeline writes thanks to SQLite WAL mode.

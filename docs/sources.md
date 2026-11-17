@@ -126,14 +126,16 @@ The handler needs `arrange()` **and** the HTTP hooks. This is the mode the
 enabled source is ready and the sinks are connected. One source that is not
 ready holds the whole worker back. On a Kafka-only worker that means the
 first poll batch; on an HTTP-only worker it means the socket is listening;
-on a mixed worker it means both.
+on a mixed worker it means both. A Kafka source that is
+[detached](detach.md) from its consumer group stays ready.
 
 **A bind failure is fatal.** If the HTTP source cannot bind its socket, the
 worker stops. The HTTP source is an input, and a worker that cannot accept
 requests has nothing to read — so a port collision fails the start instead
 of leaving a half-dead worker running.
 
-**Shutdown runs against one deadline.** On `SIGINT` or `SIGTERM` the worker
+**Shutdown runs against one deadline.** On `SIGINT` or `SIGTERM`, or when
+the handler calls [`request_stop()`](detach.md#stop-the-worker-request_stop), the worker
 marks itself not ready, calls `signal_stop` on every source, and then drains
 all sources concurrently against a single
 `executor.drain_timeout` budget. Whatever remains of that budget is

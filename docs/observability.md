@@ -159,9 +159,9 @@ Prometheus needed for a quick read.
 | `drakkar_partition_processor_deaths_total` | Counter | `partition`, `outcome` | Partition loops that exited on an unexpected error. `outcome="restarted"` came back; `outcome="dead"` gave up and now fails `/readyz`. Alert on any non-zero rate — see [Deployment](deployment.md#dead-partition-loops) |
 | `drakkar_backpressure_active` | Gauge | -- | Whether Kafka fetching is paused because queued messages reached `sources.kafka.max_queued_messages` (see [backpressure](performance.md#backpressure)). `1` = paused, `0` = flowing |
 | `drakkar_consume_pause_active` | Gauge | -- | Whether an operator [debug pause](consume-pause.md) from the Live page holds consuming. `1` = paused, `0` = flowing |
-| `drakkar_detached` | Gauge | -- | `1` while this worker is detached from its consumer group (`sources.kafka.detach`) |
-| `drakkar_detach_requests_total` | Counter | `origin`, `outcome` | Detach requests; the outcome is `detached` or the refusal reason |
-| `drakkar_attach_total` | Counter | `cause` | Returns to the consumer group after a detach, by cause |
+| `drakkar_detached` | Gauge | -- | `1` while this worker is [detached](detach.md) from its consumer group (`sources.kafka.detach`). While detached the worker has no partitions, so it has no `drakkar_consumer_lag` series |
+| `drakkar_detach_requests_total` | Counter | `origin`, `outcome` | Detach requests by origin (`handler`, `operator`); the outcome is `detached` or the refusal reason (see [Detach answers](detach.md#detach-answers)) |
+| `drakkar_attach_total` | Counter | `cause` | Returns to the consumer group after a detach, by cause: `handler`, `operator`, `deadline`, `lease_lost`, `too_few_workers`. A detach undone before the worker was detached does not count |
 | `drakkar_total_queued` | Gauge | -- | Total messages buffered in all partition queues plus in-flight tasks |
 | `drakkar_pending_tasks` | Gauge | -- | Tasks created and not yet settled: waiting for an executor slot, running, or in `on_task_complete` and its delivery. The actual count; reservations are not in it. New windows wait while it plus the reserved tasks reach `executor.max_pending_tasks`; it can pass the limit by the admitted window's fan-out beyond its estimate (normally one message) |
 | `drakkar_pending_bytes` | Gauge | -- | Bytes held for pending tasks and their results: task stdin plus stdout and stderr of results in hooks and delivery or kept for `on_group_complete`, `on_message_complete` and `on_window_complete`. The actual count, reservations not included; new windows wait while it plus the reserved bytes reach `executor.max_pending_bytes` |
@@ -171,7 +171,7 @@ Prometheus needed for a quick read.
 | `drakkar_queued_messages_dropped_at_stop_total` | Counter | -- | Polled messages left unarranged at stop or revoke; the next owner of the partition reads them again |
 | `drakkar_assigned_partitions` | Gauge | -- | Number of partitions currently assigned to this worker |
 | `drakkar_executor_idle_slot_seconds_total` | Counter | -- | Accumulated slot-seconds of executor idle time while messages are waiting in queues. If 2 slots sit idle for 3 seconds while messages are queued, this increments by 6. Only counts when messages are in queues (not yet dispatched), not when the worker has nothing to do. |
-| `drakkar_consumer_idle_seconds_total` | Counter | -- | Accumulated seconds with no messages available from Kafka and nothing in queues. Measures time the worker has genuinely nothing to do (consumer lag is zero). Does not count time when the consumer is paused due to backpressure. |
+| `drakkar_consumer_idle_seconds_total` | Counter | -- | Accumulated seconds with no messages available from Kafka and nothing in queues. Measures time the worker has genuinely nothing to do (consumer lag is zero). Does not count time when the consumer is paused due to backpressure, or time out of the consumer group after a [detach](detach.md). |
 
 #### Consumer
 
@@ -190,6 +190,12 @@ Prometheus needed for a quick read.
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `drakkar_rebalance_events_total` | Counter | `type` (`assign`, `revoke`) | Total Kafka rebalance events |
+
+A [detach](detach.md) and the attach after it each cause a rebalance of the
+group. The log events of the detach (`worker_detached`, `worker_attached`,
+`detach_refused`, `detach_lease_unconfirmed`, `detach_join_failed`,
+`detach_undone` and the others) are listed on the
+[Detach page](detach.md#metrics-events-and-log-events).
 
 #### Sinks
 
@@ -377,7 +383,7 @@ hits its deadline. With `autodiscover` off, an enabled exchange logs
 
 #### Fleet registry and provider operations
 
-Every call from the worker to a provider is one **operation**: the registry makes `start`, `publish`, `list`, `withdraw` and `stop`, and the election of [cluster periodic tasks](periodic-tasks.md#the-election) (the archive included) makes `start`, `acquire`, `refresh`, `is_held`, `release` and `stop`. With [provider `postgres`](recorder-postgres.md) the recorder makes `start`, `copy` and `partitions` with `feature="recorder"` and `provider="postgres"`; `drakkar_provider_call_duration_seconds` of `op="copy"` is the COPY duration. The lease reads of the [Autodiscover view](fleet.md#autodiscover-view) make `holder` with `feature="ui"`, through a caller and a breaker of their own. Retries and the circuit breaker are explained in [Fleet registry — Resilience](fleet.md#resilience).
+Every call from the worker to a provider is one **operation**: the registry makes `start`, `publish`, `list`, `withdraw` and `stop`, and the election of [cluster periodic tasks](periodic-tasks.md#the-election) (the archive included) makes `start`, `acquire`, `refresh`, `is_held`, `release` and `stop`. With [provider `postgres`](recorder-postgres.md) the recorder makes `start`, `copy` and `partitions` with `feature="recorder"` and `provider="postgres"`; `drakkar_provider_call_duration_seconds` of `op="copy"` is the COPY duration. The lease reads of the [Autodiscover view](fleet.md#autodiscover-view) make `holder` with `feature="ui"`, through a caller and a breaker of their own. A [detach](detach.md) makes `acquire`, `holder`, `refresh` and `release` on the slots of its budget with `feature="detach"`, also through a caller and a breaker of their own, and `start` when it is the first user of the election provider (that start logs `provider_started` with category `periodic`). Retries and the circuit breaker are explained in [Fleet registry — Resilience](fleet.md#resilience).
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
@@ -433,6 +439,8 @@ Log events of the start and the stop:
 | `ui_disabled_no_probes` | warning | `api.enabled` is `false`, so the worker serves no `/healthz` and `/readyz` for Kubernetes probes. Field `reason`; category `lifecycle`. Once at startup. |
 | `queued_messages_dropped_at_stop` | info | A partition loop stopped (a stop or a revoke) with polled messages that were not in a window. They are dropped, not arranged; their offsets were never registered, so the next owner of the partition reads them again. Fields `partition`, `count`, `first_offset` and `hint`; category `partition`. Counted in `drakkar_queued_messages_dropped_at_stop_total`. |
 | `partition_paused_on_death` | error | The poll loop paused partitions whose processing loop died. They stay paused until a restart or revoke, and their queues do not count toward `sources.kafka.max_queued_messages`. Field `partitions`; category `lifecycle`. `partition_death_pause_failed` (error, with `error`) when the pause call failed. |
+| `stop_requested` | warning | The handler called `request_stop()`: the worker shuts down as on `SIGTERM` and exits with the code after a clean shutdown. Fields `reason`, `exit_code`; category `lifecycle`. Once: a later call logs nothing. See [Detach](detach.md#stop-the-worker-request_stop). |
+| `stop_request_suppressed` | info | `request_stop()` was called inside a Message Probe run and did nothing. Fields `reason`, `exit_code`; category `debug`. |
 | `messages_polled_at_stop_dropped` | info | A stop arrived while a Kafka poll was in flight and the poll returned messages. The worker does not hand them to the partitions, whose loops are leaving; their offsets are not committed, so the next owner of each partition reads them again. Fields `count` and `partitions` (a sorted list); category `kafka`. |
 
 #### OOM / SIGKILL detection

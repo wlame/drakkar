@@ -835,7 +835,9 @@ async def on_revoke(self, partitions: list[int]) -> None
 ```
 
 Called when partitions are revoked from this worker during a rebalance.
-Use for cleanup (flushing buffers, saving state).
+Use for cleanup (flushing buffers, saving state). A [detach](detach.md) of
+this worker revokes every partition it holds, so this hook runs then too;
+`on_assign` runs again when the worker attaches.
 
 ```python
 async def on_revoke(self, partitions):
@@ -1264,6 +1266,43 @@ class MyHandler(dk.BaseDrakkarHandler[MyInput, MyOutput]):
 |------------------------|--------------------------------------------|
 | `'continue'` (default) | Log the error, keep running on schedule   |
 | `'stop'`               | Log the error, cancel this task permanently |
+
+---
+
+## Detach, attach and stop
+
+Four members let the handler take the worker out of its Kafka consumer group
+for a bounded time, bring it back, and stop the whole worker. They are not
+hooks: the handler calls them. The full rules, the answers and the risks are
+on [Detach from the Consumer Group](detach.md).
+
+| Member | What it does |
+|--------|--------------|
+| `await self.detach(duration=None, reason='')` | Leave the consumer group for `duration` seconds (`None`: `sources.kafka.detach.default_duration`; below 10 seconds or above `max_duration` raises `ValueError`). Returns a `DetachResult` (`detached`, `reason`, `until`) when the revoke drain has ended, or with a refusal reason. Needs `sources.kafka.detach.enabled`. |
+| `await self.attach(reason='')` | Join the consumer group again. Returns an `AttachResult` (`attached`, `reason`). It does not end an operator detach (`held_by_operator`). |
+| `self.detach_state` | The state now: `state` (`attached`, `detaching`, `detached`, `attaching`), `origin`, `reason`, `since`, `until`. |
+| `self.request_stop(reason='', exit_code=0)` | Shut the worker down gracefully, as on `SIGTERM`, and exit with `exit_code` (0 to 255). Not awaited; the first call wins. Works with the detach feature off. |
+
+`detach()` is refused with `inside_pipeline_hook` from code that runs as part
+of a partition's work: `arrange`, `arrange_stream`, the completion hooks,
+`on_error` and `on_delivery_error`, also through `asyncio.gather` or
+`asyncio.wait_for`. Call it from a periodic task, `on_assign`, `on_revoke`,
+the HTTP hooks, or a task the handler started itself. Inside a Message Probe
+run, `detach()` and `attach()` answer `probe` and `request_stop()` does
+nothing.
+
+```python
+@dk.periodic(30)
+async def leave_the_group_while_the_disk_is_slow(self):
+    seconds = await asyncio.to_thread(time_disk_write, DISK_PROBE_FILE)
+    if self.detach_state.state == 'attached' and seconds > SLOW_DISK_SECONDS:
+        result = await self.detach(duration=15 * 60, reason=f'disk write took {seconds:.1f}s')
+        if not result.detached and result.reason in ('budget_full', 'store_unavailable'):
+            self.request_stop(reason=f'detach refused: {result.reason}', exit_code=3)
+```
+
+A handler class that defines its own attribute named `detach`, `attach`,
+`detach_state` or `request_stop` hides the framework member of the same name.
 
 ---
 

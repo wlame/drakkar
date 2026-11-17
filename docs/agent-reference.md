@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `03d0e9ce03e445a0`.
+Registry version: `16fd24e36fc20e48`.
 
 ## Concepts
 
@@ -304,7 +304,7 @@ Each worker publishes a hash of its cluster task definitions in its card. Peers 
 
 A detached worker left its Kafka consumer group for a bounded time; its partitions go to the other workers of the group until it attaches again.
 
-The handler (`detach()`) or an operator (the Live page) can detach a worker with `sources.kafka.detach.enabled`. The worker takes one of `sources.kafka.detach.max_detached` lease slots in the autodiscover store, leaves the group, and waits until the revoke drain of its partitions has ended. It is then `detached`; the states on the way are `detaching` and `attaching`. The `origin` is `handler` or `operator`.
+The handler (`detach()`) or an operator (the Live page) can detach a worker with `sources.kafka.detach.enabled`. The worker takes one of the `sources.kafka.detach.max_detached` lease slots of its cluster and consumer group in the autodiscover store, leaves the group, and waits until the revoke drain of its partitions has ended. It is then `detached`; the states on the way are `detaching` and `attaching`. The `origin` is `handler` or `operator`.
 
 A detach is refused when fewer than `sources.kafka.detach.min_attached` attached workers of the group would remain, when every slot is held, or when the store does not answer. The group size comes from the registry cards; the held slots are counted in the store.
 
@@ -3317,7 +3317,7 @@ Find out why a worker is detached from its consumer group, when it comes back, a
 3. Read drakkar_detached, drakkar_detach_requests_total by origin and outcome, and drakkar_attach_total by cause. Why: They count the time away, the refusals by reason and what ended each detach.
 4. Read the log events worker_detached, worker_attached, detach_refused, detach_lease_unconfirmed, detach_join_failed and detach_undone. Why: worker_detached and worker_attached mark each detach and its end with the cause; detach_refused gives the refusal reason; detach_lease_unconfirmed means the store did not confirm the slot lease; detach_join_failed means a return to the group did not succeed yet and is tried again every 5 seconds; detach_undone means a detach failed before the worker was detached and was taken back.
 5. Read the lag of the partitions on the other workers of the group, not on this worker. Why: Lag belongs to a partition, not to a worker. A detached worker has no partitions and no lag metric of its own, so a rule that attaches when its own lag is low cannot work.
-6. Expect revokes on the other workers when this worker returns. Why: At the return the other workers give partitions back; each runs its revoke drain, and tasks that do not finish within executor.drain_timeout are cancelled and run again on the returning worker.
+6. Expect revokes on the other workers when this worker returns. Why: At the return the other workers give partitions back; each runs its revoke drain, and tasks that do not finish within executor.drain_timeout are cancelled and run again on the worker that gets the partition.
 
 **Causes:**
 - The deadline passed (attach cause deadline). Check: drakkar_attach_total{cause="deadline"} grew and worker_attached has cause deadline. Fix: Nothing to fix; ask for a longer duration up to sources.kafka.detach.max_duration if the worker needed more time.
@@ -3326,10 +3326,12 @@ Find out why a worker is detached from its consumer group, when it comes back, a
 - Too few workers of the group stayed attached (attach cause too_few_workers, or the refusal too_few_workers). Check: The registry shows fewer attached online workers of the group than sources.kafka.detach.min_attached. Fix: Start or repair the other workers, or lower min_attached on every worker of the group.
 - The detach was refused with budget_full. Check: Every one of the max_detached slots is held by another worker. Fix: Wait for a detached worker to return, or raise sources.kafka.detach.max_detached on every worker of the group.
 - The detach was refused with store_unavailable. Check: drakkar_provider_calls_total{feature="detach"} shows outcomes other than ok. Fix: Fix the autodiscover provider or its connection.
-- The detach was refused with leave_failed. Check: The revoke drain did not end within executor.drain_timeout plus 10 seconds; the worker joined the group again. Fix: Find the slow tasks or hooks that hold the drain; follow the tasks-slow recipe.
+- The detach was refused with leave_failed. Check: The revoke drain did not end within executor.drain_timeout plus 10 seconds, or the leave raised or was interrupted. The worker joins the group again; when that join does not succeed, detach_join_failed is logged and the join is tried again every 5 seconds. Fix: Find the slow tasks or hooks that hold the drain; follow the tasks-slow recipe.
 - The detach was refused with cooldown. Check: A handler detach came sooner than sources.kafka.detach.cooldown after the last return. Fix: Detach less often, or raise the cooldown so the group is not rebalanced so often.
 - The detach was refused with inside_pipeline_hook. Check: The handler called detach from code that runs as part of a partition's work, which would wait for itself. Fix: Call detach from a periodic task, from on_assign or on_revoke, or from a task the handler started itself.
-- The detach was refused with already_detached, join_failed, not_running, stopping or disabled. Check: already_detached means an operator detach is active; join_failed means the worker is still on its way back; not_running and stopping mean the Kafka source is not running; disabled means sources.kafka.detach.enabled is false or there is no Kafka source. Fix: Wait for the state to change, or turn the feature on.
+- The detach was refused with already_detached, join_failed, not_running, stopping or disabled. Check: already_detached means an operator detach is active; join_failed means the worker is still on its way back; not_running means the Kafka source has not finished its first poll; stopping means the worker is stopping; disabled means sources.kafka.detach.enabled is false or there is no Kafka source. Fix: Wait for the state to change, or turn the feature on.
+- An attach answered held_by_operator or join_failed. Check: held_by_operator means a handler attach met an operator detach, which only an operator, the deadline or a safety rule ends; join_failed means the join did not succeed within its bound, or an attach is already in progress, and the worker is still outside its group while the join is tried again every 5 seconds. Fix: Attach from the Live page for an operator detach; for join_failed, check the Kafka connection and the detach_join_failed lines.
+- A handler call answered probe. Check: The call ran inside a Message Probe run of the debug UI, where detach and attach change nothing; the answer never reaches a metric or the recorder. Fix: Nothing to fix.
 
 **Related:** `concept:detach`, `config:sources.kafka.detach.max_detached`, `config:sources.kafka.detach.min_attached`, `metric:drakkar_detached`, `metric:drakkar_detach_requests_total`, `metric:drakkar_attach_total`, `event:worker_detached`, `event:worker_attached`, `rule:worker-detached`, `route:GET /api/v1/debug/detach`, `route:POST /api/v1/debug/detach`, `route:POST /api/v1/debug/attach`
 

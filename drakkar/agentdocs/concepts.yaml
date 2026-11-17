@@ -359,7 +359,7 @@
 - key: detach
   summary: A detached worker left its Kafka consumer group for a bounded time; its partitions go to the other workers of the group until it attaches again.
   body: |-
-    The handler (`detach()`) or an operator (the Live page) can detach a worker with `sources.kafka.detach.enabled`. The worker takes one of `sources.kafka.detach.max_detached` lease slots in the autodiscover store, leaves the group, and waits until the revoke drain of its partitions has ended. It is then `detached`; the states on the way are `detaching` and `attaching`. The `origin` is `handler` or `operator`.
+    The handler (`detach()`) or an operator (the Live page) can detach a worker with `sources.kafka.detach.enabled`. The worker takes one of the `sources.kafka.detach.max_detached` lease slots of its cluster and consumer group in the autodiscover store, leaves the group, and waits until the revoke drain of its partitions has ended. It is then `detached`; the states on the way are `detaching` and `attaching`. The `origin` is `handler` or `operator`.
 
     A detach is refused when fewer than `sources.kafka.detach.min_attached` attached workers of the group would remain, when every slot is held, or when the store does not answer. The group size comes from the registry cards; the held slots are counted in the store.
 

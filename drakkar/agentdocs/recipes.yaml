@@ -425,7 +425,7 @@
     - do: Read the lag of the partitions on the other workers of the group, not on this worker.
       why: Lag belongs to a partition, not to a worker. A detached worker has no partitions and no lag metric of its own, so a rule that attaches when its own lag is low cannot work.
     - do: Expect revokes on the other workers when this worker returns.
-      why: At the return the other workers give partitions back; each runs its revoke drain, and tasks that do not finish within executor.drain_timeout are cancelled and run again on the returning worker.
+      why: At the return the other workers give partitions back; each runs its revoke drain, and tasks that do not finish within executor.drain_timeout are cancelled and run again on the worker that gets the partition.
   causes:
     - cause: The deadline passed (attach cause deadline).
       check: drakkar_attach_total{cause="deadline"} grew and worker_attached has cause deadline.
@@ -446,7 +446,7 @@
       check: drakkar_provider_calls_total{feature="detach"} shows outcomes other than ok.
       fix: Fix the autodiscover provider or its connection.
     - cause: The detach was refused with leave_failed.
-      check: The revoke drain did not end within executor.drain_timeout plus 10 seconds; the worker joined the group again.
+      check: The revoke drain did not end within executor.drain_timeout plus 10 seconds, or the leave raised or was interrupted. The worker joins the group again; when that join does not succeed, detach_join_failed is logged and the join is tried again every 5 seconds.
       fix: Find the slow tasks or hooks that hold the drain; follow the tasks-slow recipe.
     - cause: The detach was refused with cooldown.
       check: A handler detach came sooner than sources.kafka.detach.cooldown after the last return.
@@ -455,8 +455,14 @@
       check: The handler called detach from code that runs as part of a partition's work, which would wait for itself.
       fix: Call detach from a periodic task, from on_assign or on_revoke, or from a task the handler started itself.
     - cause: The detach was refused with already_detached, join_failed, not_running, stopping or disabled.
-      check: already_detached means an operator detach is active; join_failed means the worker is still on its way back; not_running and stopping mean the Kafka source is not running; disabled means sources.kafka.detach.enabled is false or there is no Kafka source.
+      check: already_detached means an operator detach is active; join_failed means the worker is still on its way back; not_running means the Kafka source has not finished its first poll; stopping means the worker is stopping; disabled means sources.kafka.detach.enabled is false or there is no Kafka source.
       fix: Wait for the state to change, or turn the feature on.
+    - cause: An attach answered held_by_operator or join_failed.
+      check: held_by_operator means a handler attach met an operator detach, which only an operator, the deadline or a safety rule ends; join_failed means the join did not succeed within its bound, or an attach is already in progress, and the worker is still outside its group while the join is tried again every 5 seconds.
+      fix: Attach from the Live page for an operator detach; for join_failed, check the Kafka connection and the detach_join_failed lines.
+    - cause: A handler call answered probe.
+      check: The call ran inside a Message Probe run of the debug UI, where detach and attach change nothing; the answer never reaches a metric or the recorder.
+      fix: Nothing to fix.
   related:
     - concept:detach
     - config:sources.kafka.detach.max_detached

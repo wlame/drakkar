@@ -37,6 +37,17 @@ Three pause actors share the consumer, with strict precedence rules:
 | Stall-paused partitions (`dlq.on_send_failure: stall`) and dead partitions | Never touched in either direction — they stay paused until restart/revoke |
 | Rebalance assigns new partitions during a pause | They arrive paused — a rebalance cannot leak messages past an active pause |
 
+### Pause or detach
+
+A pause keeps the partitions on this worker: lag grows, and nothing moves.
+A [detach](detach.md) gives the partitions to the other workers of the group
+for a bounded time: the other workers consume them, and the group rebalances
+once at the leave and once at the return. Use a pause to inspect a worker for
+a short time. Use a detach when the other workers should do this worker's
+work for a while. The two are independent: partitions that a worker receives
+when it attaches during an active pause arrive paused, like any other
+assignment during a pause.
+
 ---
 
 ## The Live page control
@@ -87,3 +98,5 @@ standard optional `ui.auth_token` gates all three, like every API route.
 - [Kafka Read API](kafka-read.md) — the natural companion (pause, then
   inspect messages at leisure)
 - [Configuration](configuration.md) — `ui.*` reference
+- [Detach from the Consumer Group](detach.md) — give the partitions to the
+  other workers for a bounded time

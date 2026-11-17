@@ -81,6 +81,7 @@ nav:
   - Agent Reference (every registry entry): agent-reference.md
   - Kafka Read API (inspect topics from the UI server): kafka-read.md
   - Consume Pause (timed debug pause from the Live page): consume-pause.md
+  - Detach (leave the consumer group for a bounded time): detach.md
   - Debugging Bottlenecks: debugging-bottlenecks.md
   - Runtime Health (event-loop lag watchdog): runtime-health.md
   - Host Pressure (NFS RTT, PSI, throttling): host-pressure.md

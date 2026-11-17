@@ -90,7 +90,7 @@ After `on_startup`, the framework builds all components in this order:
 
 13. **Starts the sources** in the same fixed order and logs `sources_starting` / `source_started`. The Kafka source subscribes to the topic and enters the poll loop; the HTTP source binds its socket. A source that fails to start is fatal: the worker logs `source_start_failed`, tears down, and stops.
 
-14. **Registers signal handlers** for `SIGINT` and `SIGTERM` that set `_running = False`, triggering graceful shutdown.
+14. **Registers signal handlers** for `SIGINT` and `SIGTERM` that set `_running = False`, triggering graceful shutdown. The handler's `request_stop()` takes the same path.
 
 ---
 
@@ -196,7 +196,9 @@ When Kafka's cooperative-sticky rebalancer assigns new partitions to this worker
 
 ### 2.2 On Revoke (Lost Partitions)
 
-When partitions are revoked (rebalance, scaling event):
+When partitions are revoked (rebalance, scaling event, or a
+[detach](detach.md) of this worker, which leaves the consumer group through
+this same path):
 
 The revoke callback **blocks until every revoked partition has drained and
 committed**. `AIOConsumer` runs rebalance callbacks via
@@ -712,7 +714,7 @@ When `committable()` returns a non-None offset:
 
 ## Phase 10: Graceful Shutdown
 
-When `_running` is set to False (via SIGINT, SIGTERM, or programmatic shutdown):
+When `_running` is set to False (via SIGINT, SIGTERM, the handler's [`request_stop()`](detach.md#stop-the-worker-request_stop), or programmatic shutdown):
 
 **Shutdown is driven per source.** The worker first marks itself not ready,
 then calls `signal_stop` on every enabled source and logs `sources_draining`.
@@ -767,7 +769,7 @@ follow describe what the **Kafka** source does inside its share of it.
 ### Step 7: Stop the Flight Recorder
 - If the UI is enabled: cancels background tasks (flush, rotation, state sync, sealing, archive pass), flushes any buffered events to SQLite, and seals the live file (rollback journal, meta file, close). The seal always runs. Moving the sealed file into `<storage.shared_dir>/history/<cluster>/` runs only while shutdown time remains (the rest of `executor.drain_timeout` after draining); otherwise the file stays in `storage.dir` and the next start moves it. See [Sealing](local-databases.md#sealing-and-the-history-folder).
 - An archive pass still running is asked to stop after its current window; the recorder waits for it until only `autodiscover.resilience.timeout` of the shutdown time is left (all of it without a registry), then leaves it (`recorder_archive_pass_abandoned`).
-- Then the election of cluster periodic tasks stops (one attempt, in the time left; a failure logs `periodic_election_stop_failed` and the shutdown goes on), the registry card is withdrawn, and the shared connections close.
+- Then a held [detach](detach.md) slot is given back (one attempt, in the time left; a failure logs `detach_slot_release_failed` and the lease ends by itself), and the election of cluster periodic tasks stops (one attempt, in the time left; a failure logs `periodic_election_stop_failed` and the shutdown goes on), the registry card is withdrawn, and the shared connections close.
 
 ### Step 8: Stop the UI Server
 - If the UI is enabled: stops the FastAPI server.

@@ -124,6 +124,9 @@ and numbers of the failed tasks. They show no secret and, unless
   [Security posture](security.md#the-agent-routes).
 - Turn on `agent.include_payloads` only when the agent may read task output:
   stderr and arguments can hold customer data.
+- The reason of a detach (the text that an operator or the handler gave, at
+  most 200 characters) is shown as written in the state part `detach` and in
+  the evidence of the rule `worker-detached`. Do not put secrets in it.
 - Nothing on the surface blocks the worker. Live state is read through the
   main loop with a time limit; a part that could not be read is `null`. The
   registry loads on a worker thread. Handler rules run on threads of their

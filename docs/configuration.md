@@ -40,6 +40,8 @@ A worker can run its main loop only: no API, no UI, no recorder, no autodiscover
 | Archive of sealed recorder files | `recorder.archive.enabled` | provider `sqlite`, `storage.dir` |
 | Autodiscover (registry and election) | `autodiscover.enabled` | `autodiscover.provider`, `api.enabled`; provider `filesystem` needs `storage.shared_dir`; `consul`, `postgres` and `redis` need `connections.<provider>.<autodiscover.connection>` |
 | Cluster-scope periodic tasks | declared in code with `scope='cluster'` | `autodiscover` |
+| [Detach](detach.md) from the consumer group | `sources.kafka.detach.enabled` | `autodiscover` (with the Kafka source on) |
+| Operator detach routes and Live-page control | `ui.detach_enabled` | `sources.kafka.detach.enabled` |
 | Cache | `cache.enabled` | `storage.dir` for persistence |
 | Cache exchange | `cache.exchange.enabled` | `cache.enabled`, `storage.dir`, `autodiscover` |
 | Cluster-wide archive | `recorder.archive.enabled` | `autodiscover` and `storage.shared_dir` (otherwise the archive takes this worker's files only) |
@@ -559,6 +561,30 @@ Tuning:
 - **Larger fleets**: keep `startup_align.interval: 10s` (default). It works well up to dozens of workers.
 - **Slow-init workers** (seconds of migrations): raise `startup_align.min_wait` so the boundary is likely to fall AFTER the slowest worker's init.
 - **Very small clusters / dev iteration**: set `startup_align.enabled: false` to skip the pause entirely.
+
+#### Detach (`sources.kafka.detach`) {#kafka-detach}
+
+Let a running worker leave its consumer group for a bounded time and join it
+again without a restart. The feature, the handler API, the operator control
+and the risks are on [Detach from the Consumer Group](detach.md).
+
+| Field | Type | Default | Constraints | Description |
+|-------|------|---------|-------------|-------------|
+| `enabled` | `bool` | `false` | needs `autodiscover.enabled` with the Kafka source on | Turn the feature on. The budget of detached workers is kept in the autodiscover store. |
+| `max_detached` | `int` | `1` | 1 to 100 | How many workers of one consumer group may be detached at once. Use one value on every worker of the group. |
+| `min_attached` | `int` | `1` | 1 to 1000 | How many other workers of the group must stay attached. Use one value on every worker of the group. |
+| `default_duration` | duration | `1h` | `10s` to `7d`, at most `max_duration` | How long a detach lasts when the request gives no duration. |
+| `max_duration` | duration | `24h` | `10s` to `7d` | The longest detach a request may ask for. |
+| `cooldown` | duration | `5m` | `0` (none) to `1d` | The shortest time between the return of a detach and the next handler detach. An operator detach does not wait for it. |
+| `lease` | duration | `1m` | whole seconds, `40s` to `1d` | The lease of the budget slot in the store. A detached worker attaches again when its lease was not confirmed for this long. |
+
+The load fails with
+`sources.kafka.detach.enabled needs autodiscover.enabled: the budget of detached workers is kept in the autodiscover store`
+(with the Kafka source on), with
+`sources.kafka.detach.default_duration (<v>) must be <= sources.kafka.detach.max_duration (<v>)`,
+and with `ui.detach_enabled needs sources.kafka.detach.enabled`. The checks run
+again after `on_startup`. Env overrides: `DK_SOURCES__KAFKA__DETACH__ENABLED`,
+`DK_SOURCES__KAFKA__DETACH__MAX_DETACHED`, and so on.
 
 ### HTTP source (`sources.http`)
 
@@ -1383,6 +1409,8 @@ The UI's auth is **opt-in by default**. With `ui.enabled: true` and `ui.auth_tok
 | `POST /api/v1/debug/merge` | Writes a new `merged-<ts>-<token>.db` into `<storage.shared_dir>/merged/` (`<storage.dir>/merged/` with no shared folder). The archive pass deletes it after `recorder.archive.merged_retention` (default `32d`); with archiving off, or with that set to `0`, nothing reclaims it, so repeated calls grow unbounded. | `ui.merge_enabled: false` |
 | `DELETE /api/v1/debug/files/{path}` | Deletes one merge result, `merged/<name>.db`, from the [Databases view](databases-view.md). Sealed files, archives and every other file are never deleted from the UI. | `ui.delete_enabled: false` (the default) |
 
+Two more groups of routes change the worker, and both are off by default: the [consume pause](consume-pause.md) (`ui.consume_pause.enabled`) and the [operator detach](detach.md#the-operator-control) (`ui.detach_enabled`), whose `POST /api/v1/debug/detach` takes the worker out of its Kafka consumer group for a bounded time. The startup warning does not name them.
+
 The probe and the merge default to `true`; the delete defaults to `false`. Each returns `403` with `{"error": "..."}` naming the config key when switched off. The switches are deliberately independent of `auth_token` in both directions: a deployment that cannot set a token can still close the endpoints, and a deployment that has one can still close them as defence in depth — a valid token is not the same as consent to burn executor slots on demand. The startup warning names whichever of the three is still enabled, so an operator who has already closed them is not warned about exposure they do not have.
 
 To require auth on the protected endpoints (database download, merge, message probe) and the WebSocket live-event stream, set a strong token:
@@ -1466,6 +1494,12 @@ Timed debug pause of message intake, driven from the Live page — see the dedic
 |-------|------|---------|-------------|
 | `enabled` | `bool` | `false` | Serve the consume-pause API (`/api/v1/debug/consume-pause`) and show the pause control on the Live page. Off by default: pausing stops message intake for the chosen duration, which is a production-affecting act — enable it deliberately, for debug-friendly deployments. |
 | `durations` | `list[duration]` | `[15s, 1m, 5m, 15m]` | Preset pause durations offered as one-click buttons on the Live page, each a whole number of seconds. Each preset must sit in the same `1s` to `1h` range the API enforces; the API itself accepts any duration in that range regardless of the presets. |
+### Operator Detach (`ui.detach_enabled`)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `detach_enabled` | `bool` | `false` | Serve `POST /api/v1/debug/detach` and `POST /api/v1/debug/attach` and show the Detach control on the Live page. Needs `sources.kafka.detach.enabled`. Off: both routes answer `403`. `GET /api/v1/debug/detach` and the banner of a detached worker do not depend on it. Off by default: a detach takes the worker out of its consumer group. See [Detach from the Consumer Group](detach.md#the-operator-control). |
+
 ### Message Probe (`ui.probe:`)
 
 The switch of the Message Probe (`enabled`, default `true`) and the write caps for its

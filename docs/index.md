@@ -117,6 +117,7 @@ Each partition runs an independent pipeline: **poll &rarr; arrange &rarr; execut
 - **[Host pressure](host-pressure.md)** -- CPU / cgroup / memory / network-mount pressure sampling that answers "which shared resource is this worker fighting for?"
 - **[Offload](offload.md)** -- `await self.offload(fn, ...)` runs CPU-bound hook work on a thread pool instead of freezing the event loop
 - **[Consume pause](consume-pause.md)** -- opt-in timed pause of message intake from the Live page, auto-resuming at its deadline
+- **[Detach](detach.md)** -- opt-in: a worker leaves its Kafka consumer group for a bounded time and joins it again without a restart, asked by the handler or from the Live page; a budget in the autodiscover store limits how many workers of a group are away
 - **[Kafka read API](kafka-read.md)** -- inspect the worker's topics from the operator UI without touching any consumer group
 - **[Recorder archiving](observability.md#archiving)** -- flight-recorder databases rotate into gzip archives, downloadable from the UI
 - **[Error hooks](handler.md#on_error)** -- [on_error](handler.md#on_error) for executor failures, [on_delivery_error](handler.md#on_delivery_error) for sink failures (retry, skip, or DLQ)
@@ -253,6 +254,7 @@ Scale horizontally by running multiple instances with the same `consumer_group`.
 | [Operator UI Reference](ui-reference.md) | Every value the operator UI shows, page by page: meaning, source, refresh, and the matching Prometheus metric |
 | [Kafka Read API](kafka-read.md) | Debug endpoints for reading Kafka topics from the API server — fetch one message by coordinates or stream a time window, invisible to the pipeline |
 | [Consume Pause](consume-pause.md) | Timed Live-page pause of message intake for inspecting a live worker; auto-resumes at its deadline |
+| [Detach](detach.md) | Leave the Kafka consumer group for a bounded time and join it again: the handler API, the operator control, the budget, `request_stop` and the risks |
 | [Debugging Bottlenecks](debugging-bottlenecks.md) | Runbook for a worker that periodically looks stuck: the recorded signals and what each combination means |
 | [Runtime Health](runtime-health.md) | Event-loop lag monitor: heartbeat, stall sampler, state badge, Prometheus metrics |
 | [Host Pressure](host-pressure.md) | CPU / cgroup / memory / network-mount pressure sampling with episode verdicts — which shared resource the worker is fighting for |

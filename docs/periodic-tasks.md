@@ -38,6 +38,14 @@ class MyHandler(BaseDrakkarHandler[MyInput, MyOutput]):
 A cluster task needs an [election provider](#the-election) that every worker
 of the cluster can reach. The default provider uses the shared folder.
 
+A `worker` task is the usual place for a handler [detach](detach.md): it
+runs outside the work of the partitions, so `self.detach()` is allowed there,
+and it keeps running while the worker is detached. The page
+[Detach](detach.md#example-leave-the-group-while-the-disk-is-slow) has an
+example, and the harness handler (`integration/worker/handler.py`) has the
+task `detach_on_request`. A detached worker still takes part in the
+election of cluster tasks and can win their slots.
+
 ## The decorator
 
 ```python
@@ -259,8 +267,10 @@ The details of each provider are on
 
 The provider is made at startup only when the worker runs at least one
 cluster task (an archive over a worker's [own files](local-databases.md#archive-scopes)
-is not one), and it starts at the first slot that needs it, not at worker
-start. Tasks whose first slots come in the same second start it once. It
+is not one) or has [detach](detach.md) on, and it starts at the first slot or
+detach that needs it, not at worker start. The budget of detached workers
+uses the same store: its slots are leases with the scopes
+`<cluster>/detach.<group key>_<i>`, beside the task locks. Tasks whose first slots come in the same second start it once. It
 stops at shutdown, after the recorder. Cluster tasks need no UI: a worker
 with `ui.enabled: false` runs them too.
 
