@@ -232,7 +232,7 @@ def _loop_in_thread(*, running: bool) -> Iterator[asyncio.AbstractEventLoop]:
         if thread is not None:
             loop.call_soon_threadsafe(loop.stop)
         else:
-            # The loop wakes up late: the queued dispatch runs and finds its request given up.
+            # The loop wakes up late and runs every call queued on it while it slept.
             thread = threading.Thread(target=loop.run_until_complete, args=(asyncio.sleep(0.01),), daemon=True)
             thread.start()
         thread.join(timeout=5)
@@ -263,15 +263,54 @@ async def test_attach_runs_the_request_on_the_main_loop_of_another_thread():
 async def test_post_routes_answer_503_when_the_main_loop_does_not_answer(monkeypatch):
     monkeypatch.setattr(server_module, 'MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS', 0.05)
     app = _app(_config())
+    controller = app.detach
+    requested: list[str] = []
+    real_request = controller.request
+
+    def recording_request(**kwargs: Any) -> None:
+        requested.append(kwargs['action'])
+        real_request(**kwargs)
+
+    controller.request = recording_request
     with _loop_in_thread(running=False) as stuck_loop:
         app.main_loop = stuck_loop
         async with _client(app) as client:
             detach = await client.post(DETACH, json={'duration_seconds': 60})
             attach = await client.post(ATTACH)
+    # The loop ran once at the end of the block: a request answered 503 is not run later.
 
     assert (detach.status_code, attach.status_code) == (503, 503)
     assert 'did not answer in time' in detach.json()['detail']
-    assert app.detach._tasks == set()
+    assert requested == []
+    assert controller.wire_state()['last_request'] is None
+
+
+async def test_a_request_that_began_before_the_time_limit_runs_although_the_answer_is_503(monkeypatch):
+    """The one case a 503 cannot rule out: the request began on the main loop, then the limit passed."""
+    monkeypatch.setattr(server_module, 'MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS', 0.05)
+    app = _app(_config())
+    began = threading.Event()
+    release = threading.Event()
+    requested: list[str] = []
+
+    def blocking_request(**kwargs: Any) -> None:
+        requested.append(kwargs['action'])
+        began.set()
+        # Hold the main loop past the time limit of the route.
+        release.wait(5)
+
+    app.detach.request = blocking_request
+    with _loop_in_thread(running=True) as main_loop:
+        app.main_loop = main_loop
+        try:
+            async with _client(app) as client:
+                resp = await client.post(ATTACH)
+            assert began.is_set()
+        finally:
+            release.set()
+
+    assert resp.status_code == 503
+    assert requested == ['attach']
 
 
 async def test_post_routes_answer_503_when_the_main_loop_is_closed():

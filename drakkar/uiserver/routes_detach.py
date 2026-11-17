@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 from collections.abc import Coroutine
 from typing import TYPE_CHECKING, Any
 
@@ -70,14 +71,20 @@ def _duration_error(message: str) -> JSONResponse:
     return JSONResponse({'detail': [error]}, status_code=422)
 
 
-async def _dispatch_start(coro: Coroutine[Any, Any, dict[str, Any]], main_loop: Any) -> JSONResponse:
+async def _dispatch_start(
+    coro: Coroutine[Any, Any, dict[str, Any]], main_loop: Any, abandoned: threading.Event
+) -> JSONResponse:
     """Run ``coro`` on the main loop and answer 202 with its state, or 503 when the loop does not answer.
 
     The wait is bounded like every UI read: a wedged main loop gives a 503,
-    not a request that hangs. Giving up is safe because ``coro`` only starts
-    a background transition. A closed loop (a stop) raises ``RuntimeError``
-    before ``coro`` is scheduled; it is closed then, so no warning about a
-    coroutine that was never awaited is raised.
+    not a request that hangs. A timeout does not remove ``coro`` from the
+    main loop's queue: the loop runs it whenever it wakes. So ``abandoned``
+    is set before the 503 goes out, and ``coro`` checks it before it starts
+    anything; a request answered 503 is not run later. Only a request whose
+    step had already begun on the main loop when the limit passed still runs.
+    A closed loop (a stop) raises ``RuntimeError`` before ``coro`` is
+    scheduled; it is closed then, so no warning about a coroutine that was
+    never awaited is raised.
     """
     try:
         state = await asyncio.wait_for(
@@ -86,6 +93,7 @@ async def _dispatch_start(coro: Coroutine[Any, Any, dict[str, Any]], main_loop: 
             timeout=server_module.MAIN_LOOP_DISPATCH_TIMEOUT_SECONDS,
         )
     except (TimeoutError, RuntimeError) as exc:
+        abandoned.set()
         if inspect.getcoroutinestate(coro) == inspect.CORO_CREATED and isinstance(exc, RuntimeError):
             coro.close()
         await logger.awarning(
@@ -110,11 +118,27 @@ def create_detach_router(deps: UIDeps) -> APIRouter:
         kafka = config.sources.kafka
         return bool(config.ui.detach_enabled and kafka.enabled and kafka.detach.enabled)
 
-    async def _start(action: str, *, duration: float | None = None, reason: str = '') -> dict[str, Any]:
-        """Start the transition and read the state; runs on the main loop, which owns the controller."""
+    async def _start(
+        action: str, *, abandoned: threading.Event, duration: float | None = None, reason: str = ''
+    ) -> dict[str, Any]:
+        """Start the transition and read the state; runs on the main loop, which owns the controller.
+
+        No ``await`` comes before ``request()``: the check of ``abandoned`` and
+        the start run in one step of the main loop.
+        """
         controller = drakkar_app.detach
-        controller.request(action=action, duration=duration, reason=reason)
+        if not abandoned.is_set():
+            controller.request(action=action, duration=duration, reason=reason)
         return controller.wire_state()
+
+    async def _dispatch(action: str, *, duration: float | None = None, reason: str = '') -> JSONResponse:
+        """Start ``action`` on the main loop with a flag of its own that a 503 sets."""
+        abandoned = threading.Event()
+        return await _dispatch_start(
+            _start(action, abandoned=abandoned, duration=duration, reason=reason),
+            drakkar_app.main_loop,
+            abandoned,
+        )
 
     @router.get('/api/v1/debug/detach')
     async def detach_state():
@@ -130,16 +154,13 @@ def create_detach_router(deps: UIDeps) -> APIRouter:
             check_duration(body.duration_seconds, drakkar_app.config.sources.kafka.detach)
         except ValueError as exc:
             return _duration_error(str(exc))
-        return await _dispatch_start(
-            _start(ACTION_DETACH, duration=body.duration_seconds, reason=body.reason[:REASON_MAX_CHARS]),
-            drakkar_app.main_loop,
-        )
+        return await _dispatch(ACTION_DETACH, duration=body.duration_seconds, reason=body.reason[:REASON_MAX_CHARS])
 
     @router.post('/api/v1/debug/attach')
     async def attach_start():
         """Start an operator attach and answer 202 at once; on an attached worker it changes nothing."""
         if not _routes_enabled():
             return _disabled_response()
-        return await _dispatch_start(_start(ACTION_ATTACH), drakkar_app.main_loop)
+        return await _dispatch(ACTION_ATTACH)
 
     return router

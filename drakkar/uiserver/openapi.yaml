@@ -1394,7 +1394,9 @@ paths:
         '503':
           description: >-
             The worker's main loop did not answer within 5 s, or is closed
-            because the worker stops. The request may or may not have started; read the GET.
+            because the worker stops. A request answered 503 is not run
+            later; in a rare race it may already have started, so a client
+            reads the GET before it asks again.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Detail'}
@@ -1427,7 +1429,9 @@ paths:
         '503':
           description: >-
             The worker's main loop did not answer within 5 s, or is closed
-            because the worker stops. The request may or may not have started; read the GET.
+            because the worker stops. A request answered 503 is not run
+            later; in a rare race it may already have started, so a client
+            reads the GET before it asks again.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Detail'}
