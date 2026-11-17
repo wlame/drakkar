@@ -1354,8 +1354,10 @@ paths:
       description: >-
         v1.33. An operator detach. The route does not wait for the detach,
         which can take executor.drain_timeout and more: it starts the
-        transition and answers 202 with the state at once. The outcome shows
-        later in last_request. An operator detach of a worker that the
+        transition and answers 202 at once. The 202 body is the state at the
+        moment the request was accepted, before it takes effect, so state and
+        last_request are usually unchanged in it; a client polls the GET to
+        see the transition and the outcome in last_request. An operator detach of a worker that the
         handler detached takes the origin and replaces the deadline. 403
         when ui.detach_enabled is false or the worker has no Kafka source;
         422 for a duration out of range or a body that does not parse (with
@@ -1379,7 +1381,10 @@ paths:
               required: [duration_seconds]
       responses:
         '202':
-          description: The transition started; the state at once.
+          description: >-
+            The transition started. The body is the state at the moment the
+            request was accepted, before it takes effect: state and
+            last_request are usually unchanged. Poll the GET for the change.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/DetachState'}
@@ -1408,14 +1413,19 @@ paths:
       operationId: postAttach
       summary: Join the consumer group again
       description: >-
-        v1.33. An operator attach, started like a detach; answers 202 with
-        the state at once. Idempotent: on an attached worker it changes
+        v1.33. An operator attach, started like a detach; answers 202 at once
+        with the state at the moment the request was accepted (state and
+        last_request usually unchanged; a client polls the GET to see the
+        transition). Idempotent: on an attached worker it changes
         nothing. 403 when ui.detach_enabled is false or the worker has no
         Kafka source; 503 when the worker's main loop does not answer within
         5 s or is closed.
       responses:
         '202':
-          description: The transition started; the state at once.
+          description: >-
+            The transition started. The body is the state at the moment the
+            request was accepted, before it takes effect: state and
+            last_request are usually unchanged. Poll the GET for the change.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/DetachState'}
@@ -2057,7 +2067,9 @@ components:
       required: [status]
 
     Detail:
-      description: Standard error envelope for 401/404/500/503.
+      description: >-
+        Standard error envelope for 401/403/404/500/503 (403: the detach and
+        attach routes with ui.detach_enabled off).
       type: object
       properties:
         detail: {type: string}
