@@ -28,12 +28,13 @@
 #      (SIGKILL): its slot stays held until the lease ends. A detach of
 #      worker-3 right after the kill is `budget_full`. worker-2 is started
 #      again, and while it starts a detach of worker-3 is asked again every
-#      few seconds (`store_unavailable` counts as a try, not a failure)
+#      few seconds (`store_unavailable` and an outcome that could not be
+#      read count as a try, not a failure)
 #      until it succeeds; worker-2 must be `attached` with partitions within
 #      RESTART_LIMIT_SECONDS of its start. Every time is the time of the
 #      ask, taken on the host right before the POST, from the kill: the ask
 #      that succeeds comes no earlier than the lease minus one lease refresh
-#      (lease / 3) minus 1 s, and the asks stop with a FAIL after the lease
+#      (lease / 3) minus 2 s, and the asks stop with a FAIL after the lease
 #      plus SLOT_FREE_GRACE_SECONDS. When worker-2 was back before that
 #      earliest time, at least one ask after its return must be
 #      `budget_full`: a restarted worker must not free its old slot.
@@ -154,7 +155,9 @@ sys.exit(1)
 # Sets ASK_BEFORE (the at_ms of last_request before the ask, for
 # await_outcome) and ASK_AT (the host time right before the POST that was
 # taken). A 503 means the main loop did not answer in time: when the GET
-# then shows a newer request the ask was taken, else it is sent once more.
+# then shows a newer request, or the state `detaching` or `attaching` (a
+# transition runs, and last_request is written only when it ends), the ask
+# was taken; else it is sent once more.
 ask_detach() {
     ask_route "$1" detach "{\"duration_seconds\": $2, \"reason\": \"$3\"}"
 }
@@ -178,7 +181,7 @@ ask_route() {
             503)
                 warn "POST /api/v1/debug/${route} on port ${port} answered 503 (try ${try}): ${answer%$'\n'*}"
                 sleep 1
-                if request_newer_than "$port" "$ASK_BEFORE"; then
+                if request_newer_than "$port" "$ASK_BEFORE" || transition_runs "$port"; then
                     return 0
                 fi
                 ;;
@@ -186,6 +189,14 @@ ask_route() {
         esac
     done
     fail "POST /api/v1/debug/${route} on port ${port} answered 503 twice, and the state shows no new request (last_request: $(detach_field "$port" last_request))"
+}
+
+# True when the worker on host port $1 is in the state `detaching` or
+# `attaching`: a request was taken and its transition still runs.
+transition_runs() {
+    local state
+    state=$(detach_field "$1" state)
+    [ "$state" = '"detaching"' ] || [ "$state" = '"attaching"' ]
 }
 
 # True when the last request of the worker on host port $1 is newer than
@@ -352,8 +363,13 @@ LEAVE_LIMIT_SECONDS=$((DRAIN_TIMEOUT_SECONDS + 15))
 # A successful detach records its outcome only when its leave has ended.
 OUTCOME_LIMIT_SECONDS=$LEAVE_LIMIT_SECONDS
 # The slot lease is refreshed every lease / 3 seconds, so a killed holder
-# refreshed it at most this long before the kill.
-LEASE_REFRESH_SECONDS=$((LEASE_SECONDS / 3))
+# refreshed it at most this long before the kill, and its lease ends no
+# earlier than the lease minus this after the kill. The earliest time an ask
+# may win the slot keeps a margin of EARLIEST_MARGIN_SECONDS, because ASK_AT
+# is taken before the POST and the store call comes after it.
+EARLIEST_MARGIN_SECONDS=2
+EARLIEST_SLOT_SECONDS=$(python3 -c 'import sys; lease = float(sys.argv[1]); print(f"{lease - lease / 3 - float(sys.argv[2]):.2f}")' \
+    "$LEASE_SECONDS" "$EARLIEST_MARGIN_SECONDS")
 log "worker-2: executor.drain_timeout ${DRAIN_TIMEOUT_SECONDS}s, sources.kafka.detach.lease ${LEASE_SECONDS}s"
 
 all_attached_and_holding() {
@@ -458,7 +474,7 @@ outcome=$(await_outcome "$W2_UI" "$ASK_BEFORE" "$OUTCOME_LIMIT_SECONDS") \
 
 log "killing worker-2"
 kill_at=$(epoch_now)
-"${COMPOSE[@]}" kill worker-2 >/dev/null 2>&1
+"${COMPOSE[@]}" kill worker-2 >/dev/null 2>&1 || fail "docker compose kill worker-2 failed"
 worker2_killed=true
 
 ask_detach "$W3_UI" 60 "harness detach after a kill"
@@ -473,7 +489,9 @@ ok "worker-3 refused with budget_full for the ask ${asked}s after the kill"
 log "starting worker-2"
 # docker start, not docker compose start: compose would first run the
 # one-shot dependencies of the worker again, which takes half a minute.
-docker start "$(container_id worker-2)" >/dev/null
+worker2_container=$(container_id worker-2) || fail "the container of worker-2 could not be found to start it again"
+[ -n "$worker2_container" ] || fail "the container of worker-2 could not be found to start it again (empty id)"
+docker start "$worker2_container" >/dev/null || fail "docker start of the container ${worker2_container} of worker-2 failed"
 worker2_killed=false
 started_at=$SECONDS
 attached_with_partitions_after_start() {
@@ -485,12 +503,14 @@ attached_with_partitions_after_start() {
 # depend on how long the start takes. Every time is the time of the ask from
 # the kill: an outcome is recorded only when the leave of a successful
 # detach has ended, so the time of the answer would add the leave to it.
-earliest=$((LEASE_SECONDS - LEASE_REFRESH_SECONDS - 1))
+earliest=$EARLIEST_SLOT_SECONDS
 slot_free_limit=$((LEASE_SECONDS + SLOT_FREE_GRACE_SECONDS))
 outcomes=()
 back_at=''
 full_after_back=0
+budget_full=0
 store_unavailable=0
+unreadable=0
 while true; do
     if [ -z "$back_at" ] && attached_with_partitions_after_start; then
         back_at=$(epoch_now)
@@ -503,12 +523,22 @@ while true; do
     outcomes+=("${asked}s:${outcome//\"/}")
     case "$outcome" in
         '"detached"') break ;;
-        '"budget_full"') [ -z "$back_at" ] || full_after_back=$((full_after_back + 1)) ;;
+        '"budget_full"')
+            budget_full=$((budget_full + 1))
+            [ -z "$back_at" ] || full_after_back=$((full_after_back + 1))
+            ;;
         '"store_unavailable"') store_unavailable=$((store_unavailable + 1)) ;;
+        # The outcome could not be read this time: a try, not a failure.
+        unreachable) unreadable=$((unreadable + 1)) ;;
         *) fail "the detach of worker-3 asked ${asked}s after the kill ended ${outcome}, expected budget_full, store_unavailable or detached (asks: ${outcomes[*]})" ;;
     esac
-    at_least_after "$ASK_AT" "$slot_free_limit" "$kill_at" \
-        && fail "worker-3 could not detach ${slot_free_limit}s after the kill of worker-2: the dead lease of ${LEASE_SECONDS}s still holds the slot (asks: ${outcomes[*]})"
+    if at_least_after "$ASK_AT" "$slot_free_limit" "$kill_at"; then
+        counts="${budget_full} budget_full, ${store_unavailable} store_unavailable, ${unreadable} unreadable outcomes"
+        if [ "$budget_full" -gt 0 ]; then
+            fail "worker-3 could not detach ${slot_free_limit}s after the kill of worker-2 (${counts}): the dead lease of ${LEASE_SECONDS}s still holds the slot (asks: ${outcomes[*]})"
+        fi
+        fail "worker-3 could not detach ${slot_free_limit}s after the kill of worker-2 (${counts}): no ask was answered budget_full, so the store or the read of the outcome failed on every ask (asks: ${outcomes[*]})"
+    fi
     sleep "$RETRY_SECONDS"
 done
 slot_free_seconds=$asked
@@ -531,7 +561,7 @@ if [ -z "$back_at" ]; then
 fi
 back_seconds=$(seconds_between "$kill_at" "$back_at")
 ok "worker-2 started again: attached and holds $(held_partitions "$W2_METRICS") partitions, seen ${back_seconds}s after the kill"
-ok "the slot was free for worker-3 on the ask ${slot_free_seconds}s after the kill (worker-2 back at ${back_seconds}s; ${full_after_back} budget_full and ${store_unavailable} store_unavailable after its return; asks: ${outcomes[*]})"
+ok "the slot was free for worker-3 on the ask ${slot_free_seconds}s after the kill, not before ${earliest}s (worker-2 back at ${back_seconds}s; ${full_after_back} budget_full after its return; ${store_unavailable} store_unavailable and ${unreadable} unreadable outcomes in all; asks: ${outcomes[*]})"
 
 ask_attach "$W3_UI"
 attached_with_partitions_w3() {
@@ -567,4 +597,4 @@ POLL_SECONDS=1 wait_until "$ATTACH_LIMIT_SECONDS" holds_some "$W3_METRICS" \
     || fail "worker-3 holds no partition ${ATTACH_LIMIT_SECONDS}s after the deadline attach: $(describe "$W3_UI" "$W3_METRICS")"
 ok "the handler detach of worker-3 ended by its deadline (seen ${handler_lag}s after until_ms)"
 
-pass "leave ${leave_seconds}s with ${moved} partitions moved, others held all ${TOPIC_PARTITIONS} after ${takeover_seconds}s; budget_full while one is away; attach back with partitions after ${return_seconds}s; deadline attach seen ${deadline_lag}s after until; slot of a killed worker free on the ask ${slot_free_seconds}s after the kill (worker-2 back at ${back_seconds}s, ${full_after_back} budget_full and ${store_unavailable} store_unavailable after it); handler detach ended by its deadline"
+pass "leave ${leave_seconds}s with ${moved} partitions moved, others held all ${TOPIC_PARTITIONS} after ${takeover_seconds}s; budget_full while one is away; attach back with partitions after ${return_seconds}s; deadline attach seen ${deadline_lag}s after until; slot of a killed worker free on the ask ${slot_free_seconds}s after the kill (worker-2 back at ${back_seconds}s, ${full_after_back} budget_full after it, ${store_unavailable} store_unavailable and ${unreadable} unreadable outcomes in all); handler detach ended by its deadline"
