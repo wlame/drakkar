@@ -506,7 +506,7 @@
 
     Each task gets `task.group`. A replacement task from `on_error` joins the group of the task it replaces and gets that task's source offsets. When the group ends, `succeeded + failed + replaced` is the number of tasks ever scheduled in it.
 
-    `labels` holds, for each name of the handler class attribute `group_labels`, the values of that label on the yielded tasks in list order, one per task that has it (a list, so equal values stay). `notes` takes only `str`, `int`, `float` and `bool` values; another type is removed when the group ends, with one `log:group_notes_invalid` line.
+    `labels` holds, for each name of the handler class attribute `group_labels`, the values of that label on the yielded tasks in list order, one per task that has it (a list, so equal values stay). `notes` takes only `str`, `int`, finite `float` and `bool` values; another value is removed when the group ends, with one `log:group_notes_invalid` line.
 
     The group lives until `on_message_complete`, which gets every group in `MessageGroup.groups`. In stream mode `MessageGroup.tasks`, `results` and `errors` are empty and the counters are the sums over the groups.
 

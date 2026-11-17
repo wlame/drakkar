@@ -485,7 +485,7 @@
     - config:dlq.on_send_failure
 
 - key: log:group_notes_invalid
-  summary: A group note held a value that is not a str, int, float or bool; the note was removed.
+  summary: A group note held a value that is not a str, int, finite float or bool; the note was removed.
   when: When a group ends, after on_group_complete or when its last task settled.
   fields:
     offset: The offset of the message.

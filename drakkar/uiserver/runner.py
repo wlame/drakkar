@@ -1869,7 +1869,7 @@ class DebugRunner:
         return ProbeStageResult(duration_seconds=duration, collect_result=result)
 
     def _drop_invalid_group_notes(self, *, state: RunState, group: TaskGroup) -> None:
-        """Remove the notes of other types than str, int, float and bool, and report their keys."""
+        """Remove the notes that are not a str, int, finite float or bool, and report their keys."""
         invalid = drop_invalid_notes(group)
         if invalid:
             self._record_error(
@@ -1878,7 +1878,7 @@ class DebugRunner:
                     state=state,
                     stage=f'on_group_complete:{group.index}',
                     exception_class='TypeError',
-                    message=f'group.notes values must be str, int, float or bool; dropped keys: {", ".join(invalid)}',
+                    message=f'group.notes values must be str, int, finite float or bool; dropped keys: {", ".join(invalid)}',
                 ),
             )
 

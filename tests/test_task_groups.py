@@ -77,6 +77,14 @@ def test_drop_invalid_notes_removes_subclasses_of_scalars(msg):
     assert set(group.notes) == {'plain'}
 
 
+@pytest.mark.parametrize('value', [float('nan'), float('inf'), float('-inf')])
+def test_drop_invalid_notes_removes_a_float_that_is_not_finite(msg, value):
+    group = g(msg)
+    group.notes.update({'broken': value, 'ratio': 0.5, 'zero': 0.0, 'count': 10**400})
+    assert drop_invalid_notes(group) == ['broken']
+    assert group.notes == {'ratio': 0.5, 'zero': 0.0, 'count': 10**400}
+
+
 def test_drop_invalid_notes_with_valid_notes_returns_nothing(msg):
     group = g(msg)
     group.notes['rows'] = 1

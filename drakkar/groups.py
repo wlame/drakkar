@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import inspect
+import math
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass
@@ -203,9 +204,20 @@ async def _wait_until(task: asyncio.Task, deadline: float) -> bool:
     return False
 
 
+def _is_valid_note(value: object) -> bool:
+    """True for a str, an int, a bool, or a float that is finite.
+
+    NaN and the infinities are refused: JSON has no text for them, so a report
+    that carries the notes could not be written.
+    """
+    if type(value) not in _NOTE_VALUE_TYPES:
+        return False
+    return type(value) is not float or math.isfinite(value)
+
+
 def drop_invalid_notes(group: TaskGroup) -> list[str]:
-    """Remove the notes whose value is not a str, int, float or bool; return their keys, sorted."""
-    invalid = sorted(key for key, value in group.notes.items() if type(value) not in _NOTE_VALUE_TYPES)
+    """Remove the notes whose value is not a str, int, finite float or bool; return their keys, sorted."""
+    invalid = sorted(key for key, value in group.notes.items() if not _is_valid_note(value))
     for key in invalid:
         del group.notes[key]
     return invalid

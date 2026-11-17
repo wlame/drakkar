@@ -253,7 +253,7 @@ The log events of [`arrange_stream`](fan-out.md#streaming-a-large-message) and i
 | `on_group_complete_failed` | error | Category `handler`. `on_group_complete` raised; logged and ignored, the group counts as finished. Fields `partition`, `offset`, `group_index`, `error`, with the exception. |
 | `on_group_complete_delivery_failed` | error | Category `sink`. The delivery of a group result could not be confirmed; the offset of the message stalls when the message finishes. Fields `partition`, `offset`, `group_index`, `error`. |
 | `on_group_complete_sink_delivery_failed` | error | Category `handler`. The delivery of a group result raised an unexpected error; `dlq.on_send_failure` decides (`offset_action` is `stall` or `commit`). Fields `partition`, `offset`, `group_index`, `error`, `offset_action`, with the exception. |
-| `group_notes_invalid` | error | Category `handler`. A group note held a value that is not a `str`, `int`, `float` or `bool`; the note was removed. Fields `partition`, `offset`, `group_index`, `keys` (sorted). |
+| `group_notes_invalid` | error | Category `handler`. A group note held a value that is not a `str`, `int`, finite `float` or `bool`; the note was removed. Fields `partition`, `offset`, `group_index`, `keys` (sorted). |
 
 #### Periodic tasks
 

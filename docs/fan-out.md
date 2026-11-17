@@ -535,10 +535,11 @@ very many tasks; yield groups of tens or hundreds of tasks.
 **`notes`.** Any hook that can reach the group may write it:
 `on_task_complete` (through `result.task.group`) and `on_group_complete`.
 Values must be `str`, `int`, `float` or `bool` (exactly these types, not a
-subclass). The framework checks the map when the group ends — after
-`on_group_complete` returns, or when the last task settles if the hook is
-not implemented. A value of another type is removed, and one error line
-`group_notes_invalid` names the keys.
+subclass), and a `float` must be finite: NaN and the infinities are not
+allowed, because JSON has no text for them. The framework checks the map
+when the group ends — after `on_group_complete` returns, or when the last
+task settles if the hook is not implemented. A value that breaks the rule is
+removed, and one error line `group_notes_invalid` names the keys.
 
 **`group_labels`.** A class attribute of the handler: a tuple of label
 names, default empty. Startup fails when it is not a sequence of unique,

@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import json
 import time
 from contextlib import ExitStack
 from typing import Any
@@ -3987,6 +3988,25 @@ async def test_probe_drops_group_notes_of_other_types_and_reports_them():
     (error,) = report.errors
     assert error.stage == 'on_group_complete:0'
     assert 'bad' in error.message
+
+
+async def test_probe_drops_a_group_note_that_is_not_finite_and_its_report_is_json():
+    class WritesANaNNote(_StreamHandler):
+        async def on_group_complete(self, group, results, errors):
+            group.notes['mean'] = float('nan')
+            group.notes['peak'] = float('inf')
+            group.notes['rows'] = 3
+            return None
+
+    report = await _stream_runner(WritesANaNNote(group_count=1)).run(ProbeInput(value='{}'))
+
+    assert report.groups[0].notes == {'rows': 3}
+    (error,) = report.errors
+    assert error.stage == 'on_group_complete:0'
+    assert 'mean' in error.message and 'peak' in error.message
+    # The route renders the report with a JSON encoder that refuses NaN and the
+    # infinities; with the notes removed the report has none.
+    json.dumps(report.model_dump(mode='json'), allow_nan=False)
 
 
 async def test_probe_reports_a_finally_that_raises_at_the_natural_end_as_a_stream_error():

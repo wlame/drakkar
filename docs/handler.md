@@ -541,7 +541,7 @@ result or an output text.
 | `replaced` | `int` | tasks that `on_error` replaced |
 | `labels` | `dict[str, list[str]]` | values of each `group_labels` name on the yielded tasks, in list order |
 | `skipped_deliveries` | `dict[str, int]` | per sink `<type>/<name>`, deliveries of the group that ended in `skip` |
-| `notes` | `dict[str, str \| int \| float \| bool]` | small values the hooks keep; another type is removed when the group ends (`group_notes_invalid`) |
+| `notes` | `dict[str, str \| int \| float \| bool]` | small values the hooks keep; a value of another type, or a `float` that is NaN or infinite, is removed when the group ends (`group_notes_invalid`) |
 | `started_at`, `finished_at` | `float` | monotonic times: received; last task settled |
 
 A deep copy of a task gets its own copy of the group, whose counters the

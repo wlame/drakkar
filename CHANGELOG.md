@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A stop with no shutdown time left now counts and logs the rows that the recorder's Postgres writer drops (`drakkar_recorder_postgres_dropped_rows_total{reason="shutdown"}`, `recorder_postgres_rows_dropped`). Before, a writer thread that was slow to wake was stopped before its final stage ran, and the rows were dropped with no count and no log line.
 - Update `dnspython` to 2.9.2. This version fixes the advisory CVE-2026-128089 that `pip-audit` reports for 2.9.1.
 - A worker that restarts while another worker's orphan pass removes its old folder no longer holds its owner lock on a deleted file. The lock is taken again on the file that is at the path.
+- A group note that is a `float` must be finite. A `NaN` or infinite note is removed like a note of a wrong type, with the same `group_notes_invalid` error line. Before, such a note made the Message Probe answer 500, because JSON has no text for it.
 
 ## [3.1.0] - 2026-11-11
 

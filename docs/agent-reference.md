@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `ffd82976f427a85a`.
+Registry version: `2a7e74f7f7b2e75c`.
 
 ## Concepts
 
@@ -417,7 +417,7 @@ Fields: `index` (from 0), `source_message`, `task_count`, `succeeded`, `failed`,
 
 Each task gets `task.group`. A replacement task from `on_error` joins the group of the task it replaces and gets that task's source offsets. When the group ends, `succeeded + failed + replaced` is the number of tasks ever scheduled in it.
 
-`labels` holds, for each name of the handler class attribute `group_labels`, the values of that label on the yielded tasks in list order, one per task that has it (a list, so equal values stay). `notes` takes only `str`, `int`, `float` and `bool` values; another type is removed when the group ends, with one `log:group_notes_invalid` line.
+`labels` holds, for each name of the handler class attribute `group_labels`, the values of that label on the yielded tasks in list order, one per task that has it (a list, so equal values stay). `notes` takes only `str`, `int`, finite `float` and `bool` values; another value is removed when the group ends, with one `log:group_notes_invalid` line.
 
 The group lives until `on_message_complete`, which gets every group in `MessageGroup.groups`. In stream mode `MessageGroup.tasks`, `results` and `errors` are empty and the counters are the sums over the groups.
 
@@ -3018,7 +3018,7 @@ The delivery of an on_group_complete result raised an unexpected error; dlq.on_s
 
 ### `event:log:group_notes_invalid`
 
-A group note held a value that is not a str, int, float or bool; the note was removed.
+A group note held a value that is not a str, int, finite float or bool; the note was removed.
 
 **When:** When a group ends, after on_group_complete or when its last task settled.
 
