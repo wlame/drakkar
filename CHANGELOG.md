@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-11-17
+
 ### Added
 
 - Detach: a running worker can leave its Kafka consumer group for a bounded time and join it again without a restart (docs page Detach from the Consumer Group).
