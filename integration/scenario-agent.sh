@@ -54,7 +54,7 @@ STOP_TIMEOUT_SECONDS=60
 AGENT_OFF_MESSAGE='the agent surface is off; set agent.enabled to true'
 TOKEN_MESSAGE='agent token required'
 AGENT_ROUTES='/api/v1/agent/manual /api/v1/agent/config /api/v1/agent/metrics /api/v1/agent/state /api/v1/agent/diagnose'
-FRAMEWORK_RULES='worker-stalled loop-lag-high budget-saturated pool-saturated partition-dead partition-paused-by-debug sink-breaker-open lag-growing recorder-dropping dlq-writing peers-offline cluster-tasks-mismatch agent-unauthenticated'
+FRAMEWORK_RULES='worker-stalled loop-lag-high budget-saturated pool-saturated partition-dead partition-paused-by-debug sink-breaker-open lag-growing recorder-dropping dlq-writing peers-offline cluster-tasks-mismatch agent-unauthenticated worker-detached'
 # Text that appears only where a DSN or a URL with its password is printed
 # whole.
 SECRET_PATTERNS=('drakkar:drakkar@' 'postgresql://drakkar:' 'redis://drakkar:')
