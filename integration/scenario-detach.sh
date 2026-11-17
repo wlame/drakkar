@@ -39,7 +39,7 @@
 #      earliest time, at least one ask after its return must be
 #      `budget_full`: a restarted worker must not free its old slot.
 #      worker-3 is then attached by the operator.
-#   6. A handler detach, the example of integration/worker/handler.py
+#   6. A handler detach, the example task of the harness worker
 #      (detach_on_request): the scenario writes the file
 #      detach-request-worker-3 into the shared folder (inside the worker-3
 #      container); worker-3 logs harness_detach_result with detached true
@@ -75,7 +75,7 @@ W2_METRICS=9091
 W3_METRICS=9093
 TOPIC=search-requests
 
-# The length of a handler detach: DETACH_SECONDS in integration/worker/handler.py.
+# The length of a handler detach: the detach length of the harness worker's example task.
 HANDLER_DETACH_SECONDS=20
 # The request file of detach_on_request on worker-3, at its path inside the
 # container (storage.shared_dir of worker/drakkar.yaml is /shared).
@@ -571,7 +571,7 @@ POLL_SECONDS=1 wait_until "$ATTACH_LIMIT_SECONDS" attached_with_partitions_w3 \
     || fail "worker-3 is not attached with a partition ${ATTACH_LIMIT_SECONDS}s after the attach: $(describe "$W3_UI" "$W3_METRICS")"
 ok "worker-3 attached again"
 
-# --- 6. a handler detach (the example of integration/worker/handler.py) -----
+# --- 6. a handler detach (the example task of the harness worker) -----------
 
 step "6. handler detach of worker-3, asked for with a file"
 since=$(date -u '+%Y-%m-%dT%H:%M:%SZ')

@@ -46,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Update `dnspython` to 2.9.2. This version fixes the advisory CVE-2026-128089 that `pip-audit` reports for 2.9.1.
 - A worker that restarts while another worker's orphan pass removes its old folder no longer holds its owner lock on a deleted file. The lock is taken again on the file that is at the path.
 - A group note that is a `float` must be finite. A `NaN` or infinite note is removed like a note of a wrong type, with the same `group_notes_invalid` error line. Before, such a note made the Message Probe answer 500, because JSON has no text for it.
+- Docs: the pipeline map now says that a delivery stall closes the stream of an `arrange_stream` handler, and the configuration page says that the startup warning names the consume-pause and detach routes.
 
 ## [3.1.0] - 2026-11-11
 

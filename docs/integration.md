@@ -583,7 +583,7 @@ is a pass/fail gate, not an invitation to read three dashboards.
 
 ## Provider outage scenarios
 
-Fourteen scripts check how the main cluster's registry and cluster tasks
+Fifteen scripts check how the main cluster's registry and cluster tasks
 behave when their provider, the network or a worker fails, how the
 recorder memory store works with and without a recorder file, what the
 DLQ record of a message that cannot be parsed holds, whether the

@@ -611,9 +611,8 @@ def test_uvicorn_config_carries_the_transport_limits():
 
 async def test_slow_request_body_is_answered_with_408():
     """The size cap alone is not a slow-loris defence — a client can stay
-    under it forever by sending one byte at a time. The bound comes from
-    http.Server.WriteTimeout; uvicorn has no equivalent, so the body read is
-    wrapped explicitly."""
+    under it forever by sending one byte at a time. uvicorn has no timeout
+    that covers the body read, so the read is wrapped explicitly."""
     import drakkar.webapp.server as webapp_server
 
     config = _make_config(port=_free_port())
