@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-11-19
+
 ### Added
 
 - `probe.is_active()` (`from drakkar import probe`) answers whether the current code runs as part of a Message Probe run. It is true in every handler hook that a probe calls, and in a task or an `offload` thread that such a hook starts; it is false in the pipeline. Use it to keep a probe from an effect that the framework cannot see, such as a call that changes another service. See Probe User Details.
