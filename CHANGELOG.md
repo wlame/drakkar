@@ -7,11 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `probe.is_active()` (`from drakkar import probe`) answers whether the current code runs as part of a Message Probe run. It is true in every handler hook that a probe calls, and in a task or an `offload` thread that such a hook starts; it is false in the pipeline. Use it to keep a probe from an effect that the framework cannot see, such as a call that changes another service. See Probe User Details.
+
 ## [3.2.0] - 2026-11-17
 
 ### Added
 
-- `probe.is_active()` (`from drakkar import probe`) answers whether the current code runs as part of a Message Probe run. It is true in every handler hook that a probe calls, and in a task or an `offload` thread that such a hook starts; it is false in the pipeline. Use it to keep a probe from an effect that the framework cannot see, such as a call that changes another service. See Probe User Details.
 - Detach: a running worker can leave its Kafka consumer group for a bounded time and join it again without a restart (docs page Detach from the Consumer Group).
   - The config block `sources.kafka.detach` (`enabled`, `max_detached`, `min_attached`, `default_duration`, `max_duration`, `cooldown`, `lease`) and the switch `ui.detach_enabled`, both off by default. The load fails when detach is on with the Kafka source and `autodiscover` is off, when `default_duration` is above `max_duration`, and when the UI switch is on without the feature. The checks run again after `on_startup`.
   - The handler members `detach()`, `attach()`, `detach_state` and `request_stop()`, and the types `DetachResult`, `AttachResult`, `DetachState` and `DetachOrigin`. A `detach()` made as part of a partition's work, also through `asyncio.gather` or `wait_for`, answers `inside_pipeline_hook` at once. Inside a Message Probe run `detach()` and `attach()` answer `probe`, and `request_stop()` only logs `stop_request_suppressed`.
