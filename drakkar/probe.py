@@ -22,6 +22,8 @@ from typing import Any, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic.fields import FieldInfo
 
+from drakkar.hook_scope import inside_message_probe
+
 ViewKind = Literal['string', 'keyvalue', 'dict', 'table', 'tables', 'tree', 'badge', 'custom']
 
 _VIEW_KINDS: tuple[str, ...] = ('string', 'keyvalue', 'dict', 'table', 'tables', 'tree', 'badge', 'custom')
@@ -900,3 +902,18 @@ def update(field: str, **entries: Any) -> None:
     if state is None:
         return
     state.update_field(field, entries)
+
+
+def is_active() -> bool:
+    """Whether the current code runs as part of a Message Probe run.
+
+    True in every handler hook that a probe calls, and in a task or an
+    ``offload`` thread that such a hook starts, because both copy the hook's
+    context. False everywhere else: in the pipeline, in the HTTP source, in
+    periodic tasks and in the startup hooks. A handler without a
+    ``probe_details_model`` gets the same answer.
+
+    Use it to keep a probe from an effect outside the framework, for example
+    a call that changes another service. The verbs above need no such check.
+    """
+    return inside_message_probe()

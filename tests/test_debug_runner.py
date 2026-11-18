@@ -35,6 +35,7 @@ import drakkar.offsets
 import drakkar.partition
 import drakkar.recorder
 import drakkar.sinks.manager
+from drakkar import probe
 from drakkar.cache import Cache, CacheScope, NoOpCache
 from drakkar.config import DrakkarConfig, ExecutorConfig
 from drakkar.executor import ExecutorPool
@@ -1846,6 +1847,78 @@ class _OriginStageProbingHandler(_HappyPathHandler):
     async def on_message_complete(self, group: MessageGroup) -> CollectResult | None:
         await self.cache.get('during_message_complete')
         return await super().on_message_complete(group)
+
+
+class _ProbeCheckingHandler(_HappyPathHandler):
+    """Records the answer of ``probe.is_active()`` in each hook, in a task and in an offload thread."""
+
+    def __init__(self) -> None:
+        super().__init__(task_count=1)
+        self.seen: dict[str, bool] = {}
+
+    def deserialize_message(self, msg: SourceMessage) -> SourceMessage:
+        self.seen['deserialize'] = probe.is_active()
+        return super().deserialize_message(msg)
+
+    def message_label(self, msg: SourceMessage) -> str:
+        self.seen['message_label'] = probe.is_active()
+        return super().message_label(msg)
+
+    async def arrange(
+        self,
+        messages: list[SourceMessage],
+        pending: PendingContext,
+    ) -> list[ExecutorTask]:
+        self.seen['arrange'] = probe.is_active()
+
+        async def in_a_task() -> bool:
+            return probe.is_active()
+
+        # A task and an offload thread copy the context of the hook.
+        self.seen['task'] = await asyncio.create_task(in_a_task())
+        self.seen['offload'] = await self.offload(probe.is_active)
+        return await super().arrange(messages, pending)
+
+    async def on_task_complete(self, result: ExecutorResult) -> CollectResult | None:
+        self.seen['on_task_complete'] = probe.is_active()
+        return await super().on_task_complete(result)
+
+    async def on_message_complete(self, group: MessageGroup) -> CollectResult | None:
+        self.seen['on_message_complete'] = probe.is_active()
+        return await super().on_message_complete(group)
+
+    async def on_window_complete(
+        self,
+        results: list[ExecutorResult],
+        source_messages: list[SourceMessage],
+    ) -> CollectResult | None:
+        self.seen['on_window_complete'] = probe.is_active()
+        return await super().on_window_complete(results, source_messages)
+
+
+async def test_probe_is_active_answers_true_in_every_hook_of_a_run_and_false_after_it():
+    handler = _ProbeCheckingHandler()
+    runner = DebugRunner(
+        handler=handler,
+        executor_pool=_make_executor_pool(),
+        app_config=_make_config(),
+    )
+    assert probe.is_active() is False
+
+    await runner.run(ProbeInput(value='x', offset=1, use_cache=False))
+
+    assert handler.seen == {
+        'deserialize': True,
+        'message_label': True,
+        'arrange': True,
+        'task': True,
+        'offload': True,
+        'on_task_complete': True,
+        'on_message_complete': True,
+        'on_window_complete': True,
+    }
+    # The mark does not stay set after the run.
+    assert probe.is_active() is False
 
 
 async def test_probe_origin_stage_on_call_log_reflects_calling_hook():
@@ -3800,6 +3873,28 @@ def _stream_runner(handler: BaseDrakkarHandler, *, max_retries: int = 1) -> Debu
     return DebugRunner(
         handler=handler, executor_pool=_make_executor_pool(), app_config=_make_config(max_retries=max_retries)
     )
+
+
+async def test_probe_is_active_answers_true_in_the_hooks_of_a_stream_handler():
+    class ChecksTheProbe(_StreamHandler):
+        def __init__(self) -> None:
+            super().__init__(group_count=1)
+            self.seen: dict[str, bool] = {}
+
+        async def arrange_stream(self, message: SourceMessage):
+            self.seen['arrange_stream'] = probe.is_active()
+            yield self.make_group(message, 0)
+
+        async def on_group_complete(self, group, results, errors):
+            self.seen['on_group_complete'] = probe.is_active()
+            return None
+
+    handler = ChecksTheProbe()
+
+    await _stream_runner(handler).run(ProbeInput(value='{}'))
+
+    assert handler.seen == {'arrange_stream': True, 'on_group_complete': True}
+    assert probe.is_active() is False
 
 
 async def test_probe_runs_every_group_of_a_short_stream():

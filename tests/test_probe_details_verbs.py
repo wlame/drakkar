@@ -4,6 +4,7 @@ import pytest
 from pydantic import BaseModel
 
 from drakkar import probe
+from drakkar.hook_scope import message_probe_run
 from drakkar.probe import _DetailsState, build_layout, probe_field
 
 
@@ -60,6 +61,22 @@ def test_verbs_outside_probe_are_silent_noops():
     probe.set(selection_note='x')
     probe.append('picked_items', PickedRow(item_id='a', score=1.0))
     probe.update('counters', matched=1)
+
+
+def test_is_active_outside_a_probe_is_false():
+    assert probe.is_active() is False
+
+
+def test_is_active_inside_a_probe_run_is_true_and_false_again_after_it():
+    with message_probe_run():
+        assert probe.is_active() is True
+    assert probe.is_active() is False
+
+
+def test_is_active_does_not_need_a_details_state(bound):
+    # A bound details state alone is not a probe run: the answer follows the
+    # mark of the run, so a handler without a details model gets it too.
+    assert probe.is_active() is False
 
 
 def test_set_writes_field_and_records_stamped_write(bound):

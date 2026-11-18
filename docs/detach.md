@@ -344,6 +344,9 @@ the handler hooks on a pasted message. A probe never changes the worker:
 - `request_stop()` does nothing and logs `stop_request_suppressed` (info,
   category `debug`, fields `reason` and `exit_code`).
 
+Handler code can read the same mark with `probe.is_active()`; see
+[Checking for a probe run](probe-user-details.md#checking-for-a-probe-run-probeis_active).
+
 A task that handler code first starts during a probe keeps this behaviour
 for its whole life, also after the probe has ended.
 

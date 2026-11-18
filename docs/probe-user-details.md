@@ -250,6 +250,48 @@ the check itself. The cost in a production hot path is a single
 
 ---
 
+## Checking for a probe run: `probe.is_active()`
+
+`probe.is_active()` answers whether the current code runs as part of a
+Message Probe run. It needs no `probe_details_model`.
+
+```python
+from drakkar import probe
+
+async def on_task_complete(self, result):
+    if not probe.is_active():
+        await self._billing.record_usage(result.task.task_id)   # a call that changes another service
+    ...
+```
+
+- It is `True` in every handler hook that a probe calls: `deserialize_message`,
+  `message_label`, `arrange` or `arrange_stream`, `on_task_complete`,
+  `on_group_complete`, `on_message_complete`, `on_window_complete` and
+  `on_error`.
+- It is also `True` in a task that such a hook starts and in a function run
+  with `self.offload(...)`, because both copy the context of the hook.
+- It is `False` everywhere else: in the pipeline, in the HTTP source, in
+  periodic tasks, and in `on_startup` and `on_ready`.
+
+A probe already keeps the framework's own effects away: it writes to no sink,
+changes no cache entry, commits no offset, and `detach()`, `attach()` and
+`request_stop()` do nothing. Use the check for an effect that the framework
+cannot see, such as a call that changes another service or a write to your
+own database. The verbs `probe.set`, `probe.append` and `probe.update` need no
+such check.
+
+Two limits:
+
+- The subprocess of a task is another program, and a probe runs it as the
+  pipeline does. It cannot call `probe.is_active()`. If the program must know,
+  pass a flag from `arrange`, for example an argument or an environment
+  variable of the task.
+- Each branch on `probe.is_active()` makes the probe show something other than
+  what the pipeline does. Keep such branches small, and skip only the effect,
+  not the logic around it.
+
+---
+
 ## Stage badges
 
 Every successful write is stamped with the hook stage that made it — one of

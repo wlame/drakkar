@@ -1190,6 +1190,13 @@ the UI renders the result as its own tab. See
 [Probe User Details](probe-user-details.md) for the model conventions,
 `probe_field()` views, and the write caps.
 
+Any handler code can ask whether it runs inside a Message Probe run:
+`probe.is_active()` (`from drakkar import probe`) is `True` in every hook
+that a probe calls, and `False` in the pipeline. Use it to keep a probe from
+an effect that the framework cannot see, such as a call that changes another
+service. See
+[Checking for a probe run](probe-user-details.md#checking-for-a-probe-run-probeis_active).
+
 `ui_pages` — a list of `Page` declarations, each describing a custom
 dashboard page built from widgets over built-in data sources. Registered
 pages appear as extra navigation entries and are validated at startup, so
