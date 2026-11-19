@@ -647,7 +647,9 @@ service), so run `just integration-down` before the next run.
 `PRODUCER_DONE` and the consumer lag of the main cluster is 0. Then it runs
 `just verify-delivery` with the message total of the producer. The outage
 scenario calls it at its end. The run matrix calls it for every provider,
-because the outage scenario does not apply to `filesystem`.
+because the outage scenario does not apply to `filesystem`. The two waits
+have limits of 2700 s and 7200 s; a small run sets shorter ones with the
+environment variables `PRODUCER_DONE_LIMIT_SECONDS` and `DRAIN_LIMIT_SECONDS`.
 
 ### The election half
 
@@ -753,13 +755,19 @@ just verify-delivery 5000              # the TOTAL_MESSAGES the producer ran wit
 just verify-delivery 300 --dsn=...     # other flags pass straight through
 ```
 
-It waits for the `request_summaries` count to stop moving before checking,
-because a request still in flight is indistinguishable from a lost one. Pass
+It waits until every produced request has its `request_summaries` row before
+checking, because a request still in flight is indistinguishable from a lost
+one. It gives up after `--wait-seconds` (default 300) and then reports the
+requests that are still missing. A row count that stands still does not end
+the wait: the last messages of a backlog arrive tens of seconds apart. Pass
 `--wait-seconds=0` to check immediately.
 
-The scheduled `Integration` workflow runs the same recipe against a small
-300-message corpus. The checks compare against the exact produced id set
-rather than a sample, so a small corpus is as conclusive as a large one --
+The reliable order is [`verify-after-drain.sh`](#drain-and-delivery-check): it
+waits for a consumer lag of 0 and then runs the check.
+
+The scheduled `Integration` workflow runs `verify-after-drain.sh` against a
+small 300-message corpus. The checks compare against the exact produced id
+set rather than a sample, so a small corpus is as conclusive as a large one --
 it just finishes inside the job's budget.
 
 ---

@@ -15,7 +15,10 @@ sinks, and fails with a non-zero exit when any of the checks below break.
 **Run it after the pipeline has drained.** Consumer lag above zero means work
 is still in flight, and a request that has not been processed yet is
 indistinguishable here from one that was lost. ``--wait-seconds`` polls until
-the row count stops moving before it starts checking.
+every produced request has its row, and gives up at the end of that time. A
+row count that stands still is not the signal: the last messages of a backlog
+arrive tens of seconds apart. ``verify-after-drain.sh`` waits for a consumer
+lag of 0 first, which is the reliable order.
 
 What is checked, and which real defect each one catches:
 
@@ -268,26 +271,46 @@ async def _fetch(conn: asyncpg.Connection) -> tuple[list[SummaryRow], set[str], 
     return summaries, result_ids, result_rows
 
 
-async def _wait_until_drained(conn: asyncpg.Connection, *, wait_seconds: int, poll_seconds: int = 5) -> None:
-    """Block until the summary row count stops moving, or the budget runs out.
+def is_settled(*, current: int, previous: int, missing: int) -> bool:
+    """True when no produced request is missing and the row count did not move since the last poll.
+
+    A count that stands still is not enough. The last messages of a backlog
+    arrive tens of seconds apart, so a pause proves nothing while a produced
+    request has no row yet.
+    """
+    return missing == 0 and current == previous
+
+
+async def _wait_until_drained(
+    conn: asyncpg.Connection, *, expected: set[str], wait_seconds: float, poll_seconds: float = 5
+) -> None:
+    """Block until every produced request has its summary row, or the budget runs out.
 
     A request still in flight looks exactly like a lost one, so checking
-    while the pipeline is draining reports failures that are not real. Two
-    consecutive identical counts is the settle signal.
+    while the pipeline is draining reports failures that are not real. The
+    wait ends early only by `is_settled`. With a request that is really
+    lost it runs to the end of the budget, and the checks then report it.
     """
     if wait_seconds <= 0:
         return
+    wanted = sorted(expected)
     deadline = asyncio.get_running_loop().time() + wait_seconds
     previous = -1
     while asyncio.get_running_loop().time() < deadline:
-        current = await conn.fetchval('SELECT COUNT(*) FROM request_summaries')
-        if current == previous:
+        record = await conn.fetchrow(
+            'SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE request_id = ANY($1::text[])) AS present '
+            'FROM request_summaries',
+            wanted,
+        )
+        current = record['total']
+        missing = len(wanted) - record['present']
+        if is_settled(current=current, previous=previous, missing=missing):
             print(f'settled at {current} request_summaries rows', flush=True)
             return
-        print(f'draining: {current} request_summaries rows', flush=True)
+        print(f'draining: {current} request_summaries rows, {missing} produced requests have no row yet', flush=True)
         previous = current
         await asyncio.sleep(poll_seconds)
-    print(f'WARNING: still moving after {wait_seconds}s — verifying anyway', flush=True)
+    print(f'WARNING: not settled after {wait_seconds}s — verifying anyway', flush=True)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -303,7 +326,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         '--wait-seconds',
         type=int,
         default=300,
-        help='how long to wait for the row count to settle before checking (0 = check now)',
+        help='how long to wait for every produced request to have its row before checking (0 = check now)',
     )
     parser.add_argument(
         '--max-duplication',
@@ -318,7 +341,9 @@ async def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     conn = await asyncpg.connect(args.dsn)
     try:
-        await _wait_until_drained(conn, wait_seconds=args.wait_seconds)
+        await _wait_until_drained(
+            conn, expected=expected_request_ids(args.total_messages), wait_seconds=args.wait_seconds
+        )
         summaries, result_ids, result_rows = await _fetch(conn)
     finally:
         await conn.close()

@@ -316,3 +316,69 @@ def test_violation_render_names_the_check_and_its_sample() -> None:
     rendered = vd.Violation(check='no_loss', detail='2 missing', sample=('req-000007',)).render()
     assert rendered.startswith('FAIL no_loss: 2 missing')
     assert 'req-000007' in rendered
+
+
+# --- the wait before the checks -------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ('current', 'previous', 'missing', 'settled'),
+    [
+        (300, 300, 0, True),
+        # The count stood still, but a produced request has no row yet: the
+        # last messages of a backlog can be tens of seconds apart.
+        (281, 281, 19, False),
+        # Every request has its row, but the count still moved in this poll.
+        (300, 299, 0, False),
+        (120, 100, 180, False),
+    ],
+)
+def test_is_settled_needs_every_request_and_a_count_that_stands_still(
+    current: int, previous: int, missing: int, settled: bool
+) -> None:
+    assert vd.is_settled(current=current, previous=previous, missing=missing) is settled
+
+
+class _ScriptedCounts:
+    """Stands in for the database connection of the wait: answers (total, present) per poll."""
+
+    def __init__(self, answers: list[tuple[int, int]]) -> None:
+        self._answers = answers
+        self.polls = 0
+
+    async def fetchrow(self, _query: str, _wanted: list[str]) -> dict[str, int]:
+        # The last answer repeats, as a table that stopped changing does.
+        total, present = self._answers[min(self.polls, len(self._answers) - 1)]
+        self.polls += 1
+        return {'total': total, 'present': present}
+
+
+async def test_wait_until_drained_goes_on_while_a_produced_request_has_no_row(capsys) -> None:
+    conn = _ScriptedCounts([(281, 281), (281, 281), (300, 300), (300, 300)])
+
+    await vd._wait_until_drained(conn, expected=vd.expected_request_ids(300), wait_seconds=30, poll_seconds=0)
+
+    # The equal counts of the second poll did not end the wait: 19 requests had no row.
+    assert conn.polls == 4
+    out = capsys.readouterr().out
+    assert 'draining: 281 request_summaries rows, 19 produced requests have no row yet' in out
+    assert 'settled at 300 request_summaries rows' in out
+
+
+async def test_wait_until_drained_runs_to_the_budget_when_a_request_stays_missing(capsys) -> None:
+    conn = _ScriptedCounts([(299, 299)])
+
+    await vd._wait_until_drained(conn, expected=vd.expected_request_ids(300), wait_seconds=0.05, poll_seconds=0.01)
+
+    assert conn.polls >= 2
+    out = capsys.readouterr().out
+    assert 'settled' not in out.replace('not settled', '')
+    assert 'WARNING: not settled after 0.05s' in out
+
+
+async def test_wait_until_drained_with_no_budget_does_not_read_the_table() -> None:
+    conn = _ScriptedCounts([(0, 0)])
+
+    await vd._wait_until_drained(conn, expected=vd.expected_request_ids(3), wait_seconds=0)
+
+    assert conn.polls == 0

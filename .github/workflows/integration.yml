@@ -87,26 +87,21 @@ jobs:
             done
           done
 
-      - name: Wait for the producer to finish sending
-        run: |
-          for attempt in $(seq 1 60); do
-            if docker compose -f integration/docker-compose.yml logs producer 2>/dev/null | grep -q PRODUCER_DONE; then
-              echo "producer finished"
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "producer did not finish within 600s"
-          docker compose -f integration/docker-compose.yml logs --tail=50 producer
-          exit 1
-
       # The gate this job exists for. Everything above proves the containers
       # came up; this proves the framework did its job — every message the
       # producer sent reached its sinks, nothing arrived that was never sent,
-      # and payload order survived. It waits for the pipeline to drain first,
-      # because an in-flight request is indistinguishable from a lost one.
-      - name: Verify delivery
-        run: just verify-delivery "$TOTAL_MESSAGES" --wait-seconds=600
+      # and payload order survived. The script waits for the pipeline to drain
+      # first, because an in-flight request is indistinguishable from a lost
+      # one: it waits for the producer's PRODUCER_DONE line and then for a
+      # consumer lag of 0 on the source topic. A row count that stands still
+      # is no drain signal: the last messages of the backlog arrive tens of
+      # seconds apart. The limits keep a hang inside this job's time budget,
+      # so the log dump below still runs.
+      - name: Verify delivery after the drain
+        env:
+          PRODUCER_DONE_LIMIT_SECONDS: "600"
+          DRAIN_LIMIT_SECONDS: "900"
+        run: integration/verify-after-drain.sh
 
       - name: Dump logs on failure
         if: failure()

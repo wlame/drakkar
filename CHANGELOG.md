@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The delivery check of the integration harness (`just verify-delivery`) no longer reports late requests as lost. It took a row count that stood still for 5 seconds as the end of the drain, but the last messages of a backlog arrive tens of seconds apart. It now waits until every produced request has its row, up to `--wait-seconds`. The scheduled `Integration` workflow runs `integration/verify-after-drain.sh`, which waits for a consumer lag of 0 first; the limits of that script can be set with `PRODUCER_DONE_LIMIT_SECONDS` and `DRAIN_LIMIT_SECONDS`.
+
 ## [3.3.0] - 2026-11-19
 
 ### Added
