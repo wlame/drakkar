@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-11-20
+
 ### Added
 
 - `depends_on_wait` on a sink instance: a fixed wait between the sinks of `depends_on` and this sink (`depends_on_wait: 500ms`, from `0` to `1h`, default `0`). When every dependency of a result has finished and at least one of them delivered payloads, the sink starts after the wait. Use it when the data of a dependency needs time to become visible, for example on a read replica. There is no wait when no dependency delivered anything, and none before a retry. The load refuses a value above `0` without `depends_on`, and a value that is not shorter than `executor.drain_timeout`, because a stop waits for a delivery only that long. See Sinks, Waiting after the dependencies.
