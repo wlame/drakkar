@@ -788,20 +788,22 @@ class AppLifecycle:
         return None if fleet is None else fleet.name_online(worker)
 
     def _check_config_after_startup(self) -> None:
-        """Check the ``api``, recorder, ``autodiscover`` and detach rules again, and say once when the cluster name is empty.
+        """Check the ``api``, recorder, ``autodiscover``, detach and sink wait rules again, and say once when the cluster name is empty.
 
         ``on_startup`` may have changed the keys, so this gives the messages of
         the config load.
 
         Raises:
-            ValueError: the UI, the recorder or ``autodiscover`` cannot run as configured, or the detach
-                durations, the detach store or the UI detach switch break their rules.
+            ValueError: the UI, the recorder or ``autodiscover`` cannot run as configured, the detach
+                durations, the detach store or the UI detach switch break their rules, or a sink's
+                ``depends_on_wait`` is not shorter than ``executor.drain_timeout``.
         """
         app = self._app
         app._config.check_what_needs_the_api()
         app._config.check_recorder_provider()
         app._config.check_autodiscover()
         app._config.check_detach()
+        app._config.check_sink_waits()
         if app._config.autodiscover.enabled and not app._cluster_name:
             logger.warning(
                 'cluster_name_empty',

@@ -914,6 +914,16 @@
           "group": "sinks"
         },
         {
+          "path": "sinks.kafka.*.depends_on_wait",
+          "env": null,
+          "description": "Time to wait between the sinks of depends_on and this sink, at most 1h.",
+          "full_description": "Time to wait between the sinks of depends_on and this sink, at most 1h. When every dependency of a result has finished and at least one of them delivered payloads, this sink starts after the wait. Use it when the data of a dependency needs time to become visible, for example on a replica. 0 is no wait. A value above 0 needs depends_on and must be shorter than executor.drain_timeout: a stop waits for a delivery only that long.",
+          "type": "duration",
+          "default": "0",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
           "path": "sinks.kafka.*.connection",
           "env": null,
           "description": "The Kafka cluster: a name under connections.kafka.",
@@ -1024,6 +1034,16 @@
           "group": "sinks"
         },
         {
+          "path": "sinks.postgres.*.depends_on_wait",
+          "env": null,
+          "description": "Time to wait between the sinks of depends_on and this sink, at most 1h.",
+          "full_description": "Time to wait between the sinks of depends_on and this sink, at most 1h. When every dependency of a result has finished and at least one of them delivered payloads, this sink starts after the wait. Use it when the data of a dependency needs time to become visible, for example on a replica. 0 is no wait. A value above 0 needs depends_on and must be shorter than executor.drain_timeout: a stop waits for a delivery only that long.",
+          "type": "duration",
+          "default": "0",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
           "path": "sinks.postgres.*.connection",
           "env": null,
           "description": "The database: a name under connections.postgres.",
@@ -1130,6 +1150,16 @@
           "full_description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>'. Checked at load: every reference exists, no self-reference, no cycle.",
           "type": "array",
           "default": [],
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.mongo.*.depends_on_wait",
+          "env": null,
+          "description": "Time to wait between the sinks of depends_on and this sink, at most 1h.",
+          "full_description": "Time to wait between the sinks of depends_on and this sink, at most 1h. When every dependency of a result has finished and at least one of them delivered payloads, this sink starts after the wait. Use it when the data of a dependency needs time to become visible, for example on a replica. 0 is no wait. A value above 0 needs depends_on and must be shorter than executor.drain_timeout: a stop waits for a delivery only that long.",
+          "type": "duration",
+          "default": "0",
           "secret": false,
           "group": "sinks"
         },
@@ -1264,6 +1294,16 @@
           "group": "sinks"
         },
         {
+          "path": "sinks.redis.*.depends_on_wait",
+          "env": null,
+          "description": "Time to wait between the sinks of depends_on and this sink, at most 1h.",
+          "full_description": "Time to wait between the sinks of depends_on and this sink, at most 1h. When every dependency of a result has finished and at least one of them delivered payloads, this sink starts after the wait. Use it when the data of a dependency needs time to become visible, for example on a replica. 0 is no wait. A value above 0 needs depends_on and must be shorter than executor.drain_timeout: a stop waits for a delivery only that long.",
+          "type": "duration",
+          "default": "0",
+          "secret": false,
+          "group": "sinks"
+        },
+        {
           "path": "sinks.redis.*.connection",
           "env": null,
           "description": "The server: a name under connections.redis.",
@@ -1360,6 +1400,16 @@
           "full_description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>'. Checked at load: every reference exists, no self-reference, no cycle.",
           "type": "array",
           "default": [],
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.http.*.depends_on_wait",
+          "env": null,
+          "description": "Time to wait between the sinks of depends_on and this sink, at most 1h.",
+          "full_description": "Time to wait between the sinks of depends_on and this sink, at most 1h. When every dependency of a result has finished and at least one of them delivered payloads, this sink starts after the wait. Use it when the data of a dependency needs time to become visible, for example on a replica. 0 is no wait. A value above 0 needs depends_on and must be shorter than executor.drain_timeout: a stop waits for a delivery only that long.",
+          "type": "duration",
+          "default": "0",
           "secret": false,
           "group": "sinks"
         },
@@ -1480,6 +1530,16 @@
           "full_description": "Sinks that must deliver a result before this one starts, each written '<type>/<name>'. Checked at load: every reference exists, no self-reference, no cycle.",
           "type": "array",
           "default": [],
+          "secret": false,
+          "group": "sinks"
+        },
+        {
+          "path": "sinks.filesystem.*.depends_on_wait",
+          "env": null,
+          "description": "Time to wait between the sinks of depends_on and this sink, at most 1h.",
+          "full_description": "Time to wait between the sinks of depends_on and this sink, at most 1h. When every dependency of a result has finished and at least one of them delivered payloads, this sink starts after the wait. Use it when the data of a dependency needs time to become visible, for example on a replica. 0 is no wait. A value above 0 needs depends_on and must be shorter than executor.drain_timeout: a stop waits for a delivery only that long.",
+          "type": "duration",
+          "default": "0",
           "secret": false,
           "group": "sinks"
         },

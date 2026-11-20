@@ -170,7 +170,7 @@
   body: |-
     The result hooks return payloads for named sink instances. The worker delivers them per sink, in payload order. A failed delivery calls `on_delivery_error`, which may retry; the retries are bounded by `max_retries` of the sink. When the retries are spent the sink policy `on_failure` decides: `dlq` writes the source message to the DLQ, `skip` drops the payloads.
 
-    Each sink has a circuit breaker: after `breaker_failures` failed deliveries it opens for `breaker_cooldown`, and deliveries then follow `on_failure` at once. A sink can depend on other sinks (`depends_on`); it starts only after its dependencies delivered or skipped.
+    Each sink has a circuit breaker: after `breaker_failures` failed deliveries it opens for `breaker_cooldown`, and deliveries then follow `on_failure` at once. A sink can depend on other sinks (`depends_on`); it starts only after its dependencies delivered or skipped, and `depends_on_wait` later when one of them delivered.
 
     The defaults of every policy key are in `sinks.defaults`; an instance can set its own value.
   principles:

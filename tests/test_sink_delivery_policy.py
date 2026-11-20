@@ -23,6 +23,7 @@ from drakkar.models import (
     DeliveryError,
     KafkaPayload,
     PostgresPayload,
+    RedisPayload,
     SinkNotStartedReason,
     SourceMessage,
 )
@@ -112,9 +113,16 @@ class CollectingRecorder(EventWriter):
         return [row for row in self.rows if row['event'] == event_type]
 
 
-def policy(on_failure: str = 'dlq', max_retries: int = 2, depends_on: tuple[str, ...] = ()) -> SinkPolicy:
+def policy(
+    on_failure: str = 'dlq', max_retries: int = 2, depends_on: tuple[str, ...] = (), depends_on_wait: float = 0.0
+) -> SinkPolicy:
     return DEFAULT_SINK_POLICY.model_copy(
-        update={'on_failure': on_failure, 'max_retries': max_retries, 'depends_on': depends_on}
+        update={
+            'on_failure': on_failure,
+            'max_retries': max_retries,
+            'depends_on': depends_on,
+            'depends_on_wait': depends_on_wait,
+        }
     )
 
 
@@ -288,8 +296,6 @@ async def test_not_started_dependency_passes_its_reason_down_the_chain():
         (middle, policy(depends_on=('postgres/main',))),
         (last, policy(depends_on=('kafka/out',))),
     )
-    from drakkar.models import RedisPayload
-
     result = CollectResult(
         kafka=[KafkaPayload(data=Data())],
         postgres=[PostgresPayload(table='t', data=Data())],
@@ -357,6 +363,254 @@ async def test_group_gate_runs_before_a_not_started_note():
         )
 
     assert [entry for entry in logs if entry['event'] == 'sink_not_started'] == []
+
+
+# --- The wait after the dependencies (depends_on_wait) ---
+
+
+class TimelineSink(FakeSink):
+    """A sink that writes the start and the end of each delivery into a shared timeline."""
+
+    def __init__(self, name: str, sink_type: str, timeline: list[str]) -> None:
+        super().__init__(name, sink_type)
+        self._timeline = timeline
+
+    async def deliver(self, payloads: list[BaseModel]) -> None:
+        self._timeline.append(f'{self.sink_type} start')
+        await super().deliver(payloads)
+        self._timeline.append(f'{self.sink_type} end')
+
+
+@pytest.fixture
+def timeline(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The order of deliveries and waits; a wait is written as ``wait <seconds>`` and takes no time."""
+    events: list[str] = []
+    real_sleep = asyncio.sleep
+
+    async def recorded_sleep(seconds: float, *args, **kwargs) -> None:
+        # Only a real wait is an event; ``sleep(0)`` is a loop turn of the code under test.
+        if seconds > 0:
+            events.append(f'wait {seconds}')
+        await real_sleep(0)
+
+    monkeypatch.setattr(manager_module.asyncio, 'sleep', recorded_sleep)
+    return events
+
+
+def waiting_manager(
+    timeline: list[str], wait: float = 0.5, **manager_kwargs
+) -> tuple[SinkManager, TimelineSink, TimelineSink]:
+    """A kafka sink that depends on a postgres sink and waits ``wait`` seconds after it."""
+    kafka = TimelineSink('out', 'kafka', timeline)
+    postgres = TimelineSink('main', 'postgres', timeline)
+    mgr = manager_with(
+        (kafka, policy(depends_on=('postgres/main',), depends_on_wait=wait)), (postgres, policy()), **manager_kwargs
+    )
+    return mgr, kafka, postgres
+
+
+async def test_dependent_waits_after_a_delivered_dependency_before_it_starts(timeline):
+    mgr, _, _ = waiting_manager(timeline)
+
+    outcomes = await mgr.deliver_all(both_results(), declared, 0, message_context=message_context())
+
+    assert timeline == ['postgres start', 'postgres end', 'wait 0.5', 'kafka start', 'kafka end']
+    assert set(outcomes.values()) == {DeliveryOutcome.DELIVERED}
+
+
+async def test_no_wait_when_depends_on_wait_is_zero(timeline):
+    mgr, _, _ = waiting_manager(timeline, wait=0.0)
+
+    await mgr.deliver_all(both_results(), declared, 0, message_context=message_context())
+
+    assert timeline == ['postgres start', 'postgres end', 'kafka start', 'kafka end']
+
+
+async def test_no_wait_when_the_dependency_has_no_payloads_in_the_result(timeline):
+    mgr, _, _ = waiting_manager(timeline)
+
+    await mgr.deliver_all(
+        CollectResult(kafka=[KafkaPayload(data=Data())]), declared, 0, message_context=message_context()
+    )
+
+    # Nothing was written by a dependency, so there is nothing to wait for.
+    assert timeline == ['kafka start', 'kafka end']
+
+
+async def test_no_wait_when_the_dependency_was_skipped(timeline):
+    mgr, _, postgres = waiting_manager(timeline)
+    postgres.fail = True
+
+    outcomes = await mgr.deliver_all(
+        both_results(), AsyncMock(return_value=DeliveryAction.SKIP), 0, message_context=message_context()
+    )
+
+    assert outcomes == {KAFKA: DeliveryOutcome.DELIVERED, POSTGRES: DeliveryOutcome.SKIPPED}
+    assert [event for event in timeline if event.startswith('wait')] == []
+
+
+async def test_no_wait_when_the_dependency_ended_the_message_on_the_dlq(timeline):
+    mgr, kafka, postgres = waiting_manager(timeline, dlq=RecordingDLQ())
+    postgres.fail = True
+
+    outcomes = await mgr.deliver_all(both_results(), declared, 0, message_context=message_context())
+
+    assert outcomes == {KAFKA: DeliveryOutcome.NOT_STARTED, POSTGRES: DeliveryOutcome.DLQ}
+    assert kafka.delivered == []
+    assert [event for event in timeline if event.startswith('wait')] == []
+
+
+async def test_one_wait_after_the_last_of_several_dependencies(timeline):
+    kafka = TimelineSink('out', 'kafka', timeline)
+    postgres = TimelineSink('main', 'postgres', timeline)
+    redis = TimelineSink('cache', 'redis', timeline)
+    mgr = manager_with(
+        (kafka, policy(depends_on=('postgres/main', 'redis/cache'), depends_on_wait=2.0)),
+        (postgres, policy()),
+        (redis, policy()),
+    )
+    result = CollectResult(
+        kafka=[KafkaPayload(data=Data())],
+        postgres=[PostgresPayload(table='t', data=Data())],
+        redis=[RedisPayload(key='k', data=Data())],
+    )
+
+    await mgr.deliver_all(result, declared, 0, message_context=message_context())
+
+    assert timeline.count('wait 2.0') == 1
+    # Both dependencies ended before the wait, and the dependent started after it.
+    wait_at = timeline.index('wait 2.0')
+    assert {'postgres end', 'redis end'} <= set(timeline[:wait_at])
+    assert timeline[wait_at + 1 :] == ['kafka start', 'kafka end']
+
+
+async def test_wait_when_one_dependency_delivered_and_another_was_skipped(timeline):
+    kafka = TimelineSink('out', 'kafka', timeline)
+    postgres = TimelineSink('main', 'postgres', timeline)
+    redis = TimelineSink('cache', 'redis', timeline)
+    redis.fail = True
+    mgr = manager_with(
+        (kafka, policy(depends_on=('redis/cache', 'postgres/main'), depends_on_wait=2.0)),
+        (postgres, policy()),
+        (redis, policy(on_failure='skip', max_retries=0)),
+    )
+    result = CollectResult(
+        kafka=[KafkaPayload(data=Data())],
+        postgres=[PostgresPayload(table='t', data=Data())],
+        redis=[RedisPayload(key='k', data=Data())],
+    )
+
+    outcomes = await mgr.deliver_all(result, declared, 0, message_context=message_context())
+
+    assert outcomes[('redis', 'cache')] is DeliveryOutcome.SKIPPED
+    assert timeline.count('wait 2.0') == 1
+    assert timeline[-2:] == ['kafka start', 'kafka end']
+
+
+async def test_the_wait_runs_once_and_not_before_a_retry_of_the_dependent(timeline):
+    mgr, kafka, _ = waiting_manager(timeline)
+    attempts = 0
+    deliver = kafka.deliver
+
+    async def fails_once(payloads: list[BaseModel]) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError('kafka is down')
+        await deliver(payloads)
+
+    kafka.deliver = fails_once  # ty: ignore[invalid-assignment]
+
+    outcomes = await mgr.deliver_all(
+        both_results(), AsyncMock(return_value=DeliveryAction.RETRY), 0, message_context=message_context()
+    )
+
+    assert attempts == 2
+    assert outcomes[KAFKA] is DeliveryOutcome.DELIVERED
+    assert timeline.count('wait 0.5') == 1
+
+
+async def test_no_wait_for_a_message_that_is_on_the_dlq_before_the_wait_would_start(timeline):
+    mgr, kafka, postgres = waiting_manager(timeline)
+    context = message_context()
+    deliver = postgres.deliver
+
+    async def delivers_while_another_group_writes_the_dlq_record(payloads: list[BaseModel]) -> None:
+        # A group of the same result with no relation to these two fails and
+        # writes the record of the message while the dependency is delivered.
+        context.states[0].dlq_written = True
+        await deliver(payloads)
+
+    postgres.deliver = delivers_while_another_group_writes_the_dlq_record  # ty: ignore[invalid-assignment]
+
+    outcomes = await mgr.deliver_all(both_results(), declared, 0, message_context=context)
+
+    assert outcomes == {KAFKA: DeliveryOutcome.NOT_STARTED, POSTGRES: DeliveryOutcome.DELIVERED}
+    assert kafka.delivered == []
+    # The sink will not start, so the result does not sit through the wait.
+    assert [event for event in timeline if event.startswith('wait')] == []
+
+
+async def test_a_message_that_reaches_the_dlq_during_the_wait_is_not_started(monkeypatch):
+    kafka = FakeSink('out', 'kafka')
+    postgres = FakeSink('main', 'postgres')
+    mgr = manager_with((kafka, policy(depends_on=('postgres/main',), depends_on_wait=0.5)), (postgres, policy()))
+    context = message_context()
+    real_sleep = asyncio.sleep
+
+    async def another_result_writes_the_dlq_record(seconds: float, *args, **kwargs) -> None:
+        if seconds > 0:
+            # What a failed delivery of another result of the same message does while this one waits.
+            context.states[0].dlq_written = True
+        await real_sleep(0)
+
+    monkeypatch.setattr(manager_module.asyncio, 'sleep', another_result_writes_the_dlq_record)
+
+    with capture_logs() as logs:
+        outcomes = await mgr.deliver_all(both_results(), declared, 0, message_context=context)
+
+    assert outcomes == {KAFKA: DeliveryOutcome.NOT_STARTED, POSTGRES: DeliveryOutcome.DELIVERED}
+    assert kafka.delivered == []
+    assert [(entry['sink'], entry['reason']) for entry in logs if entry['event'] == 'sink_not_started'] == [
+        ('kafka/out', 'message_dlq')
+    ]
+
+
+async def test_a_cancelled_caller_ends_the_wait_and_the_dependent_does_not_start():
+    kafka = FakeSink('out', 'kafka')
+    postgres = FakeSink('main', 'postgres')
+    mgr = manager_with((kafka, policy(depends_on=('postgres/main',), depends_on_wait=30.0)), (postgres, policy()))
+
+    # The real clock: the call would wait 30 s; the caller gives up after 50 ms.
+    with capture_logs() as logs, pytest.raises(TimeoutError):
+        await asyncio.wait_for(
+            mgr.deliver_all(both_results(), declared, 0, message_context=message_context()), timeout=0.05
+        )
+
+    assert len(postgres.delivered) == 1
+    assert kafka.delivered == []
+    # A cancelled delivery is not counted as not started.
+    assert [entry for entry in logs if entry['event'] == 'sink_not_started'] == []
+
+
+async def test_the_group_gate_runs_after_the_wait(timeline):
+    mgr, _, _ = waiting_manager(timeline)
+
+    async def gate(key: tuple[str, str]) -> None:
+        timeline.append(f'gate {key[0]}')
+
+    await mgr.deliver_all(both_results(), declared, -1, message_context=message_context(), before_group_start=gate)
+
+    # The HTTP source checks its request timeout in the gate, so the gate must see the time the wait took.
+    assert timeline == [
+        'gate postgres',
+        'postgres start',
+        'postgres end',
+        'wait 0.5',
+        'gate kafka',
+        'kafka start',
+        'kafka end',
+    ]
 
 
 def test_message_context_needs_one_state_per_source_message():

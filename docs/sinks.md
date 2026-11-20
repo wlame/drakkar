@@ -335,6 +335,7 @@ sinks:
       on_failure: dlq        # dlq (default) | skip
       max_retries: 2         # 0 to 10: retries after the first attempt, spent only by a hook that returns RETRY
       depends_on: []         # sinks to deliver first, as '<type>/<name>'
+      depends_on_wait: 0     # time to wait after those sinks before this one starts, for example 500ms
 ```
 
 | Key | Default | Meaning |
@@ -342,6 +343,7 @@ sinks:
 | `on_failure` | `dlq` | What happens when the retry budget is spent. `dlq`: the message goes to the [DLQ](#dead-letter-queue) and is done. `skip`: the payloads of this sink are dropped and the message goes on. |
 | `max_retries` | `2` | Retries after the first attempt, spent only by a hook that returns `RETRY` (0 to 10). The default hook makes one attempt and then applies `on_failure`. The budget belongs to one sink for one result. |
 | `depends_on` | `[]` | Sinks that must deliver first, written `<type>/<name>`. See [Sink dependencies](#sink-dependencies-depends_on). |
+| `depends_on_wait` | `0` | Time to wait after the sinks of `depends_on` delivered, before this sink starts (`0` to `1h`, and shorter than `executor.drain_timeout`). See [Waiting after the dependencies](#waiting-after-the-dependencies-depends_on_wait). |
 
 Environment overrides follow the usual rule:
 `DK_SINKS__POSTGRES__MAIN_DB__ON_FAILURE=skip`.
@@ -359,6 +361,9 @@ The config load refuses a bad policy with one of these messages
 <path>.depends_on: '<ref>' is not a configured sink; write '<type>/<name>'
 <path>.depends_on: a sink cannot depend on itself
 sinks: depends_on forms a cycle: <a> -> <b> -> <a>
+<path>.depends_on_wait needs <path>.depends_on: the wait runs after the sinks this sink depends on
+<path>.depends_on_wait must be at most 1h, got <v>
+<path>.depends_on_wait (<v>) must be < executor.drain_timeout (<d>)
 ```
 
 #### `on_failure: dlq` — the message is done
@@ -434,6 +439,74 @@ another result, and does not retry a dependent when a dependency recovers
 later. Inside one group the payload order is the delivery order, as always.
 The load checks every reference, refuses a sink that depends on itself, and
 refuses a cycle (the messages are listed under [Failure policy](#failure-policy)).
+
+#### Waiting after the dependencies (`depends_on_wait`)
+
+Sometimes the data that a dependency wrote is not visible at once to what the
+next sink triggers: a read replica is behind, an index is not refreshed yet,
+or another service needs a moment to process it. `depends_on_wait` puts a
+fixed wait between the dependencies and the dependent sink:
+
+```yaml
+sinks:
+  postgres:
+    main_db: {}
+  kafka:
+    order_events:
+      topic: "order-events"
+      depends_on: [postgres/main_db]
+      depends_on_wait: 500ms       # consumers of the event read from a replica
+```
+
+The rules for one result:
+
+1. When every dependency with payloads in this result has finished, and at
+   least one of them **delivered**, the sink starts `depends_on_wait` later.
+   With several dependencies there is one wait, after the last of them.
+2. There is no wait when no dependency delivered anything: none of them had
+   payloads in this result, or each of them was skipped. Nothing was written,
+   so there is nothing to wait for.
+3. There is no wait when the sink does not start: a dependency ended in
+   `dlq` or failed (`message_dlq`, `dependency_failed`), or the message is
+   on the DLQ already.
+4. The wait runs once, before the first attempt. A retry of the sink does not
+   wait again.
+5. A message that reaches the DLQ during the wait (another result of it
+   failed) is not delivered to the sink: `sink_not_started`, reason
+   `message_dlq`.
+
+The value is a duration from `0` (no wait, the default) to `1h`. It must be
+shorter than `executor.drain_timeout` (`30s` by default), so a longer wait
+needs a longer drain time. A value above `0` needs a `depends_on`, and the
+key is on the instance only, never in `sinks.defaults`.
+
+What the wait costs:
+
+- The result is not finished until the wait and the delivery are over. For
+  a task result or a message result, the message keeps its offset
+  uncommitted and its tasks stay in the
+  [pending budget](configuration.md#backpressure) for that time. A window
+  result has its offsets completed already, so there the wait only delays
+  the delivery. Results of
+  other tasks and messages are delivered at the same time, so the wait adds
+  latency, not a queue: the cost is that more work is in flight at once.
+- A stop or a revoke waits for the deliveries in flight, the wait included,
+  for at most `executor.drain_timeout`. A result that is still not finished
+  when that time ends is cancelled like any other delivery in flight: its
+  offset stays uncommitted, and the message is delivered again after the
+  restart, to every sink of the result. The cancellation ends the wait at once. A drain
+  that runs out of time at a stop also skips the final commits of the other
+  partitions. This is why the load refuses a `depends_on_wait` that is not
+  shorter than `executor.drain_timeout`. Keep the wait well below it: the
+  deliveries before and after the wait need time too.
+- For the [HTTP source](webapp.md) the wait is part of the request, so it
+  counts against `sources.http.request_timeout`. A request that times out
+  ends the wait at once, and the sink does not start.
+- An open circuit of the sink does not skip the wait: the sink's
+  `on_failure` applies after it.
+- A fixed wait is a guess. It does not prove that the replica caught up. When
+  a consumer must not read early under any load, let it check for the data
+  itself.
 
 ### Window results
 

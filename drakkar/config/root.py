@@ -48,6 +48,7 @@ from drakkar.config.strict import (
 )
 from drakkar.config.ui import UIConfig
 from drakkar.config.unit_bounds import check_unit_bounds
+from drakkar.config.units import seconds_text
 from drakkar.config.webapp import WebAppConfig
 from drakkar.schedule import sanitize_cluster
 
@@ -262,6 +263,12 @@ class DrakkarConfig(BaseSettings):
         self.sinks.check_dependencies()
         return self
 
+    @model_validator(mode='after')
+    def _validate_sink_waits(self) -> 'DrakkarConfig':
+        """Every ``depends_on_wait`` is shorter than ``executor.drain_timeout``."""
+        self.check_sink_waits()
+        return self
+
     @property
     def resolved_persistence(self) -> Persistence:
         """The durable store of the recorder: ``recorder.provider``, or ``none`` with the recorder off."""
@@ -373,6 +380,28 @@ class DrakkarConfig(BaseSettings):
             _require_declared_connection(
                 'autodiscover.connection', autodiscover.provider, autodiscover.connection, self.connections
             )
+
+    def check_sink_waits(self) -> None:
+        """Refuse a ``depends_on_wait`` that is not shorter than ``executor.drain_timeout``.
+
+        A stop or a revoke waits for the deliveries in flight for
+        ``executor.drain_timeout``. A result that waits as long as that never
+        ends in time: the drain times out, and a drain that timed out skips the
+        final commits of every partition. Instances are checked in sorted
+        reference order. The load calls this, and so does the startup after
+        ``on_startup``, which may have changed ``executor.drain_timeout``.
+
+        Raises:
+            ValueError: with the pinned message of the first such instance.
+        """
+        drain_timeout = self.executor.drain_timeout
+        for ref, policy in sorted(self.sinks.policies().items()):
+            if policy.depends_on_wait > 0 and policy.depends_on_wait >= drain_timeout:
+                path = self.sinks.instance_path(ref)
+                raise ValueError(
+                    f'{path}.depends_on_wait ({seconds_text(policy.depends_on_wait)}) must be < '
+                    f'executor.drain_timeout ({seconds_text(drain_timeout)})'
+                )
 
     def check_detach(self) -> None:
         """Refuse detach durations out of order, a detach with no store for its budget, and a UI switch alone.

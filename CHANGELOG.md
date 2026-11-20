@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `depends_on_wait` on a sink instance: a fixed wait between the sinks of `depends_on` and this sink (`depends_on_wait: 500ms`, from `0` to `1h`, default `0`). When every dependency of a result has finished and at least one of them delivered payloads, the sink starts after the wait. Use it when the data of a dependency needs time to become visible, for example on a read replica. There is no wait when no dependency delivered anything, and none before a retry. The load refuses a value above `0` without `depends_on`, and a value that is not shorter than `executor.drain_timeout`, because a stop waits for a delivery only that long. See Sinks, Waiting after the dependencies.
+
 ### Fixed
 
 - The delivery check of the integration harness (`just verify-delivery`) no longer reports late requests as lost. It took a row count that stood still for 5 seconds as the end of the drain, but the last messages of a backlog arrive tens of seconds apart. It now waits until every produced request has its row, up to `--wait-seconds`. The scheduled `Integration` workflow runs `integration/verify-after-drain.sh`, which waits for a consumer lag of 0 first; the limits of that script can be set with `PRODUCER_DONE_LIMIT_SECONDS` and `DRAIN_LIMIT_SECONDS`.

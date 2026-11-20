@@ -157,6 +157,23 @@ async def test_http_depends_on_orders_groups_across_types():
     assert {kind: result.delivered for kind, result in report.sinks.by_type.items()} == {'kafka': 1, 'postgres': 1}
 
 
+async def test_http_request_timeout_ends_a_depends_on_wait():
+    kafka = FakeSink('out', 'kafka')
+    postgres = FakeSink('main', 'postgres')
+    manager = manager_with((kafka, policy(depends_on=('postgres/main',), depends_on_wait=30.0)), (postgres, policy()))
+    collect = CollectResult(kafka=[KafkaPayload(data=Data())], postgres=[PostgresPayload(table='t', data=Data())])
+    runner = make_runner(Handler(collect), manager)
+
+    # The route bounds the run with its request timeout and cancels it; the
+    # real clock is in use, so a wait that the cancellation did not end would
+    # hold the run for 30 s.
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(runner.run(make_ctx()), timeout=0.05)
+
+    assert len(postgres.delivered) == 1
+    assert kafka.delivered == []
+
+
 async def test_http_summary_counts_per_type_from_outcomes():
     out = FakeSink('out', 'kafka')
     audit = FakeSink('audit', 'kafka')

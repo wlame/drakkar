@@ -11,6 +11,7 @@ when the hook changed one of them. These tests pin both halves.
 
 from __future__ import annotations
 
+import pytest
 from structlog.testing import capture_logs
 
 from drakkar import BaseDrakkarHandler, DrakkarApp, DrakkarConfig
@@ -218,6 +219,7 @@ class TestSinkPoliciesAreResolvedAtConstruction:
             async def on_startup(self, config: DrakkarConfig) -> DrakkarConfig:
                 config.sinks.kafka['results'].delivery_timeout = 7.5
                 config.sinks.kafka['results'].depends_on.append('kafka/results')
+                config.sinks.kafka['results'].depends_on_wait = 2.0
                 return config
 
         app = DrakkarApp(handler=TunesTheSink(), config=_config_with_a_sink())
@@ -225,11 +227,31 @@ class TestSinkPoliciesAreResolvedAtConstruction:
         assert await self._ignored_settings(app) == [
             'sinks.kafka.results.delivery_timeout',
             'sinks.kafka.results.depends_on',
+            'sinks.kafka.results.depends_on_wait',
         ]
 
         app._build_sinks()
         assert _results_sink(app).delivery_timeout_seconds == 30.0
         assert app._sink_manager._policies[('kafka', 'results')].depends_on == ()
+        assert app._sink_manager._policies[('kafka', 'results')].depends_on_wait == 0.0
+
+    async def test_a_drain_timeout_lowered_below_a_sink_wait_gets_the_load_message(self):
+        config = make_config(
+            sinks={
+                'kafka': {
+                    'results': {'topic': 'out', 'depends_on': ['kafka/audit'], 'depends_on_wait': '20s'},
+                    'audit': {'topic': 'audit'},
+                }
+            }
+        )
+        app = DrakkarApp(handler=NoopHandler(), config=config)
+        # What an ``on_startup`` hook can do: the wait fitted the drain time of the config file.
+        app._config.executor.drain_timeout = 10
+
+        with pytest.raises(ValueError) as raised:
+            app._lifecycle._check_config_after_startup()
+
+        assert 'sinks.kafka.results.depends_on_wait (20s) must be < executor.drain_timeout (10s)' in str(raised.value)
 
     async def test_a_replaced_config_object_keeps_the_resolved_policy_too(self):
         class ReplacesTheConfig(NoopHandler):

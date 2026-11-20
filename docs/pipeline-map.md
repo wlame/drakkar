@@ -176,7 +176,7 @@ Decided by: `on_task_complete` (Kafka + arrange, Kafka + arrange_stream), `on_gr
 
 The payloads of a result go to their sinks, in parallel unless each sink's `depends_on` orders them. The failure policy keys of `sinks.defaults` apply to every sink that does not set its own.
 
-Decided by: `sinks.defaults.on_failure`, `sinks.defaults.max_retries`, `sinks.defaults.breaker_failures`, `sinks.<type>.*.depends_on`, `on_delivery_error`.
+Decided by: `sinks.defaults.on_failure`, `sinks.defaults.max_retries`, `sinks.defaults.breaker_failures`, `sinks.<type>.*.depends_on`, `sinks.<type>.*.depends_on_wait`, `on_delivery_error`.
 
 | When | Form | What happens | Offset or response | Record |
 |---|---|---|---|---|

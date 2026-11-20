@@ -450,7 +450,10 @@ message (see [Failure policy](sinks.md#failure-policy)):
 
 - Each sink's declared `on_failure`, `max_retries` and
   [`depends_on`](sinks.md#sink-dependencies-depends_on) apply. A sink that
-  depends on another starts only after that sink delivered or skipped.
+  depends on another starts only after that sink delivered or skipped. A
+  [`depends_on_wait`](sinks.md#waiting-after-the-dependencies-depends_on_wait)
+  is part of the request, so it counts against `request_timeout`; a request
+  that times out ends the wait.
 - A raising `on_delivery_error` is logged `delivery_error_hook_failed` and the
   sink's declared `on_failure` applies.
 - When a sink's delivery ends in `dlq`, one [DLQ record](sinks.md#the-dlq-record)

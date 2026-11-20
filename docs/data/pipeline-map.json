@@ -160,6 +160,7 @@
         {"kind": "config", "ref": "sinks.defaults.max_retries"},
         {"kind": "config", "ref": "sinks.defaults.breaker_failures"},
         {"kind": "config", "ref": "sinks.<type>.*.depends_on"},
+        {"kind": "config", "ref": "sinks.<type>.*.depends_on_wait"},
         {"kind": "hook", "ref": "on_delivery_error"}
       ],
       "outcomes": [

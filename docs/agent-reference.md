@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `2a7e74f7f7b2e75c`.
+Registry version: `f7c86eadf0b78db0`.
 
 ## Concepts
 
@@ -150,7 +150,7 @@ Sinks write the results to Kafka, Postgres, Mongo, Redis, HTTP or files; each si
 
 The result hooks return payloads for named sink instances. The worker delivers them per sink, in payload order. A failed delivery calls `on_delivery_error`, which may retry; the retries are bounded by `max_retries` of the sink. When the retries are spent the sink policy `on_failure` decides: `dlq` writes the source message to the DLQ, `skip` drops the payloads.
 
-Each sink has a circuit breaker: after `breaker_failures` failed deliveries it opens for `breaker_cooldown`, and deliveries then follow `on_failure` at once. A sink can depend on other sinks (`depends_on`); it starts only after its dependencies delivered or skipped.
+Each sink has a circuit breaker: after `breaker_failures` failed deliveries it opens for `breaker_cooldown`, and deliveries then follow `on_failure` at once. A sink can depend on other sinks (`depends_on`); it starts only after its dependencies delivered or skipped, and `depends_on_wait` later when one of them delivered.
 
 The defaults of every policy key are in `sinks.defaults`; an instance can set its own value.
 

@@ -138,7 +138,7 @@ point where config can be changed at runtime.
     | `sources.kafka.enabled` | handler validation and source construction |
     | `sources.http.enabled` | handler validation and source construction |
     | `storage.dir` | the worker creates its own-files folder before `on_startup` runs |
-    | `sinks.defaults`, and on each sink `on_failure`, `max_retries`, `delivery_timeout`, `breaker_failures`, `breaker_cooldown`, `depends_on` | each sink's policy is resolved when the worker is constructed |
+    | `sinks.defaults`, and on each sink `on_failure`, `max_retries`, `delivery_timeout`, `breaker_failures`, `breaker_cooldown`, `depends_on`, `depends_on_wait` | each sink's policy is resolved when the worker is constructed |
 
     Set those in the config file or through their `DK_` environment
     overrides instead. The worker does not fail on such a change — it logs

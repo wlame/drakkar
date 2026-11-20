@@ -57,11 +57,12 @@ _REDIS_SCRIPT_NAME_RE = _PG_STATEMENT_NAME_RE
 
 
 # The failure policy of one sink instance. The keys are shared by every sink
-# type; every one but ``depends_on`` has its default in ``sinks.defaults``.
+# type; every one but ``depends_on`` and ``depends_on_wait`` has its default in
+# ``sinks.defaults``.
 ON_FAILURE_CHOICES = ('dlq', 'skip')
 MAX_RETRIES_LIMIT = 10
 DEFAULTED_POLICY_KEYS = ('on_failure', 'max_retries', 'delivery_timeout', 'breaker_failures', 'breaker_cooldown')
-POLICY_KEYS = (*DEFAULTED_POLICY_KEYS, 'depends_on')
+POLICY_KEYS = (*DEFAULTED_POLICY_KEYS, 'depends_on', 'depends_on_wait')
 
 # The same integer rule as the ``max_retries`` field, so the range check sees
 # the value the field would hold (``3.0`` and ``'3'`` are 3; ``2.5`` is left to
@@ -157,6 +158,16 @@ class SinkInstanceConfig(ConfigModel):
             'Checked at load: every reference exists, no self-reference, no cycle.'
         ),
     )
+    depends_on_wait: Duration = Field(
+        default=0.0,
+        description=(
+            'Time to wait between the sinks of depends_on and this sink, at most 1h. When every dependency '
+            'of a result has finished and at least one of them delivered payloads, this sink starts after '
+            'the wait. Use it when the data of a dependency needs time to become visible, for example on a '
+            'replica. 0 is no wait. A value above 0 needs depends_on and must be shorter than '
+            'executor.drain_timeout: a stop waits for a delivery only that long.'
+        ),
+    )
 
 
 class SinkPolicy(ConfigModel):
@@ -170,6 +181,7 @@ class SinkPolicy(ConfigModel):
     breaker_failures: int
     breaker_cooldown: float
     depends_on: tuple[str, ...]
+    depends_on_wait: float = 0.0
 
     @classmethod
     def of(cls, instance: SinkInstanceConfig, defaults: SinkDefaults) -> 'SinkPolicy':
@@ -178,7 +190,7 @@ class SinkPolicy(ConfigModel):
         for key, value in resolved.items():
             if value is None:
                 resolved[key] = getattr(defaults, key)
-        return cls(**resolved, depends_on=tuple(instance.depends_on))
+        return cls(**resolved, depends_on=tuple(instance.depends_on), depends_on_wait=instance.depends_on_wait)
 
 
 def check_instance_policy(path: str, raw: Mapping[str, Any]) -> None:
@@ -694,10 +706,10 @@ class SinksConfig(ConfigModel):
         return {ref: list(instances[ref][1].depends_on) for ref in sorted(instances)}
 
     def check_dependencies(self) -> None:
-        """Refuse an unknown reference, a self-reference or a cycle in ``depends_on``.
+        """Refuse a wait with no dependency, an unknown reference, a self-reference or a cycle in ``depends_on``.
 
-        Instances are checked in sorted reference order and each one's
-        references in their declared order; the cycle check runs last.
+        Instances are checked in sorted reference order: first the wait,
+        then each reference in its declared order; the cycle check runs last.
 
         Raises:
             ValueError: with the pinned message of the first broken rule.
@@ -705,6 +717,10 @@ class SinksConfig(ConfigModel):
         instances = self._instances()
         for ref in sorted(instances):
             path, policy = instances[ref]
+            if policy.depends_on_wait > 0 and not policy.depends_on:
+                raise ValueError(
+                    f'{path}.depends_on_wait needs {path}.depends_on: the wait runs after the sinks this sink depends on'
+                )
             for dependency in policy.depends_on:
                 if dependency == ref:
                     raise ValueError(f'{path}.depends_on: a sink cannot depend on itself')

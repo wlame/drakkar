@@ -603,7 +603,10 @@ The `SinkManager.deliver_all()` method handles delivery to all sinks:
 dependencies with payloads in this result settled with success (delivered or
 skipped); a dependency that ended the message on the DLQ, or failed without a
 record, stops it (`sink_not_started`, reason `message_dlq` or
-`dependency_failed`). A message that is already on the DLQ starts no group at
+`dependency_failed`). A sink with
+[`depends_on_wait`](sinks.md#waiting-after-the-dependencies-depends_on_wait)
+starts that long after its last dependency finished, when at least one
+dependency delivered. A message that is already on the DLQ starts no group at
 all.
 
 **Per-sink delivery** (for each group):

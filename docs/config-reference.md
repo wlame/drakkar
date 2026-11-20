@@ -194,6 +194,7 @@ sinks:
       on_failure: skip             # the same five keys, on one instance. env: DK_SINKS__KAFKA__RESULTS__ON_FAILURE
       delivery_timeout: 10s        # env: DK_SINKS__KAFKA__RESULTS__DELIVERY_TIMEOUT
       depends_on: []               # sinks to deliver first, as '<type>/<name>' (set it in YAML)
+      depends_on_wait: 0           # wait after those sinks delivered, before this one starts; 0 to 1h, below executor.drain_timeout. env: DK_SINKS__KAFKA__RESULTS__DEPENDS_ON_WAIT  · reasonable: 100ms–5s
 ```
 
 ### Kafka sink

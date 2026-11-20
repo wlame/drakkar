@@ -16,7 +16,7 @@ RESILIENCE_KEYS = ('timeout', 'max_retries', 'backoff', 'max_backoff', 'breaker_
 
 
 def _sink(sink_type: str, *keys: str) -> list[str]:
-    return [f'sinks.{sink_type}.*.{key}' for key in (*SINK_POLICY_KEYS, 'depends_on', *keys)]
+    return [f'sinks.{sink_type}.*.{key}' for key in (*SINK_POLICY_KEYS, 'depends_on', 'depends_on_wait', *keys)]
 
 
 def _resilience(section: str) -> list[str]:

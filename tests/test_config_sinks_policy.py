@@ -125,6 +125,83 @@ def test_max_retries_bounds_and_whole_number_fraction_keeps_the_integer_rule():
     assert 'fractional part' in text
 
 
+def test_depends_on_wait_defaults_to_no_wait_and_loads_a_duration():
+    config = _config(
+        connections={'postgres': {'main': {'dsn': 'postgresql://db.example/drakkar'}}},
+        sinks={
+            'kafka': {'results': {'topic': 'out', 'depends_on': ['postgres/main-db'], 'depends_on_wait': '500ms'}},
+            'postgres': {'main-db': {}},
+        },
+    )
+
+    assert config.sinks.kafka['results'].depends_on_wait == 0.5
+    assert config.sinks.policy_of('kafka', 'results').depends_on_wait == 0.5
+    assert config.sinks.postgres['main-db'].depends_on_wait == 0.0
+    assert config.sinks.policy_of('postgres', 'main-db').depends_on_wait == 0.0
+
+
+def test_depends_on_wait_without_depends_on_message():
+    text = _load_error(sinks=_kafka_sinks(results={'depends_on_wait': '2s'}))
+
+    assert (
+        'sinks.kafka.results.depends_on_wait needs sinks.kafka.results.depends_on: '
+        'the wait runs after the sinks this sink depends on'
+    ) in text
+
+
+def test_depends_on_wait_of_zero_needs_no_depends_on():
+    config = _config(sinks=_kafka_sinks(results={'depends_on_wait': 0}))
+
+    assert config.sinks.policy_of('kafka', 'results').depends_on_wait == 0.0
+
+
+def test_depends_on_wait_above_one_hour_message():
+    text = _load_error(
+        sinks=_kafka_sinks(results={'depends_on': ['kafka/audit'], 'depends_on_wait': '2h'}, audit={}),
+    )
+
+    assert 'sinks.kafka.results.depends_on_wait must be at most 1h, got 2h' in text
+
+
+def test_depends_on_wait_must_be_shorter_than_the_drain_timeout():
+    sinks = _kafka_sinks(results={'depends_on': ['kafka/audit'], 'depends_on_wait': '45s'}, audit={})
+
+    text = _load_error(sinks=sinks)
+
+    assert 'sinks.kafka.results.depends_on_wait (45s) must be < executor.drain_timeout (30s)' in text
+
+
+def test_a_longer_drain_timeout_allows_a_longer_depends_on_wait():
+    sinks = _kafka_sinks(results={'depends_on': ['kafka/audit'], 'depends_on_wait': '45s'}, audit={})
+
+    config = _config(sinks=sinks, executor={'drain_timeout': '2m'})
+
+    assert config.sinks.policy_of('kafka', 'results').depends_on_wait == 45.0
+
+
+def test_depends_on_wait_against_the_drain_timeout_names_the_first_instance_in_sorted_order():
+    sinks = _kafka_sinks(
+        zeta={'depends_on': ['kafka/audit'], 'depends_on_wait': '50s'},
+        alpha={'depends_on': ['kafka/audit'], 'depends_on_wait': '40s'},
+        audit={},
+    )
+
+    text = _load_error(sinks=sinks)
+
+    assert 'sinks.kafka.alpha.depends_on_wait (40s) must be < executor.drain_timeout (30s)' in text
+    assert 'zeta' not in text
+
+
+def test_depends_on_wait_is_checked_before_the_references_of_the_same_instance():
+    # alpha has both faults of its own rules in one config: the wait is named first.
+    sinks = _kafka_sinks(alpha={'depends_on_wait': '1s'}, zeta={'depends_on': ['kafka/missing']})
+
+    text = _load_error(sinks=sinks)
+
+    assert 'sinks.kafka.alpha.depends_on_wait needs sinks.kafka.alpha.depends_on' in text
+    assert 'kafka/missing' not in text
+
+
 def test_depends_on_unknown_reference_message():
     text = _load_error(sinks=_kafka_sinks(results={'depends_on': ['postgres/main-db']}))
 

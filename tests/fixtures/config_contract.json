@@ -1,5 +1,5 @@
 {
-  "_comment": "Config contract shared byte-for-byte by every implementation: the load error for unknown keys, the summary line, the validation messages (the reserved cluster folder names, api, autodiscover, cache exchange, recorder, connections, sinks, threads, the units of single keys and the ranges of values with a unit), and the resolved policy of a sink instance (sink_policies: a policy key not given reads sinks.defaults, a given one wins). Each case deep-merges its yaml over base and loads it through the public loader.",
+  "_comment": "Config contract shared byte-for-byte by every implementation: the load error for unknown keys, the summary line, the validation messages (the reserved cluster folder names, api, autodiscover, cache exchange, recorder, connections, sinks, threads, the units of single keys and the ranges of values with a unit), and the resolved policy of a sink instance (sink_policies: a policy key not given reads sinks.defaults, a given one wins; depends_on and depends_on_wait are keys of the instance only). Each case deep-merges its yaml over base and loads it through the public loader.",
   "base": {
     "connections": {
       "kafka": {
@@ -1881,6 +1881,133 @@
       "message": "sinks: depends_on forms a cycle: kafka/b -> kafka/c -> kafka/b"
     },
     {
+      "name": "sink_depends_on_wait_without_depends_on",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "depends_on_wait": "500ms"
+            }
+          }
+        }
+      },
+      "message": "sinks.kafka.results.depends_on_wait needs sinks.kafka.results.depends_on: the wait runs after the sinks this sink depends on"
+    },
+    {
+      "name": "sink_depends_on_wait_above_ceiling",
+      "yaml": {
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://db.example/drakkar"
+            }
+          }
+        },
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "depends_on": [
+                "postgres/main-db"
+              ],
+              "depends_on_wait": "61m"
+            }
+          },
+          "postgres": {
+            "main-db": {}
+          }
+        }
+      },
+      "message": "sinks.kafka.results.depends_on_wait must be at most 1h, got 1h1m",
+      "path": "sinks.kafka.results.depends_on_wait"
+    },
+    {
+      "name": "sink_depends_on_wait_without_a_unit",
+      "yaml": {
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://db.example/drakkar"
+            }
+          }
+        },
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "depends_on": [
+                "postgres/main-db"
+              ],
+              "depends_on_wait": 2
+            }
+          },
+          "postgres": {
+            "main-db": {}
+          }
+        }
+      },
+      "message": "needs a unit, for example 30s; got '2'",
+      "path": "sinks.kafka.results.depends_on_wait"
+    },
+    {
+      "name": "sink_depends_on_wait_equal_to_drain_timeout",
+      "yaml": {
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://db.example/drakkar"
+            }
+          }
+        },
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "depends_on": [
+                "postgres/main-db"
+              ],
+              "depends_on_wait": "30s"
+            }
+          },
+          "postgres": {
+            "main-db": {}
+          }
+        }
+      },
+      "message": "sinks.kafka.results.depends_on_wait (30s) must be < executor.drain_timeout (30s)"
+    },
+    {
+      "name": "sink_depends_on_wait_above_drain_timeout",
+      "yaml": {
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://db.example/drakkar"
+            }
+          }
+        },
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "depends_on": [
+                "postgres/main-db"
+              ],
+              "depends_on_wait": "1m30s"
+            }
+          },
+          "postgres": {
+            "main-db": {}
+          }
+        },
+        "executor": {
+          "drain_timeout": "1m"
+        }
+      },
+      "message": "sinks.kafka.results.depends_on_wait (1m30s) must be < executor.drain_timeout (1m)"
+    },
+    {
       "name": "executor_on_failure_unknown",
       "yaml": {
         "executor": {
@@ -3028,6 +3155,122 @@
       "value": [
         "postgres/main-db"
       ]
+    },
+    {
+      "name": "sink_depends_on_wait_default_zero",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out"
+            }
+          }
+        }
+      },
+      "path": "sinks.kafka.results.depends_on_wait",
+      "value": 0.0
+    },
+    {
+      "name": "sink_depends_on_wait_loads",
+      "yaml": {
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://db.example/drakkar"
+            }
+          }
+        },
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "depends_on": [
+                "postgres/main-db"
+              ],
+              "depends_on_wait": "500ms"
+            }
+          },
+          "postgres": {
+            "main-db": {}
+          }
+        }
+      },
+      "path": "sinks.kafka.results.depends_on_wait",
+      "value": 0.5
+    },
+    {
+      "name": "sink_depends_on_wait_at_the_ceiling_loads",
+      "yaml": {
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://db.example/drakkar"
+            }
+          }
+        },
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "depends_on": [
+                "postgres/main-db"
+              ],
+              "depends_on_wait": "1h"
+            }
+          },
+          "postgres": {
+            "main-db": {}
+          }
+        },
+        "executor": {
+          "drain_timeout": "2h"
+        }
+      },
+      "path": "sinks.kafka.results.depends_on_wait",
+      "value": 3600.0
+    },
+    {
+      "name": "sink_depends_on_wait_just_below_drain_timeout_loads",
+      "yaml": {
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://db.example/drakkar"
+            }
+          }
+        },
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "depends_on": [
+                "postgres/main-db"
+              ],
+              "depends_on_wait": "29s500ms"
+            }
+          },
+          "postgres": {
+            "main-db": {}
+          }
+        }
+      },
+      "path": "sinks.kafka.results.depends_on_wait",
+      "value": 29.5
+    },
+    {
+      "name": "sink_depends_on_wait_zero_without_depends_on_loads",
+      "yaml": {
+        "sinks": {
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "depends_on_wait": 0
+            }
+          }
+        }
+      },
+      "path": "sinks.kafka.results.depends_on_wait",
+      "value": 0.0
     },
     {
       "name": "executor_on_failure_default_skip",
@@ -4198,7 +4441,8 @@
         "delivery_timeout": 30.0,
         "breaker_failures": 5,
         "breaker_cooldown": 30.0,
-        "depends_on": []
+        "depends_on": [],
+        "depends_on_wait": 0.0
       }
     },
     {
@@ -4226,7 +4470,8 @@
         "delivery_timeout": 10.0,
         "breaker_failures": 3,
         "breaker_cooldown": 60.0,
-        "depends_on": []
+        "depends_on": [],
+        "depends_on_wait": 0.0
       }
     },
     {
@@ -4259,7 +4504,8 @@
         "delivery_timeout": 30.0,
         "breaker_failures": 5,
         "breaker_cooldown": 30.0,
-        "depends_on": []
+        "depends_on": [],
+        "depends_on_wait": 0.0
       }
     },
     {
@@ -4286,7 +4532,49 @@
         "delivery_timeout": 30.0,
         "breaker_failures": 5,
         "breaker_cooldown": 0.0,
-        "depends_on": []
+        "depends_on": [],
+        "depends_on_wait": 0.0
+      }
+    },
+    {
+      "name": "depends_on_and_its_wait_are_never_read_from_sinks_defaults",
+      "yaml": {
+        "connections": {
+          "postgres": {
+            "main": {
+              "dsn": "postgresql://db.example/drakkar"
+            }
+          }
+        },
+        "sinks": {
+          "defaults": {
+            "max_retries": 5
+          },
+          "kafka": {
+            "results": {
+              "topic": "out",
+              "depends_on": [
+                "postgres/main-db"
+              ],
+              "depends_on_wait": "2s"
+            }
+          },
+          "postgres": {
+            "main-db": {}
+          }
+        }
+      },
+      "sink": "kafka/results",
+      "policy": {
+        "on_failure": "dlq",
+        "max_retries": 5,
+        "delivery_timeout": 30.0,
+        "breaker_failures": 5,
+        "breaker_cooldown": 30.0,
+        "depends_on": [
+          "postgres/main-db"
+        ],
+        "depends_on_wait": 2.0
       }
     }
   ]

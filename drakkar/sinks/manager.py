@@ -601,7 +601,9 @@ class SinkManager:
         payloads in this result counts as satisfied. A dependency that ended
         the message on the DLQ stops its dependents with reason
         ``message_dlq``; one that failed without a record stops them with
-        ``dependency_failed``.
+        ``dependency_failed``. A group whose sink has ``depends_on_wait``
+        starts that long after its last dependency settled, when at least
+        one dependency delivered payloads of this result.
 
         Args:
             result: The CollectResult from on_task_complete(),
@@ -687,6 +689,7 @@ class SinkManager:
     ) -> DeliveryOutcome:
         """Wait for the group's dependencies in this result, then deliver it, or say why it did not start."""
         dependency_failed = False
+        dependency_delivered = False
         for dependency in self._dependencies.get(key, ()):
             dependency_settled = settled.get(dependency)
             if dependency_settled is None:
@@ -698,6 +701,21 @@ class SinkManager:
             if outcome not in _SATISFIED:
                 dependency_failed = True
                 break
+            if outcome is DeliveryOutcome.DELIVERED:
+                dependency_delivered = True
+        wait_seconds = self._policies[key].depends_on_wait
+        already_on_dlq = message_context is not None and message_context.is_on_dlq
+        if dependency_delivered and not dependency_failed and wait_seconds > 0 and not already_on_dlq:
+            # The data that a dependency just wrote needs time to become
+            # visible to what this sink triggers (a replica, an index). The
+            # wait runs once, here: not when no dependency wrote anything
+            # (none had payloads, or each was skipped), not for a message
+            # that is on the DLQ already (the sink will not start), and not
+            # before a retry of this sink. A cancelled caller ends it, as it
+            # ends the wait for the dependencies above. The checks below run
+            # after it, so a message that reached the DLQ meanwhile is not
+            # started.
+            await asyncio.sleep(wait_seconds)
         if before_group_start is not None:
             # Before the not-started note too: a gate that stops the call
             # (a dependency it stopped settles as failed) must not leave a

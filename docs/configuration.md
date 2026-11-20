@@ -729,11 +729,12 @@ The failure policy is one set of five keys. `sinks.defaults` gives the value for
 | `breaker_failures` | `int` | `5` | >= 1 | Consecutive terminal failures that trip the circuit breaker. See [Circuit breaker](#circuit-breaker). |
 | `breaker_cooldown` | duration | `30s` | >= `0` | How long the breaker stays open before one probe delivery goes through. |
 
-`depends_on` is on the instance only, never in `defaults`:
+`depends_on` and `depends_on_wait` are on the instance only, never in `defaults`:
 
 | Field | Type | Default | Constraints | Description |
 |-------|------|---------|-------------|-------------|
 | `depends_on` | `list[str]` | `[]` | each entry `<type>/<name>` of a configured sink; no self-reference, no cycle | Sinks that must deliver first inside one result. See [Sink dependencies](sinks.md#sink-dependencies-depends_on). |
+| `depends_on_wait` | duration | `0` | `0` to `1h`; shorter than `executor.drain_timeout`; a value above `0` needs `depends_on` | Time to wait after the sinks of `depends_on` delivered, before this sink starts. See [Waiting after the dependencies](sinks.md#waiting-after-the-dependencies-depends_on_wait). |
 
 ```yaml
 sinks:
