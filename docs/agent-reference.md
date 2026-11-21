@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `8a1715b639962dc9`.
+Registry version: `64255c37467673e7`.
 
 ## Concepts
 
@@ -165,7 +165,7 @@ The defaults of every policy key are in `sinks.defaults`; an instance can set it
 
 The DLQ is a Kafka topic that receives a failed source message unchanged, with dk- headers that describe the failure.
 
-A DLQ record holds the key and value of the source message, its headers without the `dk-` ones, and 15 `dk-` headers: the stage (`parse`, `execute` or `sink`), the error text, the sink, the task, the attempts, the source coordinates, the worker and the time. One source message gets at most one record.
+A DLQ record holds the key and value of the source message, its headers without the `dk-` ones, and 15 `dk-` headers: the stage (`parse`, `execute`, `sink`, `split` or `aggregate`), the error text, the sink, the task, the attempts, the source coordinates, the worker and the time. One source message gets at most one record.
 
 After a record is written, the message is done: no later delivery of it starts, and its offset is committed. When the record cannot be written, `dlq.on_send_failure` decides: `drop` loses the message and commits (`drakkar_dlq_dropped_payloads_total`), `stall` keeps the offset and pauses the partition.
 
@@ -1638,7 +1638,7 @@ DLQ records written, one per source message, all stages.
 
 ### `metric:drakkar_dlq_records_total`
 
-DLQ records by the stage that failed (parse, execute, sink).
+DLQ records by the stage that failed (parse, execute, sink, split, aggregate).
 
 **Meaning:** The stage names the step to investigate.
 
@@ -2792,7 +2792,7 @@ A delivery to one sink failed.
 
 A source message was written to the DLQ; no later delivery of it starts.
 
-**When:** Once per source message that gets a DLQ record, at the parse, execute or sink stage.
+**When:** Once per source message that gets a DLQ record, at the parse, execute, sink, split or aggregate stage.
 
 **Fields:**
 - `metadata`: The stage, the sink, the error, the sinks that already delivered and the attempts.
@@ -3273,7 +3273,7 @@ Find out why messages go to the DLQ and whether any are lost.
 **Question:** Why do messages go to the DLQ?
 
 **Steps:**
-1. Read drakkar_dlq_records_total by stage. Why: The stage (parse, execute, sink) names the failing step.
+1. Read drakkar_dlq_records_total by stage. Why: The stage (parse, execute, sink, split, aggregate) names the failing step.
 2. Read records on the DLQ topic with /api/v1/debug/kafka/dlq/messages. Why: The dk-error and dk-sink headers give the error text and the sink.
 3. Read drakkar_dlq_dropped_payloads_total and drakkar_dlq_send_failures_total. Why: Non-zero values mean messages were lost or the DLQ topic cannot be written.
 

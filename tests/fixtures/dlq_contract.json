@@ -348,6 +348,186 @@
         ]
       ],
       "expected_value_equal_to_input": true
+    },
+    {
+      "name": "split",
+      "input": {
+        "key": "item-42",
+        "value": "{\"id\": 42, \"items\": 5000}",
+        "source_headers": [
+          [
+            "traceparent",
+            "00-9c1e7a2b55d04f31-01"
+          ],
+          [
+            "empty-value",
+            null
+          ],
+          [
+            "dk-stage",
+            "execute"
+          ]
+        ],
+        "stage": "split",
+        "error": "split did not finish in 3 attempts",
+        "sink": null,
+        "task_id": null,
+        "attempts": 3,
+        "delivered_sinks": [],
+        "source_topic": "items",
+        "source_partition": 5,
+        "source_offset": 7700,
+        "source_timestamp_ms": 1793100000000,
+        "request_id": "req_20261121T090000_5b2e7c10_0003",
+        "worker": "worker-a",
+        "instance": "0123456789abcdef",
+        "failed_at": "2026-11-21T09:00:00.000001Z"
+      },
+      "expected_headers": [
+        [
+          "traceparent",
+          "00-9c1e7a2b55d04f31-01"
+        ],
+        [
+          "empty-value",
+          null
+        ],
+        [
+          "dk-record-version",
+          "1"
+        ],
+        [
+          "dk-stage",
+          "split"
+        ],
+        [
+          "dk-error",
+          "split did not finish in 3 attempts"
+        ],
+        [
+          "dk-attempts",
+          "3"
+        ],
+        [
+          "dk-source-topic",
+          "items"
+        ],
+        [
+          "dk-source-partition",
+          "5"
+        ],
+        [
+          "dk-source-offset",
+          "7700"
+        ],
+        [
+          "dk-source-timestamp",
+          "1793100000000"
+        ],
+        [
+          "dk-request-id",
+          "req_20261121T090000_5b2e7c10_0003"
+        ],
+        [
+          "dk-worker",
+          "worker-a"
+        ],
+        [
+          "dk-instance",
+          "0123456789abcdef"
+        ],
+        [
+          "dk-failed-at",
+          "2026-11-21T09:00:00.000001Z"
+        ]
+      ],
+      "expected_value_equal_to_input": true
+    },
+    {
+      "name": "aggregate",
+      "input": {
+        "key": null,
+        "value": {
+          "base64": "AAEC/w=="
+        },
+        "source_headers": [
+          [
+            "traceparent",
+            null
+          ]
+        ],
+        "stage": "aggregate",
+        "error": "job timed out after 2h: 3 of 5 parts",
+        "sink": null,
+        "task_id": null,
+        "attempts": null,
+        "delivered_sinks": [
+          "kafka/summary"
+        ],
+        "source_topic": "items",
+        "source_partition": 0,
+        "source_offset": 12,
+        "source_timestamp_ms": 1793100000999,
+        "request_id": "req_20261121T090010_5b2e7c10_0004",
+        "worker": "worker-a",
+        "instance": "0123456789abcdef",
+        "failed_at": "2026-11-21T09:00:00.000001Z"
+      },
+      "expected_headers": [
+        [
+          "traceparent",
+          null
+        ],
+        [
+          "dk-record-version",
+          "1"
+        ],
+        [
+          "dk-stage",
+          "aggregate"
+        ],
+        [
+          "dk-error",
+          "job timed out after 2h: 3 of 5 parts"
+        ],
+        [
+          "dk-delivered-sinks",
+          "kafka/summary"
+        ],
+        [
+          "dk-source-topic",
+          "items"
+        ],
+        [
+          "dk-source-partition",
+          "0"
+        ],
+        [
+          "dk-source-offset",
+          "12"
+        ],
+        [
+          "dk-source-timestamp",
+          "1793100000999"
+        ],
+        [
+          "dk-request-id",
+          "req_20261121T090010_5b2e7c10_0004"
+        ],
+        [
+          "dk-worker",
+          "worker-a"
+        ],
+        [
+          "dk-instance",
+          "0123456789abcdef"
+        ],
+        [
+          "dk-failed-at",
+          "2026-11-21T09:00:00.000001Z"
+        ]
+      ],
+      "expected_value_equal_to_input": true
     }
   ],
   "error_cut_cases": [

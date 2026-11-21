@@ -503,6 +503,12 @@ def test_arg_parser_defaults(replay_module):
     assert args.stage is None
 
 
+@pytest.mark.parametrize('stage', ['parse', 'execute', 'sink', 'split', 'aggregate'])
+def test_arg_parser_accepts_every_dlq_stage(replay_module, stage):
+    args = replay_module._build_arg_parser().parse_args(['--dlq-config', 'x.yaml', f'--stage={stage}'])
+    assert args.stage == stage
+
+
 def test_arg_parser_refuses_an_unknown_stage(replay_module, capsys):
     parser = replay_module._build_arg_parser()
     with pytest.raises(SystemExit):

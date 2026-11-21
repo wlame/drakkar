@@ -136,7 +136,7 @@
   question: Why do messages go to the DLQ?
   steps:
     - do: Read drakkar_dlq_records_total by stage.
-      why: The stage (parse, execute, sink) names the failing step.
+      why: The stage (parse, execute, sink, split, aggregate) names the failing step.
     - do: Read records on the DLQ topic with /api/v1/debug/kafka/dlq/messages.
       why: The dk-error and dk-sink headers give the error text and the sink.
     - do: Read drakkar_dlq_dropped_payloads_total and drakkar_dlq_send_failures_total.

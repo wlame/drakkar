@@ -46,7 +46,7 @@ DLQ_HEADER_ORDER: tuple[str, ...] = (
     'dk-failed-at',
 )
 
-DLQStage = Literal['parse', 'execute', 'sink']
+DLQStage = Literal['parse', 'execute', 'sink', 'split', 'aggregate']
 
 # A Kafka header may carry no value at all (null), which is not the same as
 # an empty value; the record keeps the distinction when it copies headers.
@@ -69,11 +69,13 @@ class DLQRecord(BaseModel):
         default_factory=list,
         description='The source message headers in their order; dk- headers among them are dropped on write.',
     )
-    stage: DLQStage = Field(description='Where the message failed: parse, execute or sink.')
+    stage: DLQStage = Field(description='Where the message failed: parse, execute, sink, split or aggregate.')
     error: str = Field(description='The error text; redacted and cut when written.')
     sink: str | None = Field(default=None, description='<sink_type>/<sink_name> of the failed sink; sink stage only.')
     task_id: str | None = Field(default=None, description="The failed task's id; execute stage only.")
-    attempts: int | None = Field(default=None, description='Attempts made; None for the parse stage.')
+    attempts: int | None = Field(
+        default=None, description='Attempts made; None for the parse stage and when the stage gives none.'
+    )
     delivered_sinks: list[str] = Field(
         default_factory=list,
         description='<sink_type>/<sink_name> of every sink that delivered a result of this message.',

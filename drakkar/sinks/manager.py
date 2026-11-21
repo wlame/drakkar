@@ -16,7 +16,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import structlog
 from pydantic import BaseModel
@@ -43,7 +43,8 @@ from drakkar.models import (
 from drakkar.providers.resilience import RateLimitedLog
 from drakkar.request_ids import joined_request_ids
 from drakkar.sinks.base import BaseSink
-from drakkar.sinks.dlq_record import DLQRecord, cut_error
+from drakkar.sinks.dlq_record import DLQRecord, DLQStage, cut_error
+from drakkar.split.models import PartDLQ, SinkCounts
 from drakkar.utils import redact_url
 
 _TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
@@ -121,6 +122,19 @@ class DeliveryOutcome(StrEnum):
 # skipped is not "undelivered".
 _SATISFIED = frozenset({DeliveryOutcome.DELIVERED, DeliveryOutcome.SKIPPED})
 
+# The ``SinkCounts`` field that one decided delivery group adds to. A group
+# that did not start has no entry: it counts nothing.
+_COUNTED_FIELD: dict[DeliveryOutcome, str] = {
+    DeliveryOutcome.DELIVERED: 'delivered',
+    DeliveryOutcome.SKIPPED: 'skipped',
+    DeliveryOutcome.DLQ: 'failed',
+    DeliveryOutcome.FAILED: 'failed',
+}
+
+# The stage of a split whose result may not name a sink of the other one.
+SplitStage = Literal['part', 'aggregate']
+_OTHER_SPLIT_STAGE: dict[SplitStage, SplitStage] = {'part': 'aggregate', 'aggregate': 'part'}
+
 
 @dataclass
 class MessageDLQState:
@@ -134,12 +148,21 @@ class MessageDLQState:
     failure of the message writes, counts and logs nothing new.
     ``lock`` guards the checks and the sets of both flags together with the
     record write, so one message gets one record or one counted loss.
+
+    ``capture`` keeps the DLQ outcome of the message in ``captured`` instead
+    of writing a record: the first outcome is kept, ``dlq_written`` is set as
+    a written record sets it, and nothing reaches the DLQ sink. ``counts``
+    holds, per sink ``<type>/<name>``, how many delivery groups of the
+    message were delivered, skipped or failed.
     """
 
     dlq_written: bool = False
     dlq_lost: bool = False
     delivered_sinks: set[str] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    capture: bool = False
+    captured: PartDLQ | None = None
+    counts: dict[str, SinkCounts] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -197,9 +220,26 @@ class MessageContext:
         """The request ids of the source messages joined with ',' (one id for one message); None for a window."""
         return joined_request_ids(message.request_id for message in self.source_messages)
 
+    @property
+    def is_captured(self) -> bool:
+        """True when every source message is in capture mode: a DLQ outcome writes no record."""
+        return bool(self.states) and all(state.capture for state in self.states)
+
     def pairs(self) -> Iterator[tuple[SourceMessage, MessageDLQState]]:
         """Each source message with its DLQ state."""
         return zip(self.source_messages, self.states, strict=True)
+
+    def count_delivery(self, key: SinkKey, outcome: DeliveryOutcome) -> None:
+        """Add one decided delivery group of sink ``key`` to the counts of every source message."""
+        counted_field = _COUNTED_FIELD.get(outcome)
+        if counted_field is None:
+            return
+        ref = sink_ref(key)
+        for state in self.states:
+            counts = state.counts.get(ref)
+            if counts is None:
+                counts = state.counts[ref] = SinkCounts()
+            setattr(counts, counted_field, getattr(counts, counted_field) + 1)
 
 
 class CollectCallback(Protocol):
@@ -299,6 +339,9 @@ class SinkManager:
         # One warning line per sink and event per minute for the failure
         # paths that can fire on every result of a failing sink.
         self._rate_limited_log = RateLimitedLog(time.monotonic)
+        # The sinks of the aggregate stage of split; None while split has not
+        # set the stages, and then no result is a stage error.
+        self._aggregate_sinks: frozenset[SinkKey] | None = None
 
     def attach_runtime(
         self,
@@ -570,6 +613,32 @@ class SinkManager:
                 continue
             for payload in payloads:
                 self.resolve_sink(sink_type, payload.sink)
+
+    def set_split_stages(self, aggregate_sinks: frozenset[tuple[str, str]]) -> None:
+        """Name the sinks of the aggregate stage of split; every other sink belongs to the part stage."""
+        self._aggregate_sinks = frozenset(aggregate_sinks)
+
+    def stage_error(self, result: CollectResult, stage: SplitStage) -> str | None:
+        """The error text when ``result``, made by a hook of ``stage``, names a sink of the other split stage.
+
+        The first such payload decides, in the order of the sink groups. A
+        payload whose sink cannot be resolved is left to ``validate_collect``.
+        None when the split stages were never set.
+        """
+        if self._aggregate_sinks is None:
+            return None
+        other_stage = _OTHER_SPLIT_STAGE[stage]
+        for field_name, sink_type in _FIELD_TO_SINK_TYPE.items():
+            for payload in getattr(result, field_name) or ():
+                try:
+                    sink = self.resolve_sink(sink_type, payload.sink)
+                except (SinkNotConfiguredError, AmbiguousSinkError):
+                    continue
+                key = (sink.sink_type, sink.name)
+                is_aggregate_sink = key in self._aggregate_sinks
+                if is_aggregate_sink == (other_stage == 'aggregate'):
+                    return f'sink {sink_ref(key)} belongs to the {other_stage} stage of split'
+        return None
 
     def _group_payloads(self, result: CollectResult) -> dict[SinkKey, list[BaseModel]]:
         """The result's payloads grouped by sink, each group in payload order."""
@@ -1066,6 +1135,7 @@ class SinkManager:
                 if message_context is not None:
                     for state in message_context.states:
                         state.delivered_sinks.add(sink_ref(key))
+                    message_context.count_delivery(key, DeliveryOutcome.DELIVERED)
                 return DeliveryOutcome.DELIVERED
         finally:
             # Probe-slot leak guard. ``record_success`` / ``record_failure``
@@ -1132,6 +1202,15 @@ class SinkManager:
                 partition_id=partition_id,
                 message_context=message_context,
             )
+        except SinkDeliveryFailedError:
+            # A stall: the delivery failed and no record exists. A
+            # cancellation is not caught here and counts nothing.
+            if message_context is not None:
+                message_context.count_delivery(key, DeliveryOutcome.FAILED)
+            raise
+        else:
+            if message_context is not None:
+                message_context.count_delivery(key, outcome)
             return outcome
         finally:
             self._record_sink_error(
@@ -1207,7 +1286,7 @@ class SinkManager:
         ``SinkDeliveryFailedError`` when a record could not be written and
         ``dlq.on_send_failure`` is ``stall``.
         """
-        if self._dlq_sink is None and self._dlq_unconfigured:
+        if self._dlq_sink is None and self._dlq_unconfigured and not _is_captured(message_context):
             # The DLQ has no destination by configuration, it is not broken:
             # stalling a partition over it would wedge a worker that never
             # asked for a DLQ. A live Kafka source always gives the DLQ a
@@ -1283,7 +1362,7 @@ class SinkManager:
         """
         # Not a sink: the label of the lost-record line and of the stall error.
         subject = ('executor', task.task_id)
-        if self._dlq_sink is None and self._dlq_unconfigured:
+        if self._dlq_sink is None and self._dlq_unconfigured and not _is_captured(message_context):
             message_count = len(message_context.source_messages) if message_context is not None else 1
             await self.drop_unconfigured_dlq_send(partition_id, message_count)
             return
@@ -1316,6 +1395,47 @@ class SinkManager:
                 partition=partition_id,
             )
 
+    async def send_job_dlq(
+        self,
+        message_context: MessageContext,
+        *,
+        stage: DLQStage,
+        error: str,
+        sink: str | None,
+        task_id: str | None,
+        attempts: int | None,
+        partition_id: int,
+    ) -> bool:
+        """Write one record with ``stage`` for each source message of a split job that is not yet on the DLQ.
+
+        The record goes through the same write path as the other stages: the
+        message's lock, one record per message, the ``message_dlq`` log line
+        and row. Returns True when every message has a record, written now or
+        earlier; False when one could not be written, and the caller then
+        applies ``dlq.on_send_failure``, as for a ``parse`` record.
+        """
+        if any(state.capture for state in message_context.states):
+            raise ValueError('send_job_dlq needs a message that is not in capture mode')
+        if self._dlq_sink is None:
+            if self._dlq_unconfigured:
+                await self.drop_unconfigured_dlq_send(partition_id, len(message_context.source_messages))
+            return False
+        await self._write_records(
+            message_context,
+            partition_id=partition_id,
+            build=lambda message, state: _message_record(
+                message,
+                is_request=message_context.is_request,
+                stage=stage,
+                error=error,
+                attempts=attempts,
+                delivered_sinks=state.delivered_sinks,
+                sink=sink,
+                task_id=task_id,
+            ),
+        )
+        return all(state.dlq_written for state in message_context.states)
+
     async def _write_records(
         self,
         message_context: MessageContext,
@@ -1346,7 +1466,13 @@ class SinkManager:
                     # Its loss is already counted and logged.
                     continue
                 record = build(message, state)
-                if self._dlq_sink is not None and await self._dlq_sink.send(record, partition_id=partition_id):
+                if state.capture:
+                    # No record exists: the outcome is kept for the caller,
+                    # and no log line, row or DLQ count follows.
+                    state.captured = _captured_outcome(record)
+                    state.dlq_written = True
+                    written += 1
+                elif self._dlq_sink is not None and await self._dlq_sink.send(record, partition_id=partition_id):
                     state.dlq_written = True
                     written += 1
                     self._note_message_dlq(record)
@@ -1437,6 +1563,22 @@ def _recorded_action(outcome: DeliveryOutcome, message_context: MessageContext |
     return 'failed'
 
 
+def _is_captured(message_context: MessageContext | None) -> bool:
+    """True when the context names source messages that are all in capture mode."""
+    return message_context is not None and message_context.is_captured
+
+
+def _captured_outcome(record: DLQRecord) -> PartDLQ:
+    """The DLQ facts of the record a message in capture mode would have had, its error cut as written."""
+    return PartDLQ(
+        stage=cast(Literal['execute', 'sink'], record.stage),
+        sink=record.sink,
+        task_id=record.task_id,
+        error=cut_error(record.error),
+        attempts=record.attempts,
+    )
+
+
 def execute_error_text(error: ExecutorError) -> str:
     """The ``dk-error`` text of a failed task: its exit code, when it has one, then stderr or the exception."""
     detail = error.stderr or error.exception or error.kind
@@ -1449,9 +1591,9 @@ def _message_record(
     message: SourceMessage,
     *,
     is_request: bool,
-    stage: Literal['execute', 'sink'],
+    stage: DLQStage,
     error: str,
-    attempts: int,
+    attempts: int | None,
     delivered_sinks: set[str],
     sink: str | None = None,
     task_id: str | None = None,

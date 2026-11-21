@@ -570,7 +570,7 @@
     - rule:dlq-writing
 
 - key: drakkar_dlq_records_total
-  summary: DLQ records by the stage that failed (parse, execute, sink).
+  summary: DLQ records by the stage that failed (parse, execute, sink, split, aggregate).
   meaning: The stage names the step to investigate.
   healthy: 0 or a known low rate.
   promql:

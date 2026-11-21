@@ -192,7 +192,7 @@
 
 - key: message_dlq
   summary: A source message was written to the DLQ; no later delivery of it starts.
-  when: Once per source message that gets a DLQ record, at the parse, execute or sink stage.
+  when: Once per source message that gets a DLQ record, at the parse, execute, sink, split or aggregate stage.
   fields:
     metadata: The stage, the sink, the error, the sinks that already delivered and the attempts.
   action: Read the stage and the error; follow the dlq-filling recipe.

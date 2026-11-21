@@ -39,7 +39,8 @@ Args:
     --filter: substring match on each record value, read as UTF-8 text
         (bytes that are not UTF-8 become U+FFFD). Empty disables it.
     --stage: replay only the records of one failing stage (``parse``,
-        ``execute`` or ``sink``), read from the ``dk-stage`` header.
+        ``execute``, ``sink``, ``split`` or ``aggregate``), read from the
+        ``dk-stage`` header.
 
 Exit codes:
     0 — drained successfully or --limit reached without errors.
@@ -82,7 +83,7 @@ PROGRESS_EVERY = 1000
 DLQ_HEADER_PREFIX = 'dk-'
 STAGE_HEADER = 'dk-stage'
 RECORD_VERSION_HEADER = 'dk-record-version'
-STAGES = ('parse', 'execute', 'sink')
+STAGES = ('parse', 'execute', 'sink', 'split', 'aggregate')
 REPLAY_THREAD_NAME_PREFIX = 'replay'
 
 

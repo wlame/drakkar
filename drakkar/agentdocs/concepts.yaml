@@ -190,7 +190,7 @@
 - key: dlq
   summary: The DLQ is a Kafka topic that receives a failed source message unchanged, with dk- headers that describe the failure.
   body: |-
-    A DLQ record holds the key and value of the source message, its headers without the `dk-` ones, and 15 `dk-` headers: the stage (`parse`, `execute` or `sink`), the error text, the sink, the task, the attempts, the source coordinates, the worker and the time. One source message gets at most one record.
+    A DLQ record holds the key and value of the source message, its headers without the `dk-` ones, and 15 `dk-` headers: the stage (`parse`, `execute`, `sink`, `split` or `aggregate`), the error text, the sink, the task, the attempts, the source coordinates, the worker and the time. One source message gets at most one record.
 
     After a record is written, the message is done: no later delivery of it starts, and its offset is committed. When the record cannot be written, `dlq.on_send_failure` decides: `drop` loses the message and commits (`drakkar_dlq_dropped_payloads_total`), `stall` keeps the offset and pauses the partition.
 

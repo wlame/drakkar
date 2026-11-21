@@ -756,7 +756,9 @@ each failed source message:
   (stage `execute`);
 - a sink delivery that ends in `dlq`: the sink's `on_failure`, the handler's
   `DeliveryAction.DLQ`, a spent retry budget, or an open circuit
-  (stage `sink`).
+  (stage `sink`);
+- a split message whose split did not finish (stage `split`), or whose
+  aggregate step chose the DLQ, raised or timed out (stage `aggregate`).
 
 A record is written once per message: after it, [the message is
 done](#on_failure-dlq-the-message-is-done).
@@ -799,11 +801,11 @@ replayed message that fails again gets fresh facts, never two sets). Then the
 | Header | Value |
 |--------|-------|
 | `dk-record-version` | `1` |
-| `dk-stage` | `parse`, `execute` or `sink` |
+| `dk-stage` | `parse`, `execute`, `sink`, `split` or `aggregate` |
 | `dk-error` | The error text with URL credentials redacted, cut to 2000 bytes at a UTF-8 character boundary. The full text is in the log line. |
 | `dk-sink` | `<sink_type>/<sink_name>` of the failed sink; `sink` stage only |
 | `dk-task-id` | The failed task's id; `execute` stage only |
-| `dk-attempts` | Attempts made, in decimal. `sink`: the hook-level attempts of that sink for this message (`0` for an open circuit). `execute`: the task's attempts. Absent for `parse`. |
+| `dk-attempts` | Attempts made, in decimal. `sink`: the hook-level attempts of that sink for this message (`0` for an open circuit). `execute`: the task's attempts. `split`: the split attempts. Absent for `parse` and `aggregate`. |
 | `dk-delivered-sinks` | The sinks that delivered a result of this message before the record was written, as sorted, comma-joined `<sink_type>/<sink_name>`; absent when none |
 | `dk-source-topic` | The source topic |
 | `dk-source-partition` | The source partition, in decimal |
@@ -954,7 +956,7 @@ uv run python scripts/replay_dlq.py \
 | `--dry-run` | Read and count, publish nothing. |
 | `--limit` | Stop after N records have been **read** (filtered records count too). |
 | `--filter` | Publish only records whose value contains this text. The value is read as UTF-8; bytes that are not UTF-8 become U+FFFD and the rest still matches. |
-| `--stage` | Publish only records of one failing stage: `parse`, `execute` or `sink` (the `dk-stage` header). A record without `dk-stage` matches no stage. |
+| `--stage` | Publish only records of one failing stage: `parse`, `execute`, `sink`, `split` or `aggregate` (the `dk-stage` header). A record without `dk-stage` matches no stage. |
 
 Each record is flushed and confirmed by the broker before the next one is
 read. The script prints `replayed N/M` to stderr every 1000 records and a
