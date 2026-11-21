@@ -62,6 +62,8 @@ RECORD_KINDS: frozenset[str] = frozenset(get_args(RecordKind))
 
 Header = tuple[str, bytes | None]
 ATTEMPT_ID_BYTES = 8
+INT64_MAX = 2**63 - 1
+MAX_DECIMAL_DIGITS = len(str(INT64_MAX))
 
 
 @dataclass(frozen=True)
@@ -168,9 +170,11 @@ def _header_map(headers: Sequence[Header] | None) -> dict[str, bytes | None]:
 
 
 def _decimal(raw: bytes | None) -> int | None:
-    if raw is None or not raw.isascii() or not raw.isdigit():
+    """A non-negative decimal that fits a signed 64-bit integer, else None."""
+    if raw is None or not raw.isascii() or not raw.isdigit() or len(raw) > MAX_DECIMAL_DIGITS:
         return None
-    return int(raw)
+    number = int(raw)
+    return number if number <= INT64_MAX else None
 
 
 def _utf8(raw: bytes | None) -> str | None:
@@ -190,8 +194,10 @@ def _object(value: bytes | None) -> dict[str, Any] | None:
     if value is None:
         return None
     try:
-        body = json.loads(value, parse_constant=_reject_constant)
-    except ValueError:
+        # Decode as UTF-8 first: json.loads on bytes would also accept UTF-16 and UTF-32.
+        body = json.loads(value.decode('utf-8'), parse_constant=_reject_constant)
+    except (ValueError, RecursionError):
+        # UnicodeDecodeError is a ValueError.
         return None
     return body if isinstance(body, dict) else None
 

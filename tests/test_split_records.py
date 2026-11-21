@@ -149,3 +149,78 @@ def test_source_message_split_is_not_serialized():
     assert message.split == part
     assert 'split' not in message.model_dump()
     assert SourceMessage(topic='t', partition=1, offset=2, value=b'', timestamp=0).split is None
+
+
+def _part_headers():
+    return [
+        ('dk-split-version', b'1'),
+        ('dk-split-group', b'g'),
+        ('dk-split-topic', b't'),
+        ('dk-split-partition', b'1'),
+        ('dk-split-offset', b'2'),
+        ('dk-split-attempt', b'1'),
+        ('dk-split-attempt-id', b'a'),
+        ('dk-split-index', b'0'),
+        ('dk-split-origin', b'kafka'),
+    ]
+
+
+HUGE = b'9' * 5000
+OVER_INT64 = str(2**63).encode()
+
+
+@pytest.mark.parametrize(
+    ('name', 'value'),
+    [
+        ('dk-split-group', b'\xff\xfe'),
+        ('dk-split-attempt-id', b'\xff'),
+        ('dk-split-record', None),
+        ('dk-split-partition', None),
+        ('dk-split-offset', HUGE),
+        ('dk-split-offset', OVER_INT64),
+        ('dk-split-partition', b'-1'),
+        ('dk-split-attempt', b'-1'),
+    ],
+)
+def test_log_header_faults_give_none(name, value):
+    headers, body = _valid()
+    assert parse_log_record(_replace(headers, name, value), body) is None
+
+
+@pytest.mark.parametrize(
+    ('name', 'value'),
+    [
+        ('dk-split-group', b'\xff'),
+        ('dk-split-topic', None),
+        ('dk-split-offset', HUGE),
+        ('dk-split-offset', OVER_INT64),
+        ('dk-split-partition', b'-1'),
+        ('dk-split-attempt', b'-1'),
+        ('dk-split-origin', b'ftp'),
+        ('dk-split-origin', None),
+    ],
+)
+def test_part_header_faults_give_none(name, value):
+    assert parse_part_headers(_replace(_part_headers(), name, value)) is None
+
+
+def test_the_largest_int64_is_accepted():
+    headers, body = _valid()
+    entry = parse_log_record(_replace(headers, 'dk-split-offset', str(2**63 - 1).encode()), body)
+    assert entry is not None and entry.ref.offset == 2**63 - 1
+
+
+def test_first_duplicate_header_wins():
+    headers, body = _valid()
+    entry = parse_log_record([*headers, ('dk-split-offset', b'999')], body)
+    assert entry is not None and entry.ref.offset == 9
+
+
+@pytest.mark.parametrize(
+    'value',
+    [b'[' * 200000, '{"a":1}'.encode('utf-16'), '{"a":1}'.encode('utf-32'), b'\xff{}'],
+    ids=['deep', 'utf16', 'utf32', 'bad-utf8'],
+)
+def test_hostile_values_give_none(value):
+    headers, _ = _valid()
+    assert parse_log_record(headers, value) is None
