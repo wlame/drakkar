@@ -387,6 +387,10 @@ class KafkaConsumer:
                 committed[row.partition] = row.offset
         return committed
 
+    async def committed_offset(self, partition_id: int) -> int | None:
+        """The committed offset of one partition as the broker reports it; None when there is none or the query failed."""
+        return (await self._fetch_committed([partition_id])).get(partition_id)
+
     async def _fetch_watermarks(self, partition_id: int) -> tuple[int, int]:
         """Low and high watermark of one partition; ``(0, 0)`` when the query fails."""
         return await self._query_watermarks(partition_id) or (0, 0)

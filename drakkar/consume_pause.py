@@ -106,6 +106,11 @@ class ConsumePauseController:
         app = self._app
         return [p for p, proc in app._processors.items() if p not in app._stalled_partitions and not proc.is_dead]
 
+    def _resumable_partitions(self) -> list[int]:
+        """The pausable partitions minus those whose split jobs are being restored: their restore resumes them."""
+        restoring = self._app._restoring_partitions
+        return [p for p in self._pausable_partitions() if p not in restoring]
+
     async def pause(self, duration_seconds: int) -> dict[str, Any]:
         """Pause consuming for ``duration_seconds``, replacing any active pause.
 
@@ -156,7 +161,7 @@ class ConsumePauseController:
         # Backpressure still holds the partitions? Leave them paused — its
         # loop resumes them when queues drain, same as without a debug pause.
         if app._consumer is not None and not app._paused:
-            partition_ids = self._pausable_partitions()
+            partition_ids = self._resumable_partitions()
             if partition_ids:
                 await app._consumer.resume(partition_ids)
         for source in self._following:

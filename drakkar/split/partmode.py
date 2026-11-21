@@ -52,6 +52,15 @@ MAX_WAITING_REPORTS_FLOOR = 16
 ReportPart = Callable[[SourceMessage, PartResult], Awaitable[None]]
 
 
+async def no_report(message: SourceMessage, result: PartResult) -> None:
+    """The ``report`` of a processor whose parts are local messages: their results go to the owner of the partition.
+
+    Raises:
+        RuntimeError: always; the processor hands such a result to its owner and never calls this.
+    """
+    raise RuntimeError('the result of a local message is not reported to a topic')
+
+
 def max_waiting_reports(window_size: int) -> int:
     """The cap on the finished parts of one partition that wait for their result to be written."""
     return max(MAX_WAITING_REPORTS_FLOOR, MAX_WAITING_REPORTS_PER_WINDOW * window_size)
@@ -191,6 +200,37 @@ def _result_ref(part: SplitPart) -> JobRef:
     )
 
 
+async def publish_or_stop(producer: SplitProducer, topic: str, record: WireRecord, stopped: asyncio.Event) -> None:
+    """Publish ``record`` and wait for its delivery report; after a stop the write gets only the grace time.
+
+    The write and the stop are awaited together, so a write that waits for
+    room in the client queue ends at a stop too. A write that starts after
+    the stop still gets ``STOP_GRACE_SECONDS``.
+
+    Raises:
+        SplitProduceError: the record was not delivered.
+        asyncio.CancelledError: the stop ended the wait; the record may or may not have been written.
+    """
+    publish = asyncio.ensure_future(producer.publish(topic, record))
+    try:
+        if not stopped.is_set():
+            stop = asyncio.ensure_future(stopped.wait())
+            try:
+                await asyncio.wait({publish, stop}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                stop.cancel()
+        if not publish.done():
+            await asyncio.wait({publish}, timeout=STOP_GRACE_SECONDS)
+        if not publish.done():
+            # A record already in the client queue may still be written: a reader of
+            # the results log ignores a second record of the same kind for one job.
+            raise asyncio.CancelledError(STOPPED_MESSAGE)
+        publish.result()
+    finally:
+        if not publish.done():
+            publish.cancel()
+
+
 class PartReportError(SplitProduceError):
     """The result of a part can never be written; ``attempt`` is the number of the write that said so."""
 
@@ -248,29 +288,8 @@ class ResultWriter:
             wait = min(wait * 2, RETRY_MAX_WAIT_SECONDS)
 
     async def _attempt(self, record: WireRecord) -> None:
-        """One write: the place in the client queue and the delivery report, and after a stop only the grace time.
-
-        The write and the stop are awaited together, so a write that waits
-        for room in the client queue ends at a stop too.
-        """
-        publish = asyncio.ensure_future(self._producer.publish(self._results_topic, record))
-        try:
-            if not self._stopped.is_set():
-                stop = asyncio.ensure_future(self._stopped.wait())
-                try:
-                    await asyncio.wait({publish, stop}, return_when=asyncio.FIRST_COMPLETED)
-                finally:
-                    stop.cancel()
-            if not publish.done():
-                await asyncio.wait({publish}, timeout=STOP_GRACE_SECONDS)
-            if not publish.done():
-                # A record already in the client queue may still be written: a second result of
-                # the same part, after the part ran again, is ignored by the owner.
-                raise asyncio.CancelledError(STOPPED_MESSAGE)
-            publish.result()
-        finally:
-            if not publish.done():
-                publish.cancel()
+        """One write: the place in the client queue and the delivery report, and after a stop only the grace time."""
+        await publish_or_stop(self._producer, self._results_topic, record, self._stopped)
 
     async def _wait(self, seconds: float) -> None:
         """Wait ``seconds`` before the next attempt; a stop ends the wait at once."""

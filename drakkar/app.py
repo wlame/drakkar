@@ -541,6 +541,11 @@ class DrakkarApp:
         return src.stalled_partitions if src is not None else set()
 
     @property
+    def _restoring_partitions(self) -> set[int]:
+        src = self.kafka_source
+        return src.restoring_partitions if src is not None else set()
+
+    @property
     def _consumer(self) -> KafkaConsumer | None:
         src = self.kafka_source
         return src.consumer if src is not None else None

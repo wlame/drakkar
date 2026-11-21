@@ -81,6 +81,7 @@ from drakkar.request_ids import RequestIdResolver, reset_request_id
 from drakkar.sinks.dlq_record import DLQRecord, cut_error
 from drakkar.sinks.manager import CollectCallback, DeliveryOutcome, MessageContext, MessageDLQState, sink_ref
 from drakkar.split.models import PartResult
+from drakkar.split.owner import BeginOutcome, SplitOwner
 from drakkar.split.partmode import (
     PartMode,
     PartReportError,
@@ -391,6 +392,17 @@ class PartitionProcessor:
         self._max_waiting_reports = max_waiting_reports(window_size)
         self._report_room = asyncio.Event()
         self._report_room.set()
+        # Set for a processor of the source topic on a worker that splits:
+        # each accepted message goes through ``SplitOwner.begin``, a local
+        # message runs here in part mode, and a job keeps its offset pending.
+        self._owner: SplitOwner | None = None
+        # Offsets of open jobs. They stay pending until the job ends, so the
+        # watermark stops below them, and every drain leaves them out: the
+        # results of a job can take hours, and the next owner continues it.
+        self._open_job_offsets: set[int] = set()
+        # Whether a job of the window being accepted gave the window's
+        # reservation back; the local messages of the window reserve again.
+        self._window_reservation_released = False
         # Gives each message its request id and binds ids into the log
         # context of every scope.
         self._request_ids = request_ids if request_ids is not None else RequestIdResolver(handler)
@@ -584,6 +596,19 @@ class PartitionProcessor:
         messages_consumed.labels(partition=str(self._partition_label)).inc()
         partition_queue_size.labels(partition=str(self._partition_label)).set(self._queue.qsize())
 
+    def attach_split_owner(self, owner: SplitOwner) -> None:
+        """Give the processor the owner of its split jobs; called once, before ``start``."""
+        self._owner = owner
+
+    def mark_dead(self, reason: str) -> None:
+        """Mark a processor that can never start as dead, so ``/readyz`` names its partition."""
+        self._dead = True
+        self._death_reason = reason
+
+    def drop_queue(self) -> None:
+        """Empty the queue of a processor that never started and will not: no loop is there to read it."""
+        self._drop_queued_messages()
+
     def start(self) -> None:
         """Start the partition processing loop under its supervisor."""
         self._running = True
@@ -620,6 +645,9 @@ class PartitionProcessor:
             # that waits for reports to end leaves.
             self._part_mode.stopped.set()
             self._report_room.set()
+        if self._owner is not None:
+            # A split in progress is cancelled, and a waiting end of a job gives up.
+            self._owner.signal_stop()
 
     async def stop(self, timeout: float = DEFAULT_STOP_TIMEOUT) -> None:
         """Stop the partition processor and wait for completion.
@@ -747,9 +775,12 @@ class PartitionProcessor:
         Stalled offsets (delivery unconfirmed) are excluded: they never
         complete here by design, and waiting on them would wedge drain
         until the timeout on every shutdown/rebalance. The offsets of failed
-        and abandoned streams are excluded for the same reason.
+        and abandoned streams are excluded for the same reason, and so are
+        the offsets of open split jobs: a job ends when its results are in,
+        which no stop waits for.
         """
-        return self._offset_tracker.pending_count > len(self._stalled_offsets) + len(self._abandoned_offsets)
+        not_drainable = len(self._stalled_offsets) + len(self._abandoned_offsets) + len(self._open_job_offsets)
+        return self._offset_tracker.pending_count > not_drainable
 
     async def drain(self) -> None:
         """Wait for in-flight work to complete and for the queue to empty,
@@ -858,23 +889,29 @@ class PartitionProcessor:
         streams.
         """
         while self._running:
-            try:
-                message = await asyncio.wait_for(self._queue.get(), timeout=IDLE_POLL_TIMEOUT)
-            except TimeoutError:
-                # retry any uncommitted offsets on idle iterations
-                await self._note_commit_due()
-                continue
-            if not self._running:
-                # Taken off the queue just after a stop: held, so the drop of
-                # the queued messages counts it, never accepted or arranged.
-                self._held_message = message
-                break
+            # A loop that was restarted while it held a message goes on with
+            # that message, as a window does: taking the next one instead
+            # would skip it, and the watermark would pass an offset that
+            # was never registered.
+            message = self._held_message
+            if message is None:
+                try:
+                    message = await asyncio.wait_for(self._queue.get(), timeout=IDLE_POLL_TIMEOUT)
+                except TimeoutError:
+                    # retry any uncommitted offsets on idle iterations
+                    await self._note_commit_due()
+                    continue
+                if not self._running:
+                    # Taken off the queue just after a stop: held, so the drop of
+                    # the queued messages counts it, never accepted or arranged.
+                    self._held_message = message
+                    break
             if self._part_mode is not None:
                 # Held, so it still counts as queued while the loop waits for reports to end.
                 self._held_message = message
                 if not await self._wait_to_take_stream_part():
                     break
-                self._held_message = None
+            self._held_message = None
             partition_queue_size.labels(partition=str(self._partition_label)).set(self._queue.qsize())
             await self._process_stream_message(message)
 
@@ -1264,6 +1301,14 @@ class PartitionProcessor:
         # Policy ('skip' keeps the message in the window with payload=None):
         arrange_started_at = time.monotonic()
         messages = await self._accept_messages(messages)
+        if self._window_reservation_released:
+            self._window_reservation_released = False
+            if messages and not await self._reserve_local_messages(len(messages)):
+                # A stop came before the local messages of the window got
+                # room again: they are never arranged, their offsets stay
+                # pending and leave the drain.
+                self._abandoned_offsets.update(msg.offset for msg in messages)
+                return
         if not messages:
             await self._note_commit_due()
             return
@@ -1319,7 +1364,7 @@ class PartitionProcessor:
         accepted: list[SourceMessage] = []
         for msg in messages:
             self._offset_tracker.register(msg.offset)
-            if self._part_mode is not None:
+            if self._part_mode is not None and self._owner is None:
                 if await self._accept_part(msg, self._part_mode):
                     accepted.append(msg)
                 continue
@@ -1330,8 +1375,141 @@ class PartitionProcessor:
                 with self._request_ids.scope([msg.request_id]):
                     await self._handle_parse_failure(msg)
                 continue
+            if self._owner is not None and not await self._begin_split(msg, self._owner):
+                continue
             accepted.append(msg)
         return accepted
+
+    async def _begin_split(self, msg: SourceMessage, owner: SplitOwner) -> bool:
+        """Let the owner decide what an accepted source message is; true for a local message, which runs here.
+
+        A job keeps its offset pending (the owner holds it). A job that the
+        results log has as closed completes its offset at once. So does one
+        whose split failed, unless the owner stalled the offset because its
+        DLQ record or its ``closed`` record could not be written. After a
+        stop no message is begun: its offset stays pending and leaves the
+        drain.
+        """
+        if self._stopping:
+            self._abandoned_offsets.add(msg.offset)
+            return False
+        with self._request_ids.scope([msg.request_id]):
+            outcome = await owner.begin(msg)
+        if outcome is BeginOutcome.LOCAL:
+            return True
+        completes = outcome is BeginOutcome.DONE or (
+            outcome is BeginOutcome.FAILED and msg.offset not in self._stalled_offsets
+        )
+        if completes:
+            self._offset_tracker.complete(msg.offset)
+            await self._note_commit_due()
+        return False
+
+    async def _reserve_local_messages(self, message_count: int) -> bool:
+        """Wait for room in the pending budget and reserve the estimate of the local messages of a window.
+
+        Called after a job of the window gave the window's first reservation
+        back. From the room check to the reservation there is no await, so no
+        other loop can pass on the same room. False after a stop.
+        """
+        if self._account is None:
+            return True
+        while not await self._wait_for_room():
+            if not self._running:
+                return False
+            await self._note_commit_due()
+        self._reserve_window(message_count)
+        return True
+
+    # --- what the owner of the split jobs asks of its processor (``OwnerHost``) ---
+
+    @property
+    def deliveries_suppressed(self) -> bool:
+        """Whether a drain that timed out made this processor give its partition up."""
+        return self._deliveries_suppressed
+
+    def release_window_reservation(self) -> None:
+        """Give back what the window being accepted reserved: one of its messages became a job.
+
+        A job has no task on this worker, and its split can take minutes; a
+        reservation held that long would keep every other partition loop
+        waiting for room. A stream handler reserves nothing before its first
+        pull, so there is nothing to give back.
+        """
+        if self._stream_mode or self._window_reservation_released:
+            return
+        self._window_reservation_released = True
+        self._end_window_reservation()
+
+    def hold_job_offset(self, offset: int) -> None:
+        """Keep the offset of an open job pending and out of every drain."""
+        self._open_job_offsets.add(offset)
+
+    async def stall_offset(self, offset: int) -> None:
+        """Leave ``offset`` pending for the life of the process (see :meth:`_stall_offset`)."""
+        self._open_job_offsets.discard(offset)
+        await self._stall_offset(offset)
+
+    def start_job_end(self, message: SourceMessage, end: Callable[[], Awaitable[bool]]) -> asyncio.Task:
+        """Run the end of a job as a task of this processor.
+
+        From here on the offset counts for the drain: an end in progress may
+        finish inside the drain budget. Its answer completes or stalls the
+        offset.
+        """
+        self._open_job_offsets.discard(message.offset)
+        return self._spawn_end(message, end)
+
+    def _spawn_end(self, message: SourceMessage, end: Callable[[], Awaitable[bool]]) -> asyncio.Task:
+        """Start the end of a job or of a local message as a tracked task; a stop cancels it with the other tasks."""
+        task = asyncio.create_task(self._settle_end(message, end))
+        self._active_tasks.add(task)
+        task.add_done_callback(self._active_tasks.discard)
+        task.add_done_callback(functools.partial(self._note_end_cancelled, message.offset))
+        return task
+
+    def _note_end_cancelled(self, offset: int, task: asyncio.Task) -> None:
+        """The offset of a cancelled end leaves the drain, also when the end never started; it stays pending."""
+        if task.cancelled() and offset not in self._stalled_offsets:
+            self._abandoned_offsets.add(offset)
+
+    async def _settle_end(self, message: SourceMessage, end: Callable[[], Awaitable[bool]]) -> None:
+        """Await the end of a job and act on its answer: complete the offset, or stall it.
+
+        An end that gave up at a stop leaves the offset pending and out of
+        the drain; the next owner of the partition ends the job again. An
+        unexpected error stalls the offset: nothing says the request reached
+        a sink or the DLQ, so the offset must not commit.
+        """
+        offset = message.offset
+        bind_contextvars(partition=self._partition_label)
+        # This task's own context: no reset needed when it ends.
+        self._request_ids.bind([message.request_id])
+        try:
+            may_complete = await end()
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                # This task is cancelled: its done callback takes the offset out of the drain.
+                raise
+            self._abandoned_offsets.add(offset)
+            return
+        except Exception as error:
+            logger.error(
+                'split_job_end_failed',
+                category='split',
+                partition=self._partition_label,
+                offset=offset,
+                error=str(error) or type(error).__name__,
+                exc_info=error,
+            )
+            may_complete = False
+        if not may_complete:
+            await self._stall_offset(offset)
+            return
+        self._offset_tracker.complete(offset)
+        offset_lag.labels(partition=str(self._partition_label)).set(self._offset_tracker.pending_count)
+        await self._note_commit_due()
 
     async def _call_arrange(self, window: Window, messages: list[SourceMessage]) -> list[ExecutorTask]:
         """Call ``arrange`` with its hook context, time it, record it and name the window's tasks."""
@@ -3104,10 +3282,11 @@ class PartitionProcessor:
     ) -> PartResult:
         """The result of the part ``message``; ``started_at`` and ``finished_at`` are loop times."""
         part_mode, part = self._part_mode, message.split
-        assert part_mode is not None and part is not None
+        assert part_mode is not None
         finished_epoch = time.time()
         return build_part_result(
-            index=part.index,
+            # A local message is a job of one part and carries no split headers.
+            index=part.index if part is not None else 0,
             worker=part_mode.worker,
             tracker_counts=counts,
             state=state,
@@ -3187,7 +3366,14 @@ class PartitionProcessor:
         return checked_part_data(data, part_mode.max_part_data)
 
     def _spawn_part_report(self, message: SourceMessage, result: PartResult) -> None:
-        """Report ``result`` on a task of its own, so neither the loop nor a task run waits for the results topic."""
+        """Report ``result`` on a task of its own, so neither the loop nor a task run waits for the results topic.
+
+        The result of a local message goes to no topic: its owner ends the
+        message with it. That end does not count as a waiting report.
+        """
+        if self._owner is not None:
+            self._spawn_end(message, functools.partial(self._owner.end_local, message, result))
+            return
         report = asyncio.create_task(self._report_part(message, result))
         self._active_tasks.add(report)
         report.add_done_callback(self._active_tasks.discard)

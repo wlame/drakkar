@@ -45,7 +45,7 @@ from drakkar.uiserver.routes_health import create_health_router
 from tests.clocks import VirtualClock
 from tests.conftest import wait_for
 from tests.fleet_fakes import RecordingLogger
-from tests.split_helpers import FakeLog, FakeProducerClient
+from tests.split_helpers import FakeConsumerClient, FakeLog, FakeProducerClient
 from tests.stream_helpers import make_pool
 from tests.test_detach_controller import NOW as DETACH_NOW
 from tests.test_detach_controller import FakeSource as DetachFakeSource
@@ -147,6 +147,9 @@ class FakeRuntimeParts:
             self.client.config = client_config
             return self.client
 
+        def tracker_consumer(client_config: dict) -> FakeConsumerClient:
+            return FakeConsumerClient(self.log, group_id=RESULTS_GROUP)
+
         return SplitRuntime(
             config,
             worker=WORKER,
@@ -154,6 +157,9 @@ class FakeRuntimeParts:
             producer_factory=factory,
             metadata=metadata,
             retention=retention,
+            # The job tracker follows the results partition of each assigned source partition.
+            consumer_factory=tracker_consumer,
+            results_reader=lambda: FakeConsumerClient(self.log, group_id=RESULTS_GROUP, auto_offset_reset='error'),
         )
 
 
@@ -162,6 +168,7 @@ def fake_consumer() -> MagicMock:
     for method in ('subscribe', 'unsubscribe', 'close', 'commit', 'pause', 'resume'):
         setattr(fake, method, AsyncMock())
     fake.poll_batch = AsyncMock(return_value=[])
+    fake.committed_offset = AsyncMock(return_value=None)
     return fake
 
 
@@ -665,6 +672,10 @@ async def test_the_consume_pause_pauses_and_resumes_both_sources():
     source, parts = app.kafka_source, app.parts_source
     assert source is not None and parts is not None
     source.on_assign([0])
+    # A source partition is paused while its split jobs are restored, and resumed when they are.
+    await wait_for(lambda: source.consumer.resume.await_count == 1)
+    source.consumer.pause.reset_mock()
+    source.consumer.resume.reset_mock()
     parts.on_assign([1, 2])
     parts.stalled_partitions.add(2)
 

@@ -99,6 +99,10 @@ class PartsSource(KafkaSource):
             'partition_label': shown,
         }
 
+    def _owner_runtime(self) -> None:
+        """No partition of the parts topic owns a split job: a part is never split."""
+        return None
+
     def _notify_handler_of_assign(self, partition_ids: list[int]) -> None:
         """Not called for the parts topic: the hook tells about the source topic."""
 

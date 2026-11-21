@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import math
 import time
 from collections.abc import Callable, Coroutine
@@ -27,7 +28,8 @@ from drakkar.metrics import (
     total_queued,
 )
 from drakkar.partition import PartitionProcessor
-from drakkar.providers.resilience import RateLimitedLog
+from drakkar.providers.resilience import RateLimitedLog, describe_error
+from drakkar.split.partmode import PartMode, no_report, part_collect
 from drakkar.timefmt import format_rfc3339_micro
 from drakkar.utils import wait_for_aligned_startup
 
@@ -35,6 +37,7 @@ if TYPE_CHECKING:
     from drakkar.consume_pause import ConsumePauseController
     from drakkar.models import SourceMessage
     from drakkar.sources.base import SourceContext
+    from drakkar.split.runtime import SplitRuntime
 
 logger = structlog.get_logger()
 
@@ -50,6 +53,11 @@ MIN_TEARDOWN_STEP_SECONDS = 0.5
 
 # How often the broker-lag gauge is refreshed from the cached watermarks.
 LAG_REFRESH_INTERVAL_SECONDS = 10.0
+
+# How long a revoke waits for the job tracker to drop one partition. The drop
+# only unassigns a partition of a consumer that reads no group; the bound
+# keeps a client that hangs from holding the rebalance callback.
+SPLIT_RELEASE_TIMEOUT_SECONDS = 2.0
 
 # Seconds a group leave may take beyond ``executor.drain_timeout``: the revoke
 # drain has that bound, and the poll that runs the revoke needs a little more.
@@ -146,6 +154,13 @@ class KafkaSource:
         # their queue any more, so fetching more for them only grows it; they
         # stay out of every resume. Cleared on revoke.
         self.dead_partitions_paused: set[int] = set()
+        # Partitions paused while the job tracker restores their split jobs:
+        # their processor exists and has not started. No resume touches them,
+        # whoever asks for it; the restore resumes each one when it ends.
+        # Always empty on a worker that does not split.
+        self.restoring_partitions: set[int] = set()
+        # The restore of each such partition; a revoke or a stop cancels it.
+        self._restore_tasks: dict[int, asyncio.Task[None]] = {}
         self.consumer: KafkaConsumer | None = None
         self.background_tasks: set[asyncio.Task] = set()
         self._ready = False
@@ -293,7 +308,8 @@ class KafkaSource:
         """Assigned partitions the consumer does not fetch from right now."""
         if self.paused or self._consume_pause.active:
             return frozenset(self.processors)
-        return frozenset(self.stalled_partitions | self.dead_partitions_paused) & frozenset(self.processors)
+        held = self.stalled_partitions | self.dead_partitions_paused | self.restoring_partitions
+        return frozenset(held) & frozenset(self.processors)
 
     async def _apply_backpressure(self, consumer: Any, queued: int, low_watermark: int, high_watermark: int) -> None:
         """Resume the fetch at the low watermark and pause it at the high one."""
@@ -305,10 +321,10 @@ class KafkaSource:
         if self.paused and queued <= low_watermark and not self._consume_pause.active:
             # Never resume partitions paused by a delivery stall or a dead
             # loop — they stay paused until restart/revoke regardless of
-            # backpressure.
-            partition_ids = [
-                p for p in self.processors if p not in self.stalled_partitions and p not in self.dead_partitions_paused
-            ]
+            # backpressure. A partition whose split jobs are being restored
+            # is resumed by its restore alone.
+            held = self.stalled_partitions | self.dead_partitions_paused | self.restoring_partitions
+            partition_ids = [p for p in self.processors if p not in held]
             if partition_ids:
                 await consumer.resume(partition_ids)
                 self.paused = False
@@ -440,8 +456,14 @@ class KafkaSource:
     def signal_stop(self) -> None:
         """Leave the poll loop and stop every processor from accepting new work."""
         self._stop_requested = True
-        for processor in list(self.processors.values()):
+        # First the restores: a partition whose restore is cancelled never starts its processor.
+        for restore in self._restore_tasks.values():
+            restore.cancel()
+        for pid, processor in list(self.processors.items()):
             processor.signal_stop()
+            if pid in self.restoring_partitions:
+                # Not started: no loop will read what was fetched for it; the drain must not wait for that.
+                processor.drop_queue()
         # The poll loop runs no further poll, so a leave or a join must not
         # wait for one.
         self._wake_poll_waiters()
@@ -617,6 +639,7 @@ class KafkaSource:
         """
         ctx = self._context()
         log = logger.bind(worker_id=ctx.worker_id)
+        await self._cancel_restores(list(self._restore_tasks))
 
         # Only commit final offsets if drain succeeded cleanly. After
         # a timeout / drain-exception we cannot be sure tasks have
@@ -724,12 +747,21 @@ class KafkaSource:
         ctx = self._context()
         if ctx.recorder:
             ctx.recorder.record_assigned([self._shown(pid) for pid in partition_ids])
+        runtime = self._owner_runtime()
         newly_added: list[int] = []
         for pid in partition_ids:
             if pid not in self.processors:
-                processor = PartitionProcessor(**self._processor_settings(pid))
-                self.processors[pid] = processor
-                processor.start()
+                if runtime is None:
+                    processor = PartitionProcessor(**self._processor_settings(pid))
+                    self.processors[pid] = processor
+                    processor.start()
+                else:
+                    # Created, not started: the processor starts when the
+                    # split jobs of the partition are restored.
+                    settings = {**self._processor_settings(pid), **self._owner_processor_settings(runtime)}
+                    processor = PartitionProcessor(**settings)
+                    self.processors[pid] = processor
+                    self._start_restore(pid, processor, runtime)
                 newly_added.append(pid)
 
         self._gauges.assigned(len(self.processors))
@@ -774,6 +806,158 @@ class KafkaSource:
             'budget': ctx.pending_budget,
             'request_ids': ctx.request_ids,
         }
+
+    def _owner_runtime(self) -> SplitRuntime | None:
+        """The split feature of the worker when this source owns split jobs: the source of the source topic does."""
+        return self._context().split
+
+    def _owner_processor_settings(self, runtime: SplitRuntime) -> dict[str, Any]:
+        """What the processor of a source partition needs on a worker that splits.
+
+        A message whose split yields nothing runs on this worker in part
+        mode: its DLQ outcomes are kept for its one result, and a result of
+        its hooks that names an aggregate sink is refused. That result goes
+        to the owner of the partition, not to a topic.
+        """
+        ctx = self._context()
+        part_mode = PartMode(
+            worker=runtime.worker,
+            max_part_data=ctx.config.split.max_part_data,
+            part_data_model=getattr(type(ctx.handler), 'part_data_model', None),
+            report=no_report,
+            source_group=runtime.source_group,
+        )
+        return {'on_collect': part_collect(ctx.sink_manager, ctx.on_collect), 'part_mode': part_mode}
+
+    def _start_restore(self, partition_id: int, processor: PartitionProcessor, runtime: SplitRuntime) -> None:
+        """Mark the partition as restoring and start the task that restores its split jobs."""
+        self.restoring_partitions.add(partition_id)
+        restore = asyncio.ensure_future(self._restore_partition(partition_id, processor, runtime))
+        self._restore_tasks[partition_id] = restore
+        restore.add_done_callback(functools.partial(self._forget_restore, partition_id))
+
+    def _forget_restore(self, partition_id: int, restore: asyncio.Task[None]) -> None:
+        if self._restore_tasks.get(partition_id) is restore:
+            del self._restore_tasks[partition_id]
+
+    async def _restore_partition(self, partition_id: int, processor: PartitionProcessor, runtime: SplitRuntime) -> None:
+        """Pause the partition, restore its split jobs, then start its processor and resume it.
+
+        The job tracker tries a failed restore again by itself, for as long
+        as it takes; the partition stays paused meanwhile. A revoke of the
+        partition or a stop cancels this task. From the end of the restore to
+        the start of the processor there is no await, so a cancellation finds
+        the processor either not started or started with its owner.
+        """
+        consumer = self.consumer
+        shown = self._shown(partition_id)
+        try:
+            await self._pause_for_restore(partition_id)
+            committed = await self._committed_source_offset(partition_id)
+            table = await runtime.follow(partition_id, committed_source_offset=committed)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            # Nothing would ever start the processor: say so and take the worker out of rotation.
+            self.restoring_partitions.discard(partition_id)
+            processor.mark_dead(f'the restore of its split jobs failed: {describe_error(error)}')
+            logger.critical(
+                'split_restore_task_failed',
+                category='split',
+                partition=shown,
+                error=describe_error(error),
+                impact='the partition is not processed; the worker now fails /readyz',
+                exc_info=error,
+            )
+            return
+        ctx = self._context()
+        owner = runtime.owner_for(
+            partition_id,
+            table=table,
+            host=processor,
+            handler=ctx.handler,
+            sink_manager=ctx.sink_manager,
+            on_collect=ctx.on_collect,
+            on_dlq_failure=ctx.config.dlq.on_send_failure,
+            partition_label=shown,
+        )
+        processor.attach_split_owner(owner)
+        self.restoring_partitions.discard(partition_id)
+        processor.start()
+        held = self.stalled_partitions | self.dead_partitions_paused
+        if consumer is None or self.paused or self._consume_pause.active or partition_id in held:
+            # Another pause still applies; whoever holds it resumes the partition.
+            return
+        try:
+            await consumer.resume([partition_id])
+        except Exception as error:
+            logger.error(
+                'split_restore_resume_failed',
+                category='split',
+                partition=shown,
+                error=describe_error(error),
+                exc_info=error,
+            )
+
+    async def _pause_for_restore(self, partition_id: int) -> None:
+        """Pause the fetch of a restoring partition; a failure is logged, and what is fetched waits in its queue."""
+        if self.consumer is None:
+            return
+        try:
+            await self.consumer.pause([partition_id])
+        except Exception as error:
+            logger.error(
+                'split_restore_pause_failed',
+                category='split',
+                partition=self._shown(partition_id),
+                error=describe_error(error),
+                exc_info=error,
+            )
+
+    async def _committed_source_offset(self, partition_id: int) -> int | None:
+        """The committed offset of a source partition, or None when the group has none or the read failed.
+
+        The restore retires every job below it. With None nothing retires
+        at the restore; a job that the commit has passed is then closed as
+        orphaned when the next message of the partition arrives.
+        """
+        if self.consumer is None:
+            return None
+        try:
+            return await self.consumer.committed_offset(partition_id)
+        except Exception as error:
+            logger.warning(
+                'split_committed_offset_unknown',
+                category='split',
+                partition=self._shown(partition_id),
+                error=describe_error(error),
+            )
+            return None
+
+    async def _cancel_restores(self, partition_ids: list[int]) -> None:
+        """Cancel the restores of these partitions and wait for them to end."""
+        restores = [restore for pid in partition_ids if (restore := self._restore_tasks.pop(pid, None)) is not None]
+        self.restoring_partitions.difference_update(partition_ids)
+        for restore in restores:
+            restore.cancel()
+        if restores:
+            await asyncio.gather(*restores, return_exceptions=True)
+
+    async def _release_split_partitions(self, partition_ids: list[int]) -> None:
+        """Tell the job tracker to drop the revoked partitions and their job tables; a failure is logged."""
+        runtime = self._owner_runtime()
+        if runtime is None:
+            return
+        for pid in partition_ids:
+            try:
+                await asyncio.wait_for(runtime.release(pid), timeout=SPLIT_RELEASE_TIMEOUT_SECONDS)
+            except Exception as error:
+                logger.warning(
+                    'split_release_failed',
+                    category='split',
+                    partition=self._shown(pid),
+                    error=describe_error(error),
+                )
 
     def _notify_handler_of_assign(self, partition_ids: list[int]) -> None:
         """Call the handler's ``on_assign`` hook on a background task."""
@@ -828,6 +1012,10 @@ class KafkaSource:
         ctx = self._context()
         if ctx.recorder:
             ctx.recorder.record_revoked([self._shown(pid) for pid in partition_ids])
+        # First: a restore that ends now would start a processor of a partition that is gone.
+        was_restoring = self.restoring_partitions.intersection(partition_ids)
+        if was_restoring:
+            await self._cancel_restores(partition_ids)
         to_stop: list[PartitionProcessor] = []
         for pid in partition_ids:
             # A revoked partition is no longer ours — clear any stall-pause
@@ -838,6 +1026,9 @@ class KafkaSource:
             with contextlib.suppress(KeyError):
                 consumer_lag.remove(str(self._shown(pid)))
             if processor:
+                if pid in was_restoring:
+                    # Not started, and its restore was cancelled: no loop will read what was fetched for it.
+                    processor.drop_queue()
                 to_stop.append(processor)
 
         self._gauges.assigned(len(self.processors))
@@ -854,6 +1045,8 @@ class KafkaSource:
             finally:
                 self._revokes_in_progress -= 1
 
+        # After the processors stopped: an end of a job in progress read the table until then.
+        await self._release_split_partitions(partition_ids)
         self._notify_handler_of_revoke(partition_ids)
 
     def _notify_handler_of_revoke(self, partition_ids: list[int]) -> None:
@@ -1065,7 +1258,8 @@ class KafkaSource:
 
     def queued_messages(self) -> int:
         """Messages waiting in the queues of live partitions: the input of the pause rule."""
-        return sum(p.queue_size for p in self.processors.values() if not p.is_dead)
+        restoring = self.restoring_partitions
+        return sum(p.queue_size for pid, p in self.processors.items() if not p.is_dead and pid not in restoring)
 
     def total_waiting(self) -> int:
         """Messages waiting in partition queues, not yet dispatched to executors."""
@@ -1083,6 +1277,10 @@ class KafkaSource:
         """Commit an offset for a specific partition."""
         if self.consumer:
             await self.consumer.commit({partition_id: offset})
+        runtime = self._owner_runtime()
+        if runtime is not None:
+            # The committed value is the next offset to read: every job below it is done.
+            runtime.note_source_commit(partition_id, offset)
         recorder = self._context().recorder
         if recorder:
             recorder.record_committed(self._shown(partition_id), offset)
