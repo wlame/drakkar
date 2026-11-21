@@ -39,6 +39,10 @@ def _retention_warning(topic: str, retention_ms: int, job_timeout_seconds: int) 
     )
 
 
+def _unreadable_retention_warning(topic: str, error: Exception) -> str:
+    return f"split: the retention of the topic '{topic}' could not be read: {error}"
+
+
 async def check_split_topics(
     config: DrakkarConfig,
     *,
@@ -50,7 +54,8 @@ async def check_split_topics(
     ``metadata`` gives the partition count of each topic that exists; ``retention`` gives the
     ``retention.ms`` of one topic, ``-1`` or ``None`` when there is no limit. Raises
     ``ConfigurationError`` for a missing topic or a results topic with another partition count than
-    the source topic. Returns the warnings for a retention shorter than ``split.job_timeout``.
+    the source topic. Returns the warnings: a retention shorter than ``split.job_timeout``, and one for
+    each topic whose retention could not be read (that never raises).
     """
     source_topic = config.sources.kafka.topic
     parts_topic = config.resolved_split_parts_topic
@@ -74,7 +79,12 @@ async def _retention_warnings(
         return []
     warnings = []
     for topic in topics:
-        retention_ms = await retention(topic)
+        try:
+            retention_ms = await retention(topic)
+        except (KafkaException, TimeoutError) as exc:
+            # Often the worker may not describe topic configs: this check only warns, so it never stops the start.
+            warnings.append(_unreadable_retention_warning(topic, exc))
+            continue
         if retention_ms is None or retention_ms == NO_RETENTION_LIMIT_MS:
             continue
         if retention_ms < job_timeout * MS_PER_SECOND:
@@ -105,15 +115,15 @@ def topic_partition_counts(
 def topic_retention_ms(
     connection: KafkaConnectionConfig, *, admin_factory: Callable[[dict], Any] = AdminClient
 ) -> Callable[[str], Awaitable[int | None]]:
-    """A ``retention`` callable for ``check_split_topics``: the blocking client call runs on a thread."""
+    """A ``retention`` callable for ``check_split_topics``: the blocking client call runs on a thread.
+
+    A read the broker refuses raises ``KafkaException``; ``check_split_topics`` turns it into a warning.
+    """
 
     def read(topic: str) -> int | None:
         admin = admin_factory(_admin_config(connection))
         resource = ConfigResource(ConfigResource.Type.TOPIC, topic)
-        try:
-            entries = admin.describe_configs([resource])[resource].result(timeout=ADMIN_TIMEOUT_SECONDS)
-        except KafkaException as exc:
-            raise ConfigurationError(f"split: cannot read the configuration of the topic '{topic}': {exc}") from exc
+        entries = admin.describe_configs([resource])[resource].result(timeout=ADMIN_TIMEOUT_SECONDS)
         entry = entries.get(RETENTION_KEY)
         return int(entry.value) if entry is not None and entry.value is not None else None
 

@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The models of the split feature in `drakkar.split` (`SplitPart`, `PartResult`, `PartDLQ`, `SinkCounts`, `SplitJob`, `JobAction`, `SplitResultsUnavailable`, `SplitResultsExpired`) and the wire formats of its two internal topics (headers and records). `SourceMessage` has a new field `split`, `None` for an ordinary message. Nothing uses them yet.
 - The split metrics (`drakkar_split_*`) and their entries, and the entries of the `split` keys, in the agent registry
 - The split job table (`drakkar.split.table`): it reads the records of the results log in order, counts the part results of each job, knows the current attempt, and gives the timed-out jobs and the offset a restart reads from. Nothing uses it yet.
-- The split producer, the start check of the two split topics and the reader of the part results of one job (`drakkar.split.producer`, `topics` and `reader`). Nothing uses them yet.
+- The split producer, the start check of the two split topics and the reader of the part results of one job (`drakkar.split.producer`, `topics` and `reader`). A topic retention that cannot be read gives a warning text, not an error. Nothing uses them yet.
 
 ## [3.4.0] - 2026-11-20
 

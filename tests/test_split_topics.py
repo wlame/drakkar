@@ -114,7 +114,24 @@ async def test_retention_is_read_as_milliseconds_and_none_when_unset():
     assert await read('bare') is None
 
 
-async def test_retention_read_that_the_broker_refuses_is_a_configuration_error():
+async def test_retention_read_that_the_broker_refuses_raises_the_client_error():
     read = topic_retention_ms(KafkaConnectionConfig(), admin_factory=FakeAdmin)
-    with pytest.raises(ConfigurationError, match="cannot read the configuration of the topic 'denied'"):
+    with pytest.raises(KafkaException):
         await read('denied')
+
+
+@pytest.mark.parametrize('error', [KafkaException('no right to describe configs'), TimeoutError('slow')])
+async def test_unreadable_retention_is_a_warning_and_does_not_stop_the_start(error):
+    async def metadata():
+        return {'items': 1, PARTS: 1, RESULTS: 1}
+
+    async def retention(topic: str):
+        if topic == PARTS:
+            raise error
+        return HOUR_MS
+
+    warnings = await check_split_topics(make_config(job_timeout='24h'), metadata=metadata, retention=retention)
+    assert warnings == [
+        f"split: the retention of the topic '{PARTS}' could not be read: {error}",
+        f"split: the retention of the topic '{RESULTS}' (1h) is shorter than split.job_timeout (1d)",
+    ]
