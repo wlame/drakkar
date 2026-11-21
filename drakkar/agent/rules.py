@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from drakkar.agent.metrics_view import json_number
+from drakkar.split.view import near_timeout_threshold
 
 SEVERITY_ORDER = ('critical', 'warning', 'info')
 LAG_BASELINE_MIN_SECONDS = 60.0
@@ -46,8 +47,6 @@ STALLED_STATE = 'stalled'
 DETACHED_STATE = 'detached'
 DEBUG_PAUSE = 'debug'
 RESTORING_SECONDS_LIMIT = 120
-NEAR_TIMEOUT_SHARE = 0.1
-NEAR_TIMEOUT_MIN_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -307,13 +306,13 @@ def worker_detached(rule_input: RuleInput, baselines: Baselines) -> dict[str, An
 
 
 def split_job_near_timeout(rule_input: RuleInput, baselines: Baselines) -> dict[str, Any] | None:
-    """The nearest open split job has less time left than 10 % of its timeout or 300 seconds."""
+    """The nearest open split job has less time left than the near-timeout threshold of its timeout."""
     split = _part(rule_input, 'split')
     left = split.get('nearest_timeout_seconds_left')
     timeout = split.get('nearest_timeout_seconds')
     if not isinstance(left, int | float) or not isinstance(timeout, int | float):
         return None
-    if left >= max(NEAR_TIMEOUT_SHARE * timeout, NEAR_TIMEOUT_MIN_SECONDS):
+    if left >= near_timeout_threshold(timeout):
         return None
     return {'seconds_left': left, 'timeout_seconds': timeout}
 

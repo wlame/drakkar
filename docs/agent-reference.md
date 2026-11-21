@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `f8d8989584fc56ba`.
+Registry version: `06e2c3c5b893f04b`.
 
 ## Concepts
 
@@ -4287,7 +4287,7 @@ This worker left its consumer group for a bounded time; its partitions are consu
 
 ### `rule:split-job-near-timeout`
 
-An open split job has less time left than 10 percent of its timeout, or less than 300 seconds.
+An open split job has less time left than min(max(10 percent of its timeout, 300 seconds), 25 percent of its timeout).
 
 **Severity:** warning
 

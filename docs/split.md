@@ -1043,6 +1043,12 @@ value; 503 when the main loop does not answer). With `split.enabled: false`
 it answers `enabled: false` and no jobs. The agent surface has the state part
 `split` and the diagnose rules `split-job-near-timeout` and
 `split-partition-restoring`.
+A job is near its timeout when its time left is below
+`min(max(0.1 × T, 300 s), 0.25 × T)`, where `T` is `split.job_timeout` for a
+job timeout and `split.idle_timeout` for an idle timeout: 10 % of the
+timeout, at least 300 seconds, and never more than a quarter of the timeout.
+The rule `split-job-near-timeout` and the health mark of the split panel in
+the UI use this threshold.
 
 **A replay of a DLQ record.** The replay tool publishes the original
 message to the source topic again. It gets a new offset, so it is a new

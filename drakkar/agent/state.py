@@ -37,7 +37,7 @@ from drakkar.metrics import (
 from drakkar.recorder.queries import read_memory
 from drakkar.sources.parts import PartsSource
 from drakkar.split.table import MS_PER_SECOND
-from drakkar.split.view import job_deadline
+from drakkar.split.view import job_deadline, near_timeout_threshold
 from drakkar.uiserver.databases_status import recorder_block
 from drakkar.uiserver.server import dispatch_bounded
 
@@ -279,15 +279,6 @@ def detach_part(state: DetachState) -> dict[str, Any]:
 
 # --- split --------------------------------------------------------------
 
-# A job is near its timeout when less than this share of its full timeout, or
-# less than this many seconds, is left (whichever is larger).
-NEAR_TIMEOUT_SHARE = 0.1
-NEAR_TIMEOUT_MIN_SECONDS = 300.0
-
-
-def _near_timeout_threshold(timeout_seconds: float) -> float:
-    return max(NEAR_TIMEOUT_SHARE * timeout_seconds, NEAR_TIMEOUT_MIN_SECONDS)
-
 
 def split_part(
     runtime: SplitRuntime | None,
@@ -339,7 +330,7 @@ def split_part(
             due_ms, kind = deadline
             timeout = settings.job_timeout if kind == 'job' else settings.idle_timeout
             left = (due_ms - now_ms) / MS_PER_SECOND
-            margin = left - _near_timeout_threshold(timeout)
+            margin = left - near_timeout_threshold(timeout)
             if nearest is None or margin < nearest[0]:
                 nearest = (margin, left, timeout)
     part['oldest_job_age_seconds'] = json_number(round(max(oldest_age_ms, 0) / MS_PER_SECOND, 3))

@@ -22,10 +22,24 @@ if TYPE_CHECKING:
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
+# A job is near its timeout when its time left is below
+# min(max(10 % of the timeout, 300 s), 25 % of the timeout). The floor keeps a
+# long timeout from warning too late; the cap keeps a short one from warning
+# for most of its life.
+NEAR_TIMEOUT_SHARE = 0.1
+NEAR_TIMEOUT_MIN_SECONDS = 300.0
+NEAR_TIMEOUT_MAX_SHARE = 0.25
+
 
 def format_epoch_ms(ms: int) -> str:
     """Render epoch milliseconds in the canonical timestamp format, exactly."""
     return format_rfc3339_micro(_EPOCH + timedelta(milliseconds=ms))
+
+
+def near_timeout_threshold(timeout_seconds: float) -> float:
+    """The time left, in seconds, below which a job with this timeout is near it."""
+    floored = max(NEAR_TIMEOUT_SHARE * timeout_seconds, NEAR_TIMEOUT_MIN_SECONDS)
+    return min(floored, NEAR_TIMEOUT_MAX_SHARE * timeout_seconds)
 
 
 def build_split_state(

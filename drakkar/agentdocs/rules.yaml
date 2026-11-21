@@ -142,7 +142,7 @@
     - detach.until
 
 - key: split-job-near-timeout
-  summary: An open split job has less time left than 10 percent of its timeout, or less than 300 seconds.
+  summary: An open split job has less time left than min(max(10 percent of its timeout, 300 seconds), 25 percent of its timeout).
   severity: warning
   title: A split job is close to its timeout
   explain: concept:split

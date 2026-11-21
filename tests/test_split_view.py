@@ -5,12 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
+
 from drakkar.config.split import SplitConfig
 from drakkar.split.models import PartResult
 from drakkar.split.records import PARTS_PARTITION_BASE, JobRef, LogEntry, open_body, result_body
 from drakkar.split.table import JobTable
 from drakkar.split.tracker import FollowedPartition
-from drakkar.split.view import build_split_state
+from drakkar.split.view import build_split_state, near_timeout_threshold
 
 GROUP = 'items-group'
 PARTITION = 7
@@ -248,3 +250,11 @@ def test_view_datetimes_use_rfc3339_micro():
     [row] = state(FakeRuntime(FakeTracker([live(table)])))['jobs']
     assert row['opened_at'] == '2026-10-26T07:33:20.000000Z'
     assert row['last_progress_at'] == '2026-10-26T07:33:21.234000Z'
+
+
+@pytest.mark.parametrize(
+    ('timeout_seconds', 'threshold'),
+    [(300, 75.0), (1000, 250.0), (1800, 300.0), (86400, 8640.0)],
+)
+def test_near_timeout_threshold_is_ten_percent_with_a_300_second_floor_and_a_quarter_cap(timeout_seconds, threshold):
+    assert near_timeout_threshold(timeout_seconds) == threshold

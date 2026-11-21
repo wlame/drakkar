@@ -2958,7 +2958,7 @@
                   "open_jobs": 1,
                   "oldest_job_age_seconds": 10,
                   "nearest_timeout_seconds_left": 299.5,
-                  "nearest_timeout_seconds": 600,
+                  "nearest_timeout_seconds": 1800,
                   "restoring_partitions": [],
                   "result_write_failures_total": 0
                 }
@@ -2979,7 +2979,7 @@
                 "severity": "warning",
                 "evidence": {
                   "seconds_left": 299.5,
-                  "timeout_seconds": 600
+                  "timeout_seconds": 1800
                 }
               }
             ]
@@ -2993,7 +2993,7 @@
                   "open_jobs": 1,
                   "oldest_job_age_seconds": 10,
                   "nearest_timeout_seconds_left": 300,
-                  "nearest_timeout_seconds": 600,
+                  "nearest_timeout_seconds": 1800,
                   "restoring_partitions": [],
                   "result_write_failures_total": 0
                 }
@@ -3019,7 +3019,7 @@
                   "open_jobs": 1,
                   "oldest_job_age_seconds": 10,
                   "nearest_timeout_seconds_left": -5,
-                  "nearest_timeout_seconds": 600,
+                  "nearest_timeout_seconds": 1800,
                   "restoring_partitions": [],
                   "result_write_failures_total": 0
                 }
@@ -3040,7 +3040,73 @@
                 "severity": "warning",
                 "evidence": {
                   "seconds_left": -5,
-                  "timeout_seconds": 600
+                  "timeout_seconds": 1800
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "split job near its timeout by the quarter cap of a short timeout",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "split": {
+                  "enabled": true,
+                  "open_jobs": 1,
+                  "oldest_job_age_seconds": 10,
+                  "nearest_timeout_seconds_left": 100,
+                  "nearest_timeout_seconds": 300,
+                  "restoring_partitions": [],
+                  "result_write_failures_total": 0
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "split": {
+                  "enabled": true,
+                  "open_jobs": 1,
+                  "oldest_job_age_seconds": 10,
+                  "nearest_timeout_seconds_left": 70,
+                  "nearest_timeout_seconds": 300,
+                  "restoring_partitions": [],
+                  "result_write_failures_total": 0
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "split-job-near-timeout",
+                "severity": "warning",
+                "evidence": {
+                  "seconds_left": 70,
+                  "timeout_seconds": 300
                 }
               }
             ]

@@ -163,9 +163,19 @@ def test_the_lag_baseline_ignores_a_growing_lag_within_60_seconds():
 
 @pytest.mark.parametrize(
     ('left', 'timeout', 'fires'),
-    [(8639, 86400, True), (8640, 86400, False), (299, 600, True), (300, 600, False), (-1, 600, True)],
+    [
+        (8639, 86400, True),
+        (8640, 86400, False),
+        (299, 1800, True),
+        (300, 1800, False),
+        (249, 1000, True),
+        (250, 1000, False),
+        (70, 300, True),
+        (100, 300, False),
+        (-1, 600, True),
+    ],
 )
-def test_split_job_near_timeout_threshold_is_the_larger_of_ten_percent_and_300_seconds(left, timeout, fires):
+def test_split_job_near_timeout_uses_the_shared_threshold(left, timeout, fires):
     from drakkar.agent.rules import split_job_near_timeout
 
     state = {'split': {'nearest_timeout_seconds_left': left, 'nearest_timeout_seconds': timeout}}
