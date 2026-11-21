@@ -95,6 +95,10 @@ class _OwnerEvents:
         """The tracker read on in the results log of ``partition``."""
         self._send(partition, lambda owner: owner.log_read())
 
+    def record_failed(self, partition: int, offset: int) -> None:
+        """The tracker could not apply the record at ``offset`` of the results log of ``partition``."""
+        self._send(partition, lambda owner: owner.record_failed(offset))
+
 
 class SplitRuntime:
     """The split feature of one worker.

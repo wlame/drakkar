@@ -80,6 +80,8 @@ class Listener:
         self.restoring_at_event: list[bool] = []
         # Each telling that the tracker read on: the partition and the read position at that moment.
         self.read: list[tuple[int, int | None]] = []
+        # The offsets of the records the tracker could not apply.
+        self.failed_records: list[tuple[int, int]] = []
         self._tracker_ref = tracker_ref
         self.fail = False
 
@@ -117,6 +119,9 @@ class Listener:
         # The position at each telling: the tracker has read every record below it.
         tracker = self._tracker_ref()
         self.read.append((partition, tracker.read_position(partition) if tracker is not None else None))
+
+    def record_failed(self, partition: int, offset: int) -> None:
+        self.failed_records.append((partition, offset))
 
 
 class FakeSleep:
@@ -1007,6 +1012,9 @@ async def test_an_error_while_handling_a_record_is_logged_and_reading_goes_on(ha
     assert harness.listener.events == [('complete', PARTITION, 41, None)]
     failed = [entry for entry in logs if entry['event'] == 'split_tracker_record_failed']
     assert failed[0]['log_level'] == 'error' and failed[0]['offset'] == 0
+    # The listener is told which record the table will never show, and the position has passed it.
+    assert harness.listener.failed_records == [(PARTITION, 0)]
+    assert harness.t.read_position(PARTITION) == 4
 
 
 async def test_an_error_on_the_last_restore_record_still_ends_the_restore(harness, monkeypatch):

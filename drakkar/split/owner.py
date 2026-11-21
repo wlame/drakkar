@@ -58,6 +58,10 @@ END_OFFSET_RETRY_MAX_SECONDS = 5.0
 SleepFn = Callable[[float], Awaitable[None]]
 
 
+# How many offsets of records that the job tracker could not apply an owner remembers; the oldest go first.
+MAX_UNAPPLIED_OFFSETS = 1024
+
+
 class _Settled(StrEnum):
     """What the job table shows once it has read a ``closed`` record this owner wrote."""
 
@@ -67,6 +71,8 @@ class _Settled(StrEnum):
     OPEN = 'open'
     # The owner stopped before the table had read the record.
     STOPPED = 'stopped'
+    # The job tracker could not apply the record, so the table will never show it: nothing completes.
+    UNREAD = 'unread'
 
 
 class BeginOutcome(StrEnum):
@@ -204,6 +210,8 @@ class _HeldJob:
     run: SplitRun | None = None
     settling: bool = False
     end_task: asyncio.Task | None = None
+    # How many ``closed`` records of this owner for the job the job tracker could not apply.
+    unread_closed: int = 0
 
     @property
     def busy(self) -> bool:
@@ -245,6 +253,8 @@ class SplitOwner:
         # One future for each wait for the next read of the job tracker in the results log of this
         # partition; a read resolves them all, so no waiter can take the wake of another.
         self._read_waiters: set[asyncio.Future[None]] = set()
+        # The offsets of the records of the results log that the job tracker could not apply.
+        self._unapplied: set[int] = set()
         self._log_limit = RateLimitedLog(time.monotonic)
         self._ender = JobEnder(
             settings.end_settings(),
@@ -421,6 +431,18 @@ class SplitOwner:
             # The offset completes when the run has stopped.
             held.run.interrupt('closed')
         self._job_changed(job)
+
+    def record_failed(self, offset: int) -> None:
+        """The job tracker passed the record at ``offset`` of the results log without applying it.
+
+        The table will never show that record. An owner that waits for the
+        table to show a ``closed`` it wrote there must not wait for ever:
+        the wait looks at these offsets too, and the read that follows this
+        call wakes it.
+        """
+        if len(self._unapplied) >= MAX_UNAPPLIED_OFFSETS:
+            self._unapplied.discard(min(self._unapplied))
+        self._unapplied.add(offset)
 
     def log_read(self) -> None:
         """The job tracker read on in the results log of this partition: who waits for a record looks again."""
@@ -933,6 +955,8 @@ class SplitOwner:
             self._host.complete_job_offset(held.message.offset)
         elif settled is _Settled.OPEN:
             self._follow_newer_attempt(held)
+        elif settled is _Settled.UNREAD:
+            self._keep_after_unread_closed(held)
 
     def _note_superseded(self, ref: JobRef) -> None:
         """Count and log an attempt of this owner that another instance's attempt replaced."""
@@ -999,6 +1023,8 @@ class SplitOwner:
             raise asyncio.CancelledError('the worker stops before the results log showed the end of the job')
         if settled is _Settled.OPEN:
             return self._follow_newer_attempt(held)
+        if settled is _Settled.UNREAD:
+            return self._keep_after_unread_closed(held)
         return True
 
     async def _end_attempt(
@@ -1045,8 +1071,13 @@ class SplitOwner:
                     return _Settled.STOPPED
             else:
                 held.own_written_through = max(held.own_written_through, record.offset)
-            judged = functools.partial(self._closed_was_judged, offset, record.attempt_id, held.own_written_through)
-            if not await self._wait_for_table(held, judged, stop_grace=partmode.STOP_GRACE_SECONDS):
+            through = held.own_written_through
+            judged = functools.partial(self._closed_was_judged, offset, record.attempt_id, through)
+            unreadable = functools.partial(self._closed_is_unreadable, record, through)
+            shown = await self._wait_for_table(
+                held, lambda: judged() or unreadable(), stop_grace=partmode.STOP_GRACE_SECONDS
+            )
+            if not shown:
                 return _Settled.STOPPED
         job = self._table.job(offset)
         if job is None or job.closed is not None:
@@ -1054,6 +1085,22 @@ class SplitOwner:
                 self._ender.note_closed(record)
             self._drop(held)
             return _Settled.CLOSED
+        if record is not None and job.attempt_id == record.attempt_id:
+            # The table still shows the attempt of the record as open although the tracker has read
+            # past the record: the tracker could not apply it. Nothing says the log has the job as
+            # closed for its readers, so nothing completes.
+            held.unread_closed += 1
+            logger.error(
+                'split_closed_unreadable',
+                category='split',
+                partition=self._label,
+                job=job_id(self._partition, offset, job.attempt),
+                offset=None if record.offset == NO_OFFSET else record.offset,
+                outcome=record.outcome,
+                hint='the job tracker could not apply the closed record of this worker (see '
+                'split_tracker_record_failed); the offset is not completed and the job stays open',
+            )
+            return _Settled.UNREAD
         logger.warning(
             'split_job_end_superseded',
             category='split',
@@ -1078,6 +1125,40 @@ class SplitOwner:
             return False
         job = self._table.job(offset)
         return job is None or job.closed is not None or job.attempt_id != attempt_id
+
+    def _closed_is_unreadable(self, record: ClosedRecord, through: int) -> bool:
+        """Whether the job tracker passed a ``closed`` record of this owner without applying it.
+
+        A record with a known offset is told by its offset. One whose
+        delivery report named no offset lies at or below ``through``; it is
+        taken for unreadable when the tracker has read past ``through`` and
+        could not apply some record up to there. That can be the record of
+        another writer; the owner then ends the job once more, which the
+        aggregate sinks must accept anyway.
+        """
+        if record.offset != NO_OFFSET:
+            return record.offset in self._unapplied
+        return self._has_read(through) and any(failed <= through for failed in self._unapplied)
+
+    def _keep_after_unread_closed(self, held: _HeldJob) -> None:
+        """Keep holding a job whose ``closed`` record the job tracker could not apply; its offset stays pending.
+
+        The job is open in the table, so the rules of a holder act on it
+        again: after the first such record at once (a job whose results are
+        all in is ended once more, and a second ``closed`` is written), after
+        that only when the results log says something new about the job or
+        its timeout passes. A tracker that can apply no ``closed`` of the
+        job would otherwise make the owner end the job, and deliver its
+        result, again and again. For the task of an end the answer None
+        tells the processor to leave the offset as it is.
+        """
+        offset = held.message.offset
+        held.end_task = None
+        held.settling = False
+        self._jobs[offset] = held
+        self._host.hold_job_offset(offset)
+        if held.unread_closed <= 1:
+            self._reconcile(held)
 
     @staticmethod
     def _log_took(job: JobState, record: ClosedRecord, through: int) -> bool:

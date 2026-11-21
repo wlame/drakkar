@@ -600,3 +600,47 @@ def test_a_record_time_ahead_of_the_reader_stays_the_progress_time():
     table.apply(done_entry(ref(), 2), offset=1, timestamp_ms=1_020_000, applied_at_ms=1_000_000)
 
     assert table.due(now_ms=1_020_000 + 59_999, job_timeout=0, idle_timeout=60) == []
+
+
+@pytest.mark.parametrize(
+    'change',
+    [
+        {'part': True},
+        {'part': '0'},
+        {'part': 0.0},
+        {'tasks_succeeded': -1},
+        {'tasks_failed': True},
+        {'tasks_replaced': '2'},
+        {'deliveries': {'kafka/results': {'delivered': -1, 'skipped': 0, 'failed': 0}}},
+        {'deliveries': {'kafka/results': {'delivered': 0, 'skipped': True, 'failed': 0}}},
+    ],
+)
+def test_a_result_whose_numbers_are_not_counts_is_malformed_and_counts_nothing(log, change):
+    log.put(open_entry(ref()))
+    log.put(done_entry(ref(), 2))
+    entry = result_entry(ref(), 0)
+    entry.body.update(change)
+
+    applied = log.put(entry)
+
+    job = log.table.job(JOB)
+    assert applied.ignored is IgnoreReason.MALFORMED
+    assert (job.received_count, job.tasks_succeeded, job.tasks_failed, job.deliveries) == (0, 0, 0, {})
+
+
+def test_a_closed_job_keeps_what_readers_ask_and_frees_the_rest(log):
+    first_open = log.offset
+    log.put(open_entry(ref()))
+    log.put(done_entry(ref(), 2))
+    log.put(result_entry(ref(), 0, tasks_succeeded=3, tasks_failed=1, tasks_replaced=1, outcome='failed'))
+    closed_at = log.offset
+
+    log.put(closed_entry(ref(), 'dlq'))
+
+    job = log.table.job(JOB)
+    kept = (job.partition, job.offset, job.first_open_offset, job.closed, job.closed_offset, job.attempt_id)
+    assert kept == (PARTITION, JOB, first_open, 'dlq', closed_at, ATTEMPT_1)
+    freed = (job.request_id, job.received_count, job.failed_parts, job.dlq_parts, job.last_result_offset)
+    assert freed == (None, 0, 0, 0, None)
+    assert (job.tasks_succeeded, job.tasks_failed, job.tasks_replaced) == (0, 0, 0)
+    assert (job.deliveries, job.first_failure, bytes(job.received_bits)) == ({}, None, b'')

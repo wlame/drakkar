@@ -1003,8 +1003,8 @@ class KafkaSource:
             if release in late:
                 release.cancel()
                 self._log_release_failure(pid, 'the release did not end in time')
-            elif not release.cancelled() and release.exception() is not None:
-                self._log_release_failure(pid, describe_error(release.exception()))
+            elif not release.cancelled() and (error := release.exception()) is not None:
+                self._log_release_failure(pid, describe_error(error))
         if late:
             # A cancelled release ends at once unless it ignores its cancel; then it is left behind.
             await asyncio.wait(late, timeout=MIN_TEARDOWN_STEP_SECONDS)

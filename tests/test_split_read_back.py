@@ -529,3 +529,64 @@ async def test_a_message_whose_job_the_log_has_as_closed_is_logged_when_its_offs
     assert (line['job'], line['outcome']) == ('3:500#1', 'aggregated')
     assert handler.split_calls == [] and handler.jobs == []
     await worker.stop()
+
+
+# --- a record of the owner that the job tracker cannot apply ---
+
+
+def break_closed_once(worker: OwnerWorker, *, times: int = 1) -> list[int]:
+    """Make the job table raise for the next ``times`` closed records; the offsets of those records come back."""
+    assert worker.table is not None
+    table = worker.table
+    apply = table.apply
+    broken: list[int] = []
+
+    def apply_or_raise(entry, *, offset, **times_of_the_record):
+        if entry.kind == 'closed' and len(broken) < times:
+            broken.append(offset)
+            raise RuntimeError('the table cannot apply this record')
+        return apply(entry, offset=offset, **times_of_the_record)
+
+    table.apply = apply_or_raise  # ty: ignore[invalid-assignment]
+    return broken
+
+
+async def test_a_closed_record_that_the_tracker_cannot_apply_completes_nothing_and_the_job_is_ended_again():
+    world = World()
+    handler = SplittingHandler({500: items(1)}, answer=summary())
+    worker = await OwnerWorker(world, handler).start(source_message(500))
+    await wait_until(lambda: world.kinds() == ['open', 'split-done'])
+    broken = break_closed_once(worker)
+
+    with capture_logs() as logs:
+        world.report_all()
+        await wait_until(lambda: any(line['event'] == 'split_closed_unreadable' for line in logs))
+        # Nothing completed for the record the table cannot show.
+        assert worker.commits == []
+        await wait_until(lambda: worker.committed == 501)
+
+    [line] = [line for line in logs if line['event'] == 'split_closed_unreadable']
+    assert (line['log_level'], line['category'], line['offset']) == ('error', 'split', broken[0])
+    # The rules of a holder ran again on the open job: a second end, and its closed record is read.
+    assert len(handler.jobs) == 2
+    assert [entry.kind for entry in world.entries()].count('closed') == 2
+    await worker.stop()
+
+
+async def test_a_second_closed_record_that_cannot_be_applied_leaves_the_job_open_with_no_third_end():
+    world = World()
+    handler = SplittingHandler({500: items(1)}, answer=summary())
+    worker = await OwnerWorker(world, handler).start(source_message(500))
+    await wait_until(lambda: world.kinds() == ['open', 'split-done'])
+    break_closed_once(worker, times=2)
+
+    with capture_logs() as logs:
+        world.report_all()
+        await wait_until(lambda: [line['event'] for line in logs].count('split_closed_unreadable') == 2)
+        for _ in range(50):
+            await asyncio.sleep(0)
+
+    # The owner does not end the job again and again: it stays held, open and uncommitted.
+    assert len(handler.jobs) == 2 and worker.commits == [] and worker.pending == 1
+    assert worker.owner is not None and 500 in worker.owner._jobs
+    await worker.crash()

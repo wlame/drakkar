@@ -80,7 +80,7 @@ def _part_result(body: dict[str, Any], job: JobState) -> PartResult | None:
     """The part result of a ``result`` body; None for a body of the wrong shape or an index out of range."""
     try:
         result = part_result_from_body(body)
-    except (KeyError, ValidationError):
+    except (KeyError, ValueError):
         return None
     limit = job.parts if job.parts is not None else MAX_PART_INDEX + 1
     return result if 0 <= result.index < limit else None

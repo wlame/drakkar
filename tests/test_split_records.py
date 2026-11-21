@@ -6,6 +6,7 @@ import pytest
 from pydantic import BaseModel
 
 from drakkar.models import SourceMessage
+from drakkar.split import records
 from drakkar.split.models import PartDLQ, PartResult, SinkCounts, SplitJob, SplitPart
 from drakkar.split.records import (
     JobRef,
@@ -224,3 +225,27 @@ def test_first_duplicate_header_wins():
 def test_hostile_values_give_none(value):
     headers, _ = _valid()
     assert parse_log_record(headers, value) is None
+
+
+@pytest.mark.parametrize('partition_count', [0, -1])
+def test_part_partition_refuses_a_topic_with_no_partition(partition_count):
+    with pytest.raises(ValueError, match='the parts topic needs at least 1 partition'):
+        records.part_partition(500, 0, partition_count)
+
+
+def test_part_headers_without_the_origin_header_are_not_a_part():
+    record = records.part_record(
+        REF,
+        source_topic='requests',
+        index=0,
+        request_id='req-1',
+        key=None,
+        value=b'x',
+        source_headers=[],
+        partition_count=8,
+    )
+    assert parse_part_headers(record.headers) is not None
+    without_origin = [header for header in record.headers if header[0] != records.H_ORIGIN]
+
+    # The producer always writes the header, so a record without it is not a part of this format.
+    assert parse_part_headers(without_origin) is None

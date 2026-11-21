@@ -770,6 +770,7 @@ is current:
 | An aggregate sink fails | The policy of the sink decides, as always: retry, skip, or the original message to the DLQ. |
 | The DLQ write fails | `dlq.on_send_failure` decides, as always: `drop` completes the offset, `stall` holds it. |
 | The `closed` record cannot be written | It is tried again until it works or the worker stops; the offset completes only after it. A topic or partition that does not exist stalls the offset. |
+| A result record has a part number or a counter that is not a whole number of 0 or more (a boolean, a text, a negative number) | The record is ignored and counted in `drakkar_split_results_ignored_total` with the reason `malformed`. A worker of this framework never writes one. |
 | The owner dies between the aggregate sinks and `closed` | The new owner aggregates again: the aggregate sinks receive the result twice. |
 | The owner dies between `closed` and the commit | The new owner reads the message again, finds `closed`, and completes the offset. |
 | The source offset is committed and the job is still open in the log | The job is finished at the next restore. |
@@ -947,6 +948,7 @@ The restore and the job tracker:
 | `split_tracker_consume_failed`, `split_tracker_seek_failed`, `split_position_commit_failed` | warning | A call of the tracker's consumer failed; it is tried again. |
 | `split_tracker_unassign_failed` | warning | The tracker could not take a results partition off its consumer when the worker lost the source partition. It is not tried again: the partition is assigned anew when the worker gets the source partition back. Records of the partition that the consumer still reads meanwhile are ignored. |
 | `split_tracker_unassign_not_needed` | debug | The same call failed for a partition whose assignment was cut short before it reached the consumer (a restore that was cancelled at once, as in the rebalances of a start). There was nothing to take off. |
+| `split_closed_unreadable` | error | The job tracker could not apply the `closed` record that this worker wrote for a job (see `split_tracker_record_failed`), so the job table will never show it. The offset is not completed. After the first such record the owner ends the job once more, so the aggregate sinks can receive the result twice; after a second one the job stays open until its timeout or a restart. Fields `partition`, `job`, `offset` (of the record in the results topic, when it is known), `outcome`. |
 | `split_tracker_record_failed`, `split_tracker_listener_failed`, `split_tracker_loop_failed`, `split_tracker_periodic_failed`, `split_tracker_task_failed` | error | An unexpected error in the job tracker; it is logged and the tracker goes on. |
 | `split_tracker_close_failed` | warning | The tracker's consumer did not close cleanly at a stop. |
 

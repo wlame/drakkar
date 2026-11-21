@@ -160,10 +160,39 @@ def result_body(result: PartResult) -> dict[str, Any]:
 
 
 def part_result_from_body(body: Mapping[str, Any]) -> PartResult:
-    """Rebuild a part result from the value of a ``result`` record; ``data`` stays a dict or None."""
+    """Rebuild a part result from the value of a ``result`` record; ``data`` stays a dict or None.
+
+    The part number and every counter must be a JSON integer that is not
+    negative. A boolean, a text of digits or a negative number is refused:
+    a lenient read would count ``true`` as part 1, and a negative counter
+    would take results of other parts off the sums of the job.
+
+    Raises:
+        KeyError: the body has no ``part``.
+        ValueError: a number of the body is not a count, or the body does not
+            fit the model (pydantic's ``ValidationError`` is a ``ValueError``).
+    """
     fields = {name: value for name, value in body.items() if name != 'part'}
     fields['index'] = body['part']
+    _require_counts(fields, ('index', *_RESULT_COUNTERS))
+    deliveries = fields.get('deliveries')
+    if isinstance(deliveries, Mapping):
+        for counts in deliveries.values():
+            if isinstance(counts, Mapping):
+                _require_counts(counts, _SINK_COUNTERS)
     return PartResult.model_validate(fields)
+
+
+_RESULT_COUNTERS = ('tasks_succeeded', 'tasks_failed', 'tasks_replaced')
+_SINK_COUNTERS = ('delivered', 'skipped', 'failed')
+
+
+def _require_counts(fields: Mapping[str, Any], names: Sequence[str]) -> None:
+    """Raise ``ValueError`` when a present field of ``names`` is not a non-negative integer (a boolean is none)."""
+    for name in names:
+        value = fields.get(name, 0)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f'{name} is not a count: {value!r}')
 
 
 def closed_body(*, outcome: ClosedOutcome, received: int, parts: int | None, duration_seconds: float) -> dict[str, Any]:
@@ -242,7 +271,13 @@ def part_value(item: object) -> bytes:
 
 
 def part_partition(source_offset: int, index: int, partition_count: int) -> int:
-    """The parts-topic partition of part ``index``: parts spread evenly from ``offset mod N``."""
+    """The parts-topic partition of part ``index``: parts spread evenly from ``offset mod N``.
+
+    Raises:
+        ValueError: ``partition_count`` is below 1; a topic has at least one partition.
+    """
+    if partition_count < 1:
+        raise ValueError(f'the parts topic needs at least 1 partition, got {partition_count}')
     return (source_offset % partition_count + index) % partition_count
 
 

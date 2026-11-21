@@ -15,8 +15,6 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Literal, TypeGuard, cast, get_args
 
-from pydantic import ValidationError
-
 from drakkar.split.models import PartDLQ, PartResult, SinkCounts
 from drakkar.split.records import ClosedOutcome, LogEntry, part_result_from_body
 
@@ -212,11 +210,29 @@ class JobState:
         self.last_progress_ms = progress_ms
 
     def _close(self, outcome: ClosedOutcome) -> None:
-        """Mark the job closed and free what a closed job no longer needs."""
+        """Mark the job closed and free what a closed job no longer needs.
+
+        A closed job stays in the table until its source offset is committed,
+        and a partition can hold many of them behind one open job. What stays
+        is what a reader still asks: the partition and the offset, the first
+        ``open`` offset (the restart position), the outcome, and the attempt
+        and its id, by which a writer of a ``closed`` record tells its own
+        record from the record of another owner, and the instance, which the
+        event of the close names. The request id and the counters of the
+        results are dropped.
+        """
         self.closed = outcome
         self.received_bits = bytearray()
         self.deliveries = {}
         self.first_failure = None
+        self.request_id = None
+        self.received_count = 0
+        self.failed_parts = 0
+        self.dlq_parts = 0
+        self.tasks_succeeded = 0
+        self.tasks_failed = 0
+        self.tasks_replaced = 0
+        self.last_result_offset = None
 
 
 @dataclass(frozen=True)
@@ -393,7 +409,7 @@ class JobTable:
         job = cast(JobState, job)
         try:
             result = part_result_from_body(entry.body)
-        except (KeyError, ValidationError):
+        except (KeyError, ValueError):
             return _ignored(job, IgnoreReason.MALFORMED)
         if result.index < 0 or result.index > MAX_PART_INDEX:
             return _ignored(job, IgnoreReason.MALFORMED)

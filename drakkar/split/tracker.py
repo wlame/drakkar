@@ -86,6 +86,9 @@ class JobEvents(Protocol):
     def log_read(self, partition: int) -> None:
         """The tracker read on in the live log of ``partition``: ``read_position`` may have moved."""
 
+    def record_failed(self, partition: int, offset: int) -> None:
+        """The live record at ``offset`` could not be applied and was passed: the table will never show it."""
+
 
 @dataclass
 class _Followed:
@@ -585,9 +588,16 @@ class JobTracker:
             # before it; the partition is moved back to ``next_offset`` and read again from there.
             state.reposition = True
             return
+        # The position moves before the record is applied: a record that cannot be applied must not
+        # hold the partition. A writer that waits for the table to show that record is told, so its
+        # wait ends (``JobEvents.record_failed``); the error itself is logged by the caller.
         state.next_offset = offset + 1
         try:
             self._apply_record(state, offset, message)
+        except Exception:
+            if not state.restoring:
+                self._emit('record_failed', state.partition, offset)
+            raise
         finally:
             if state.restoring and state.next_offset >= state.restore_end:
                 self._finish_restore(state)

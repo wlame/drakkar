@@ -368,3 +368,26 @@ def test_a_worker_that_reads_parts_is_checked_as_one_when_on_startup_turns_the_k
         app._lifecycle._check_config_after_startup()
 
     assert "split.connection 'gone' is not defined under connections.kafka" in str(raised.value)
+
+
+def test_stage_rule_leaves_a_dependency_that_is_no_sink_to_the_sink_check(tmp_path, monkeypatch):
+    document = _document({'enabled': True, 'aggregate_sinks': ['kafka/final']}, sinks=_sinks(final=['kafka/ghost']))
+
+    message = _fails_with(tmp_path, monkeypatch, document)
+
+    assert "sinks.kafka.final.depends_on: 'kafka/ghost' is not a configured sink; write '<type>/<name>'" in message
+    assert 'split stage' not in message
+
+
+def test_stage_rule_itself_skips_a_dependency_that_is_no_sink():
+    config = DrakkarConfig(
+        connections=kafka_connections(),
+        sources={'kafka': {'enabled': True}},
+        split={'enabled': True, 'aggregate_sinks': ['kafka/final']},
+        sinks=_sinks(),
+        ui={'release': {'enabled': False}},
+    )
+    # What a hook can do after the load: name a sink that does not exist.
+    config.sinks.kafka['final'].depends_on = ['kafka/ghost']
+
+    config._check_split_stages()
