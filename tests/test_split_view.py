@@ -258,3 +258,22 @@ def test_view_datetimes_use_rfc3339_micro():
 )
 def test_near_timeout_threshold_is_ten_percent_with_a_300_second_floor_and_a_quarter_cap(timeout_seconds, threshold):
     assert near_timeout_threshold(timeout_seconds) == threshold
+
+
+def test_view_deadline_tie_is_the_job_timeout():
+    settings = SplitConfig(enabled=True, job_timeout='1h', idle_timeout='10m')
+    # The last result is 50 minutes in, so the idle deadline equals the job deadline.
+    tie = {'offset': 1, 'parts': 5, 'ok': 1, 'result_ms': OPENED_MS + 3_000_000}
+    assert _timeout(tie, settings) == ('2026-10-26T08:33:20.000000Z', 'job')
+
+
+def test_view_past_deadline_is_still_shown():
+    settings = SplitConfig.model_construct(enabled=True, job_timeout=30, idle_timeout=0, max_attempts=3)
+    # NOW_MS is 60 s after the open, so the 30 s job timeout passed 30 s ago.
+    assert _timeout({'offset': 1}, settings) == ('2026-10-26T07:33:50.000000Z', 'job')
+
+
+def test_view_state_seconds_are_rounded_to_milliseconds():
+    followed = live(table_with(), since=NOW_S - 30.123456)
+    [row] = state(FakeRuntime(FakeTracker([followed])))['partitions']
+    assert row['state_seconds'] == 30.123

@@ -118,7 +118,7 @@ def _partition_row(part: FollowedPartition, now_s: float) -> dict[str, Any]:
     return {
         'partition': part.partition,
         'state': 'restoring' if part.restoring else 'live',
-        'state_seconds': max(now_s - part.state_since, 0.0),
+        'state_seconds': round(max(now_s - part.state_since, 0.0), 3),
         'read_position': part.read_position,
         'open_jobs': open_jobs,
         'closed_jobs': closed_jobs,
