@@ -36,7 +36,7 @@
   "log_cases": [
     {
       "name": "open",
-      "ref": {"group": "orders-group", "partition": 7, "offset": 500, "attempt": 1, "attempt_id": "0123456789abcdef"},
+      "ref": {"group": "workers", "partition": 7, "offset": 500, "attempt": 1, "attempt_id": "0123456789abcdef"},
       "kind": "open",
       "input": {"worker": "w1", "instance": "i-1a2b", "request_id": "req_1"},
       "key": "7:500",
@@ -44,7 +44,7 @@
       "headers": [
         ["dk-split-version", "1"],
         ["dk-split-record", "open"],
-        ["dk-split-group", "orders-group"],
+        ["dk-split-group", "workers"],
         ["dk-split-partition", "7"],
         ["dk-split-offset", "500"],
         ["dk-split-attempt", "1"],
@@ -54,7 +54,7 @@
     },
     {
       "name": "split-cancelled",
-      "ref": {"group": "orders-group", "partition": 7, "offset": 500, "attempt": 1, "attempt_id": "0123456789abcdef"},
+      "ref": {"group": "workers", "partition": 7, "offset": 500, "attempt": 1, "attempt_id": "0123456789abcdef"},
       "kind": "split-cancelled",
       "input": {},
       "key": "7:500",
@@ -62,7 +62,7 @@
       "headers": [
         ["dk-split-version", "1"],
         ["dk-split-record", "split-cancelled"],
-        ["dk-split-group", "orders-group"],
+        ["dk-split-group", "workers"],
         ["dk-split-partition", "7"],
         ["dk-split-offset", "500"],
         ["dk-split-attempt", "1"],
@@ -72,7 +72,7 @@
     },
     {
       "name": "split-done",
-      "ref": {"group": "orders-group", "partition": 7, "offset": 500, "attempt": 2, "attempt_id": "fedcba9876543210"},
+      "ref": {"group": "workers", "partition": 7, "offset": 500, "attempt": 2, "attempt_id": "fedcba9876543210"},
       "kind": "split-done",
       "input": {"parts": 6},
       "key": "7:500",
@@ -80,7 +80,7 @@
       "headers": [
         ["dk-split-version", "1"],
         ["dk-split-record", "split-done"],
-        ["dk-split-group", "orders-group"],
+        ["dk-split-group", "workers"],
         ["dk-split-partition", "7"],
         ["dk-split-offset", "500"],
         ["dk-split-attempt", "2"],
@@ -90,7 +90,7 @@
     },
     {
       "name": "result",
-      "ref": {"group": "orders-group", "partition": 7, "offset": 500, "attempt": 1, "attempt_id": "0123456789abcdef"},
+      "ref": {"group": "workers", "partition": 7, "offset": 500, "attempt": 1, "attempt_id": "0123456789abcdef"},
       "kind": "result",
       "input": {
         "index": 2,
@@ -102,17 +102,17 @@
         "deliveries": {"kafka/results": {"delivered": 2, "skipped": 0, "failed": 1}},
         "dlq": {"stage": "sink", "sink": "kafka/results", "task_id": "t-1", "error": "boom", "attempts": 3},
         "error": null,
-        "data": {"matches": 4},
+        "data": {"items_done": 4},
         "data_error": null,
         "duration_seconds": 1.5,
         "finished_at": 1700000000.25
       },
       "key": "7:500",
-      "value": "{\"data\":{\"matches\":4},\"data_error\":null,\"deliveries\":{\"kafka/results\":{\"delivered\":2,\"failed\":1,\"skipped\":0}},\"dlq\":{\"attempts\":3,\"error\":\"boom\",\"sink\":\"kafka/results\",\"stage\":\"sink\",\"task_id\":\"t-1\"},\"duration_seconds\":1.5,\"error\":null,\"finished_at\":1700000000.25,\"outcome\":\"failed\",\"part\":2,\"tasks_failed\":1,\"tasks_replaced\":0,\"tasks_succeeded\":3,\"worker\":\"w2\"}",
+      "value": "{\"data\":{\"items_done\":4},\"data_error\":null,\"deliveries\":{\"kafka/results\":{\"delivered\":2,\"failed\":1,\"skipped\":0}},\"dlq\":{\"attempts\":3,\"error\":\"boom\",\"sink\":\"kafka/results\",\"stage\":\"sink\",\"task_id\":\"t-1\"},\"duration_seconds\":1.5,\"error\":null,\"finished_at\":1700000000.25,\"outcome\":\"failed\",\"part\":2,\"tasks_failed\":1,\"tasks_replaced\":0,\"tasks_succeeded\":3,\"worker\":\"w2\"}",
       "headers": [
         ["dk-split-version", "1"],
         ["dk-split-record", "result"],
-        ["dk-split-group", "orders-group"],
+        ["dk-split-group", "workers"],
         ["dk-split-partition", "7"],
         ["dk-split-offset", "500"],
         ["dk-split-attempt", "1"],
@@ -122,7 +122,7 @@
     },
     {
       "name": "closed",
-      "ref": {"group": "orders-group", "partition": 7, "offset": 500, "attempt": 1, "attempt_id": "0123456789abcdef"},
+      "ref": {"group": "workers", "partition": 7, "offset": 500, "attempt": 1, "attempt_id": "0123456789abcdef"},
       "kind": "closed",
       "input": {"outcome": "aggregated", "received": 6, "parts": 6, "duration_seconds": 2.5},
       "key": "7:500",
@@ -130,9 +130,63 @@
       "headers": [
         ["dk-split-version", "1"],
         ["dk-split-record", "closed"],
-        ["dk-split-group", "orders-group"],
+        ["dk-split-group", "workers"],
         ["dk-split-partition", "7"],
         ["dk-split-offset", "500"],
+        ["dk-split-attempt", "1"],
+        ["dk-split-attempt-id", "0123456789abcdef"]
+      ],
+      "partition": 7
+    },
+    {
+      "name": "open_without_request_id",
+      "ref": {"group": "workers", "partition": 7, "offset": 501, "attempt": 1, "attempt_id": "0123456789abcdef"},
+      "kind": "open",
+      "input": {"worker": "w1", "instance": "i-1a2b", "request_id": null},
+      "key": "7:501",
+      "value": "{\"instance\":\"i-1a2b\",\"origin\":\"kafka\",\"request_id\":null,\"worker\":\"w1\"}",
+      "headers": [
+        ["dk-split-version", "1"],
+        ["dk-split-record", "open"],
+        ["dk-split-group", "workers"],
+        ["dk-split-partition", "7"],
+        ["dk-split-offset", "501"],
+        ["dk-split-attempt", "1"],
+        ["dk-split-attempt-id", "0123456789abcdef"]
+      ],
+      "partition": 7
+    },
+    {
+      "name": "result_without_dlq_and_data",
+      "ref": {"group": "workers", "partition": 7, "offset": 501, "attempt": 1, "attempt_id": "0123456789abcdef"},
+      "kind": "result",
+      "input": {"index": 0, "worker": "w2", "outcome": "ok", "tasks_succeeded": 1, "tasks_failed": 0, "tasks_replaced": 0, "deliveries": {}, "dlq": null, "error": null, "data": null, "data_error": null, "duration_seconds": 0.5, "finished_at": 1700000001.0},
+      "key": "7:501",
+      "value": "{\"data\":null,\"data_error\":null,\"deliveries\":{},\"dlq\":null,\"duration_seconds\":0.5,\"error\":null,\"finished_at\":1700000001.0,\"outcome\":\"ok\",\"part\":0,\"tasks_failed\":0,\"tasks_replaced\":0,\"tasks_succeeded\":1,\"worker\":\"w2\"}",
+      "headers": [
+        ["dk-split-version", "1"],
+        ["dk-split-record", "result"],
+        ["dk-split-group", "workers"],
+        ["dk-split-partition", "7"],
+        ["dk-split-offset", "501"],
+        ["dk-split-attempt", "1"],
+        ["dk-split-attempt-id", "0123456789abcdef"]
+      ],
+      "partition": 7
+    },
+    {
+      "name": "closed_without_parts",
+      "ref": {"group": "workers", "partition": 7, "offset": 501, "attempt": 1, "attempt_id": "0123456789abcdef"},
+      "kind": "closed",
+      "input": {"outcome": "split_failed", "received": 0, "parts": null, "duration_seconds": 0.25},
+      "key": "7:501",
+      "value": "{\"duration_seconds\":0.25,\"outcome\":\"split_failed\",\"parts\":null,\"received\":0}",
+      "headers": [
+        ["dk-split-version", "1"],
+        ["dk-split-record", "closed"],
+        ["dk-split-group", "workers"],
+        ["dk-split-partition", "7"],
+        ["dk-split-offset", "501"],
         ["dk-split-attempt", "1"],
         ["dk-split-attempt-id", "0123456789abcdef"]
       ],
@@ -142,22 +196,22 @@
   "part_cases": [
     {
       "name": "with_request_id",
-      "ref": {"group": "orders-group", "partition": 7, "offset": 500, "attempt": 1, "attempt_id": "0123456789abcdef"},
+      "ref": {"group": "workers", "partition": 7, "offset": 500, "attempt": 1, "attempt_id": "0123456789abcdef"},
       "input": {
-        "source_topic": "orders",
+        "source_topic": "requests",
         "index": 1,
         "request_id": "req_1",
-        "key": "order-17",
+        "key": "request-17",
         "value": "{\"items\":[1,2]}",
         "source_headers": [["traceparent", "00-4bf92f3577b34da6-01"]],
         "partition_count": 6
       },
-      "key": "order-17",
+      "key": "request-17",
       "headers": [
         ["traceparent", "00-4bf92f3577b34da6-01"],
         ["dk-split-version", "1"],
-        ["dk-split-group", "orders-group"],
-        ["dk-split-topic", "orders"],
+        ["dk-split-group", "workers"],
+        ["dk-split-topic", "requests"],
         ["dk-split-partition", "7"],
         ["dk-split-offset", "500"],
         ["dk-split-attempt", "1"],
@@ -168,8 +222,8 @@
       ],
       "partition": 3,
       "parsed": {
-        "group": "orders-group",
-        "source_topic": "orders",
+        "group": "workers",
+        "source_topic": "requests",
         "source_partition": 7,
         "source_offset": 500,
         "attempt": 1,
@@ -180,9 +234,9 @@
     },
     {
       "name": "null_key_null_header_and_dropped_dk_header",
-      "ref": {"group": "orders-group", "partition": 7, "offset": 500, "attempt": 2, "attempt_id": "fedcba9876543210"},
+      "ref": {"group": "workers", "partition": 7, "offset": 500, "attempt": 2, "attempt_id": "fedcba9876543210"},
       "input": {
-        "source_topic": "orders",
+        "source_topic": "requests",
         "index": 0,
         "request_id": null,
         "key": null,
@@ -195,8 +249,8 @@
         ["nullish", null],
         ["empty", ""],
         ["dk-split-version", "1"],
-        ["dk-split-group", "orders-group"],
-        ["dk-split-topic", "orders"],
+        ["dk-split-group", "workers"],
+        ["dk-split-topic", "requests"],
         ["dk-split-partition", "7"],
         ["dk-split-offset", "500"],
         ["dk-split-attempt", "2"],
@@ -206,8 +260,8 @@
       ],
       "partition": 2,
       "parsed": {
-        "group": "orders-group",
-        "source_topic": "orders",
+        "group": "workers",
+        "source_topic": "requests",
         "source_partition": 7,
         "source_offset": 500,
         "attempt": 2,

@@ -54,10 +54,10 @@ from tests.stream_helpers import make_pool, stream_task
 from tests.test_message_dlq import CountingSink, FanOutHandler, ScriptedPool
 from tests.test_sink_delivery_policy import CollectingRecorder, RecordingDLQ
 
-GROUP = 'orders-workers'
-SOURCE_TOPIC = 'orders'
-PARTS_TOPIC = 'orders_orders-workers_split_parts'
-RESULTS_TOPIC = 'orders_orders-workers_split_results'
+GROUP = 'workers'
+SOURCE_TOPIC = 'requests'
+PARTS_TOPIC = 'requests_workers_split_parts'
+RESULTS_TOPIC = 'requests_workers_split_results'
 SOURCE_PARTITION = 7
 SOURCE_OFFSET = 500
 PARTS_PARTITION = 2
@@ -73,7 +73,7 @@ class Data(BaseModel):
 
 
 class Summary(BaseModel):
-    matches: int = 0
+    items_done: int = 0
     note: str = ''
 
 
@@ -95,7 +95,7 @@ def part_message(
         source_topic=SOURCE_TOPIC,
         index=offset if index is None else index,
         request_id=request_id,
-        key=b'order-key',
+        key=b'request-key',
         value=value,
         source_headers=[('traceparent', b'00-ab-01')],
         partition_count=4,
@@ -253,7 +253,7 @@ async def test_ok_part_reports_counters_deliveries_and_data_before_its_offset_co
             return postgres_result()
 
         async def part_data(self, group: MessageGroup) -> Summary:
-            return Summary(matches=len(group.results))
+            return Summary(items_done=len(group.results))
 
     sink = CountingSink('main', 'postgres')
     pipeline = PartPipeline(Handler(['t-a', 't-b'], {'t-a': postgres_result()}), None, sink)
@@ -276,7 +276,7 @@ async def test_ok_part_reports_counters_deliveries_and_data_before_its_offset_co
     assert (result.index, result.worker, result.outcome) == (9, WORKER, 'ok')
     assert (result.tasks_succeeded, result.tasks_failed, result.tasks_replaced) == (2, 0, 0)
     assert result.deliveries == {'postgres/main': SinkCounts(delivered=2)}
-    assert result.data == Summary(matches=2)
+    assert result.data == Summary(items_done=2)
     assert (result.dlq, result.error, result.data_error) == (None, None, None)
     assert result.finished_at > 1_700_000_000 and result.duration_seconds >= 0
     assert split_parts_processed.labels(outcome='ok')._value.get() == before + 1
@@ -612,7 +612,7 @@ async def test_part_data_that_raises_is_dropped_with_the_reason():
 
 
 async def test_part_data_above_the_limit_is_dropped_with_both_sizes():
-    data = Summary(matches=1, note='é' * 600)
+    data = Summary(items_done=1, note='é' * 600)
     size = len(data.model_dump_json().encode('utf-8'))
 
     class Handler(FanOutHandler):
@@ -632,7 +632,7 @@ async def test_part_data_above_the_limit_is_dropped_with_both_sizes():
 async def test_part_data_that_is_no_model_is_dropped():
     class Handler(FanOutHandler):
         async def part_data(self, group):
-            return {'matches': 1}
+            return {'items_done': 1}
 
     pipeline = PartPipeline(Handler(['t-a']))
 
@@ -1266,7 +1266,7 @@ def ok_result(index: int = 3) -> PartResult:
         tracker_counts=(2, 1, 0),
         state=MessageDLQState(capture=True),
         error=None,
-        data=Summary(matches=4),
+        data=Summary(items_done=4),
         data_error=None,
         started_at=1_793_000_000.0,
         finished_at=1_793_000_001.5,
@@ -1299,7 +1299,7 @@ async def test_the_writer_publishes_the_result_record_to_the_partition_of_the_so
     assert stored.key == f'{SOURCE_PARTITION}:{SOURCE_OFFSET}'.encode()
     assert entry.body['part'] == 3
     assert (entry.body['outcome'], entry.body['tasks_succeeded'], entry.body['tasks_failed']) == ('ok', 2, 1)
-    assert entry.body['data'] == {'matches': 4, 'note': ''}
+    assert entry.body['data'] == {'items_done': 4, 'note': ''}
     assert entry.body['duration_seconds'] == 1.5
 
 

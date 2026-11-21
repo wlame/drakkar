@@ -54,12 +54,12 @@ from tests.test_detach_controller import peer as detach_peer
 from tests.test_sources_validation import In, KafkaOnlyHandler, Out
 from tests.test_split_part_mode import ok_result
 
-SOURCE_TOPIC = 'orders'
-GROUP = 'orders-workers'
-PARTS_TOPIC = 'orders_orders-workers_split_parts'
-RESULTS_TOPIC = 'orders_orders-workers_split_results'
-PARTS_GROUP = 'orders-workers_split_parts'
-RESULTS_GROUP = 'orders-workers_split_results'
+SOURCE_TOPIC = 'requests'
+GROUP = 'workers'
+PARTS_TOPIC = 'requests_workers_split_parts'
+RESULTS_TOPIC = 'requests_workers_split_results'
+PARTS_GROUP = 'workers_split_parts'
+RESULTS_GROUP = 'workers_split_results'
 WORKER = 'worker-a'
 
 

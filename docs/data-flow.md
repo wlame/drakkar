@@ -676,6 +676,8 @@ After successful delivery, the framework also records `produced` events in the f
 
 ## Phase 9: Offset Commit
 
+With the split feature on, an open split job holds the commits of its source partition: the offset of the job stays pending until the job ends, and later offsets are processed but not committed. See [Split](split.md#before-you-turn-it-on).
+
 ### 9.1 Watermark Calculation
 
 The `OffsetTracker` maintains a sorted list of registered offsets, each in state PENDING or COMPLETED. The `committable()` method returns the **highest consecutive completed offset + 1** from the beginning of the sorted list:

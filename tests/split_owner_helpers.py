@@ -41,11 +41,11 @@ from tests.split_helpers import FakeClock, FakeConsumerClient, FakeLog, FakeMess
 from tests.test_message_dlq import CountingSink, FanOutHandler, ScriptedPool
 from tests.test_sink_delivery_policy import CollectingRecorder, RecordingDLQ
 
-GROUP = 'orders-workers'
-SOURCE_TOPIC = 'orders'
-PARTS_TOPIC = 'orders_orders-workers_split_parts'
-RESULTS_TOPIC = 'orders_orders-workers_split_results'
-RESULTS_GROUP = 'orders-workers_split_results'
+GROUP = 'workers'
+SOURCE_TOPIC = 'requests'
+PARTS_TOPIC = 'requests_workers_split_parts'
+RESULTS_TOPIC = 'requests_workers_split_results'
+RESULTS_GROUP = 'workers_split_results'
 PARTITION = 3
 PARTS_PARTITIONS = 8
 WORKER = 'worker-a'
@@ -66,7 +66,7 @@ def source_message(offset: int = 500, value: bytes = b'{"n": 5}') -> SourceMessa
         topic=SOURCE_TOPIC,
         partition=PARTITION,
         offset=offset,
-        key=b'order-key',
+        key=b'request-key',
         value=value,
         timestamp=1_793_000_000_456,
         headers=[('traceparent', b'00-ab-01'), ('dk-stage', b'old')],

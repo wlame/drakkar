@@ -14,7 +14,7 @@ and what happens to a message when a step fails.
 | `on_ready(config, db_pool)` | After sinks connected, before polling | Once per worker lifetime | `None` |
 | `arrange(messages, pending)` | A window of messages is ready to process | Once per window per partition | `list[`[`ExecutorTask`](executor.md#executortask)`]` |
 | `arrange_stream(message)` | Instead of `arrange`: one message is ready to process; an async generator | Once per message; one group per `yield` | yields `list[`[`ExecutorTask`](executor.md#executortask)`]` |
-| `split(message)` | Optional; one message is accepted, and `split.enabled` is true; an async generator | Once per source message; one part per `yield` | yields a pydantic model or `bytes` |
+| `split(message)` | Optional; one message is accepted, and `split.enabled` is true; an async generator | Once per source message, and again for each new attempt of a job; one part per `yield` | yields a pydantic model or `bytes` |
 | `part_data(group)` | Optional; after `on_message_complete` of a part and its delivery | Once per part, only with `split` | `BaseModel \| None` |
 | `aggregate(job)` | Optional; every part of a split job has a result | Once per job, on the owner, only with `split` | [`CollectResult`](sinks.md#collectresult) `\| JobAction \| None` |
 | `on_job_timeout(job)` | Optional; a timeout of a split job fired | Once per timed-out job, on the owner, only with `split` | [`CollectResult`](sinks.md#collectresult) `\| JobAction \| None` |
@@ -440,7 +440,9 @@ class ItemHandler(dk.BaseDrakkarHandler[Request, Output]):
 - `split(message)` is an async generator with one form. Each `yield` gives one
   part: a pydantic model (written as its JSON) or `bytes` (written as they
   are); any other value fails the job. It is called once for each accepted
-  source message, on the owner; under `sources.kafka.on_parse_error: skip` a
+  source message, on the owner, and again for each new attempt of a job
+  after a restart or a takeover (see
+  [Timeouts and attempts](split.md#timeouts-and-attempts)); under `sources.kafka.on_parse_error: skip` a
   message that cannot be parsed reaches it with `payload` `None`. A
   generator that ends before its first `yield` makes the message
   [local](split.md#local-messages): it runs on the owner as one part, and its

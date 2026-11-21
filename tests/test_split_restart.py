@@ -203,7 +203,7 @@ async def test_three_crashed_attempts_with_max_attempts_three_end_as_attempts_sp
     assert handler.split_calls == [] and handler.jobs == []
     [record] = worker.dlq_records()
     assert (record.stage, record.error, record.attempts) == ('split', 'split did not finish in 3 attempts', 3)
-    assert (record.key, record.value) == (b'order-key', b'{"n": 5}')
+    assert (record.key, record.value) == (b'request-key', b'{"n": 5}')
     closed = world.entries()[-1]
     assert (closed.kind, closed.body['outcome'], closed.ref.attempt_id) == ('closed', 'attempts_spent', THIRD)
     assert jobs_counted('attempts_spent') == spent + 1
@@ -891,7 +891,7 @@ async def test_a_commit_of_the_parts_source_is_not_told_to_the_job_tracker():
 
 async def test_the_consumer_gives_the_committed_offset_of_one_partition(monkeypatch):
     client = MagicMock()
-    committed = [TopicPartition('orders', 4, 17)]
+    committed = [TopicPartition('requests', 4, 17)]
     client.committed = AsyncMock(side_effect=lambda tps, timeout=None: committed)
     monkeypatch.setattr('drakkar.consumer.AIOConsumer', lambda *args, **kwargs: client)
     config = owner_config()
@@ -900,7 +900,7 @@ async def test_the_consumer_gives_the_committed_offset_of_one_partition(monkeypa
     )
 
     assert await consumer.committed_offset(4) == 17
-    committed[0] = TopicPartition('orders', 4, OFFSET_INVALID)
+    committed[0] = TopicPartition('requests', 4, OFFSET_INVALID)
     assert await consumer.committed_offset(4) is None
     client.committed.side_effect = KafkaException(KafkaError(KafkaError._TRANSPORT))
     assert await consumer.committed_offset(4) is None
@@ -1255,7 +1255,7 @@ async def test_a_local_message_whose_task_goes_to_the_dlq_names_the_part_sinks_t
     [record] = worker.dlq_records()
     assert (record.stage, record.task_id, record.attempts) == ('execute', 't-b', 1)
     assert record.error.startswith('exit code 2: ')
-    assert (record.key, record.value, record.source_offset) == (b'order-key', b'{"n": 5}', 500)
+    assert (record.key, record.value, record.source_offset) == (b'request-key', b'{"n": 5}', 500)
     assert record.delivered_sinks == ['postgres/main']
     assert worker.client.produced == 0
     await worker.stop()

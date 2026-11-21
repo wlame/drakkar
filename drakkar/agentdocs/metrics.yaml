@@ -172,7 +172,7 @@
 
 - key: drakkar_split_jobs_total
   summary: Split jobs ended, by outcome.
-  meaning: The outcomes are aggregated, dlq, timeout, split_failed, attempts_spent, orphaned, superseded and local (a message that was not split).
+  meaning: The outcomes are aggregated, dlq, timeout, split_failed, attempts_spent, orphaned, superseded and local. local counts a message that was not split and did not end in the DLQ (one that did counts as dlq). superseded is not an end of a job - it counts an attempt of this worker that an attempt of another worker replaced, and the job goes on - so leave it out of a sum of ended jobs.
   healthy: Mostly aggregated and local.
   related:
     - config:split.max_attempts

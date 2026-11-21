@@ -248,7 +248,7 @@ The example reads every part result only to show the loop. Here
 
 | Hook | Runs on | When | Returns |
 |---|---|---|---|
-| `split(message)` | the owner | once for each accepted source message | an async generator: each `yield` is one part |
+| `split(message)` | the owner | once for each accepted source message, and again for each new attempt of a job after a restart or a takeover | an async generator: each `yield` is one part |
 | `arrange()` or `arrange_stream()` | the worker that runs the part | as for an ordinary message | as for an ordinary message |
 | `on_task_complete`, `on_group_complete`, `on_message_complete`, `on_window_complete` | the worker that runs the part | as for an ordinary message | a `CollectResult` for the part sinks, or `None` |
 | `part_data(group)` | the worker that runs the part | after `on_message_complete` and its delivery | a small model, or `None` |
@@ -500,7 +500,7 @@ Other DLQ records of a job:
 | `split` raised, yielded a value that is neither a model nor `bytes`, or a part could not be produced | `split` | `split failed: <error>` |
 | The attempts are spent | `split` | `split did not finish in <n> attempts`; `dk-attempts` is the number |
 | `aggregate` or `on_job_timeout` raised or returned a value of another type | `aggregate` | `<hook> failed: <error>` |
-| The default `on_job_timeout` | `aggregate` | `job timed out after <duration>: <received> of <parts> parts` |
+| The default `on_job_timeout` | `aggregate` | `job timed out after <duration>: <received> of <parts> parts`; `<parts>` is `?` when the split had not finished |
 
 The parts of a job that has ended still run. They deliver to the part
 sinks, and their results are ignored.
@@ -675,9 +675,10 @@ The worker also needs Write on the parts topic and the results topic, and
 Describe on both. DescribeConfigs on both topics lets it check the
 retention; without it the worker logs a warning and starts.
 
-A topic that the worker may not describe is missing from the topic list it
-reads, so the start fails with `split: the topic '<topic>' does not exist`.
-Missing rights look like a missing topic.
+The worker reports a topic it cannot see as missing: a topic that is not
+in the topic list it reads fails the start with
+`split: the topic '<topic>' does not exist`, also when the topic exists and
+the worker has no right to describe it.
 
 Two fleets with different source groups get different default topic names.
 Every record also carries the source group, and a worker skips and counts
@@ -781,7 +782,7 @@ is current:
 | Two fleets with different source groups read one source topic | They use different default topic names, and records of another group are skipped. |
 | The log records of a job expired | A new owner splits the message again as a new job. A live owner has the job in memory and goes on. |
 | An old owner has not seen its revoke yet | Both owners follow the log. See [Two owners for a short time](#two-owners-for-a-short-time). |
-| The broker is down | Parts and results wait, and nothing is lost. The clocks go on, so a long outage can fire a timeout. |
+| The broker is down | Parts, results and the job records wait. A part sink or an aggregate sink follows its own failure policy: with the defaults (30 s `delivery_timeout`, `on_failure: dlq`) an outage longer than the delivery timeout gives the part a `dlq` outcome, and the default `aggregate` sends the request to the DLQ. Raise `delivery_timeout` of the sinks above the outage you want to survive. The clocks go on, so a long outage can also fire a timeout of the job. |
 | The fleet is too slow | The job ends by `job_timeout`. Set the timeout for the largest job. |
 | Two releases of the handler run during a deploy | Parts that the old code made run on the new code. Keep the shape of a part compatible across releases. |
 
@@ -795,6 +796,13 @@ is current:
   owner they run again; closed jobs among them are skipped, local messages
   are not. The offset tracker keeps one entry for each such offset until the
   job ends.
+- **A broker outage and the sinks.** The parts, the results and the job
+  records wait for the broker. A Kafka sink does not wait longer than its
+  `delivery_timeout`: with the defaults (30 s, `on_failure: dlq`) an outage
+  longer than that gives the part a `dlq` outcome, and the default
+  `aggregate` sends the whole request to the DLQ. Raise `delivery_timeout`
+  of the part sinks and the aggregate sinks above the outage you want to
+  survive.
 - **Parts have no order.** Do not let one part depend on another.
 - **The size of a part.** A part is the unit that runs again after a
   restart and the unit that spreads the load. Keep a part to a few minutes
@@ -869,7 +877,7 @@ worker-level gauges without a partition label (`drakkar_assigned_partitions`,
 | `drakkar_split_restore_duration_seconds` | Histogram | -- | Seconds to restore the jobs of one source partition. |
 
 `drakkar_handler_duration_seconds` has the `hook` values `split` (one
-sample for each call of the generator), `part_data`, `aggregate` and
+sample for each pull of a part, as for `arrange_stream`), `part_data`, `aggregate` and
 `on_job_timeout`. `drakkar_dlq_records_total` has the `stage` values
 `split` and `aggregate`.
 
@@ -895,7 +903,7 @@ The life of a job, on the owner:
 | `split_attempt_started` | warning | A new attempt starts for a job that the results log already has: after a restart, a cancel or a takeover. Fields `partition`, `job`, `attempt`, `crashed_attempts`. |
 | `split_job_resumed` | info | A restored job goes on with the arrival of its source message. Fields `partition`, `job`, `attempt`, `parts`, `received`. |
 | `split_job_timed_out` | warning | A timeout fired; `on_job_timeout` runs. Fields `partition`, `job`, `kind` (`job` or `idle`), `received`, `parts`. |
-| `split_job_closed` | info | The job is closed by the record of this worker. Fields `partition`, `job`, `outcome`, `parts`, `received`, `failed_parts`. |
+| `split_job_closed` | info | The job is closed by the record of this worker. Fields `partition`, `job`, `outcome`, `parts`, `received`, `failed_parts`, `seconds`. |
 | `split_job_closed_elsewhere` | info | Another worker closed a job whose message this worker holds; the offset completes with no hook. Fields `partition`, `job`, `outcome`. |
 | `split_job_already_closed` | info | A source message arrived whose job the results topic already has as closed (the earlier owner stopped between its `closed` record and the commit); the offset completes with no hook. Fields `partition`, `job`, `outcome`. |
 | `split_job_superseded` | warning | Another worker opened a newer attempt; this worker stopped its split and follows that attempt. |
@@ -976,6 +984,40 @@ The split producer and the reader:
   `split_result_write_failed` lines.
 - **`drakkar_split_results_ignored_total{reason="foreign_group"}` grows.**
   Another fleet writes to the same topics. Give each fleet its own topics.
+
+### For the operator {#for-the-operator}
+
+**What to alert on.**
+
+| Signal | What it says |
+|---|---|
+| `drakkar_split_result_write_failures_total` rises | Part results cannot be written to the results topic. Finished parts wait, and after a restart they run again. |
+| `drakkar_split_restoring_partitions` is above 0 for minutes | A source partition is paused while its jobs are restored, and the restore does not end. Look for `split_restore_failed`. |
+| `drakkar_split_oldest_job_age_seconds` is above 80 % of `split.job_timeout` | A job is close to its timeout. The fleet is too slow for it, or a part is lost. |
+| A rate of `drakkar_split_jobs_total` with the outcome `timeout`, `attempts_spent`, `split_failed`, `dlq` or `orphaned` | Requests end without their aggregate result. Each of them has a DLQ record, except `orphaned`. |
+| `drakkar_split_results_ignored_total` with the reason `foreign_group` or `malformed` | Another fleet or another program writes to the results topic of this fleet. |
+
+**The progress of one job.** No view shows one job. Use these:
+
+- The log lines `split_job_opened`, `split_job_done` and `split_job_closed`
+  of the owner. Each has the job id `<partition>:<offset>#<attempt>`, and
+  the log context has the request id of the original message.
+- The gauges `drakkar_split_jobs_open` and
+  `drakkar_split_oldest_job_age_seconds` of the owner.
+- The Trace page, by the request id, on each worker: every part keeps the
+  request id of its original message, so each worker shows the parts it ran.
+
+**A replay of a DLQ record.** The replay tool publishes the original
+message to the source topic again. It gets a new offset, so it is a new
+job, and every part runs again. The part sinks can already hold results of
+the first run: `dk-delivered-sinks` of the record names the part sinks that
+delivered. Replay only when the part sinks accept repeats.
+
+**A slow split holds its partition.** The partition loop of the owner
+waits for the split of a message until `split-done` is written. A
+generator that is slow between two parts holds every later message of that
+source partition for that time. Keep the work of `split()` small: decide
+the parts, and leave the heavy work to the parts.
 
 ## What is not there yet {#what-is-not-there-yet}
 

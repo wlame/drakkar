@@ -789,6 +789,11 @@ rebalancing redistributes partitions.
 partitions and 20 workers, 10 workers sit idle. For high-throughput
 scenarios, ensure `partition_count >= worker_count`.
 
+A message that is too large for one worker can be split into parts that
+every worker of the group runs. The parts topic then needs at least as
+many partitions as workers; see
+[Split](split.md#before-you-turn-it-on) for how to size it.
+
 ```bash
 # scale to 4 workers
 WORKER_ID=worker-1 python main.py &

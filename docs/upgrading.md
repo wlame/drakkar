@@ -17,7 +17,7 @@ this release. Use the second first when you come from a release older than
 ## Upgrading from 3.1.0 to this release {#from-3-1-0}
 
 A worker that does not turn the new features on works as before. What is
-new for it is listed under item 3: one token in the config summary line,
+new for it is listed under item 3: one token in the config summary line, more pending offsets after a parse failure under `raise`,
 new metric families at 0, and a new config section.
 
 1. **`BaseDrakkarHandler` has four new members:** `detach`, `attach`,
@@ -32,7 +32,7 @@ new metric families at 0, and a new config section.
    names: a handler that already has its own `split`, `part_data`,
    `aggregate`, `on_job_timeout` or `part_data_model` starts as before, and
    the framework never calls them. A handler with a method named `split`
-   logs `split_disabled` once (level info). Three things are new for such a
+   logs `split_disabled` once (level info). Four things are new for such a
    worker:
     - The config summary line of the start has one more token,
       ` split=off`, after `sources=[...]`. Change a parser of that line.
@@ -41,6 +41,10 @@ new metric families at 0, and a new config section.
       only its own values are checked (the ranges, the two timeouts, the
       form of the `aggregate_sinks` entries); no other key of your config is
       read by these checks.
+    - Under `sources.kafka.on_parse_error: raise`, a message that fails to
+      parse leaves every offset of its window pending, not only its own. The
+      commit could not pass that message before either; only the pending
+      count of the partition is higher.
 
    Before you set `split.enabled: true`: `BaseDrakkarHandler` has the new
    hooks `split`, `part_data`, `aggregate` and `on_job_timeout` and the class

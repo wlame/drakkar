@@ -88,7 +88,7 @@ async def test_a_split_of_five_parts_writes_open_the_parts_and_split_done():
     assert [part.index for _, _, part in parts] == [0, 1, 2, 3, 4]
     for partition, record, part in parts:
         assert partition == part_partition(500, part.index, PARTS_PARTITIONS)
-        assert record.key == b'order-key'
+        assert record.key == b'request-key'
         assert record.value == Item(n=part.index).model_dump_json().encode()
         assert [name for name, _ in record.headers] == ['traceparent', *PART_HEADER_ORDER]
         assert (part.source_topic, part.attempt_id, part.origin) == (SOURCE_TOPIC, opened.ref.attempt_id, 'kafka')
@@ -210,7 +210,7 @@ async def test_a_local_message_whose_arrange_raises_ends_in_a_dlq_record():
     assert (job.local, job.failed_parts) == (True, 1)
     [record] = worker.dlq_records()
     assert (record.stage, record.error) == ('aggregate', 'part 0 failed: cannot arrange')
-    assert (record.key, record.value, record.source_offset) == (b'order-key', b'{"n": 5}', 500)
+    assert (record.key, record.value, record.source_offset) == (b'request-key', b'{"n": 5}', 500)
     assert jobs_counted('dlq') == dlq_jobs + 1
     assert not worker.processor.is_dead and worker.client.produced == 0
     await worker.stop()
@@ -235,7 +235,7 @@ async def test_the_default_aggregate_writes_the_dlq_record_of_the_first_failed_p
     # The record is the original message, with the facts of the failed part with the lowest number.
     [record] = worker.dlq_records()
     assert (record.stage, record.task_id, record.error, record.attempts) == ('execute', 't-9', 'exit code 2: boom', 3)
-    assert (record.key, record.value) == (b'order-key', b'{"n": 5}')
+    assert (record.key, record.value) == (b'request-key', b'{"n": 5}')
     assert (record.source_topic, record.source_partition, record.source_offset) == (SOURCE_TOPIC, PARTITION, 500)
     assert record.source_headers == source_message().headers
     assert world.closed()[0]['outcome'] == 'dlq'
@@ -369,7 +369,7 @@ async def test_a_raise_of_split_on_its_third_pull_fails_the_job():
     assert len(world.parts()) == 2
     [record] = worker.dlq_records()
     assert (record.stage, record.error, record.attempts) == ('split', 'split failed: boom', None)
-    assert (record.key, record.value, record.source_offset) == (b'order-key', b'{"n": 5}', 500)
+    assert (record.key, record.value, record.source_offset) == (b'request-key', b'{"n": 5}', 500)
     assert jobs_counted('split_failed') == failed + 1
     assert handler.closed_splits == 2 and handler.pulls == 3
     [line] = [line for line in logs if line['event'] == 'split_failed']
@@ -680,7 +680,7 @@ async def test_a_failing_aggregate_sink_under_dlq_puts_the_original_message_on_t
 
     [record] = worker.dlq_records()
     assert (record.stage, record.sink) == ('sink', 'kafka/summaries')
-    assert (record.key, record.value) == (b'order-key', b'{"n": 5}')
+    assert (record.key, record.value) == (b'request-key', b'{"n": 5}')
     # The job ends as dlq: the record was written by the failing delivery.
     assert world.closed()[0]['outcome'] == 'dlq'
     await worker.stop()

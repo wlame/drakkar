@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `2ce6ae629a5b0184`.
+Registry version: `e89098efa91789b8`.
 
 ## Concepts
 
@@ -1111,7 +1111,7 @@ Source partitions that wait for the restore of their split jobs.
 
 Split jobs ended, by outcome.
 
-**Meaning:** The outcomes are aggregated, dlq, timeout, split_failed, attempts_spent, orphaned, superseded and local (a message that was not split).
+**Meaning:** The outcomes are aggregated, dlq, timeout, split_failed, attempts_spent, orphaned, superseded and local. local counts a message that was not split and did not end in the DLQ (one that did counts as dlq). superseded is not an end of a job - it counts an attempt of this worker that an attempt of another worker replaced, and the job goes on - so leave it out of a sum of ended jobs.
 
 **Healthy:** Mostly aggregated and local.
 
