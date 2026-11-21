@@ -51,6 +51,7 @@ from drakkar.models import (
     SourceMessage,
     TaskGroup,
 )
+from drakkar.split.models import JobAction, SplitJob
 from drakkar.utils import make_request_id
 
 logger = structlog.get_logger()
@@ -237,6 +238,9 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
     # into ``TaskGroup.labels``. Checked at startup: a sequence of unique,
     # non-empty names, set only together with ``arrange_stream``.
     group_labels: ClassVar[tuple[str, ...]] = ()
+    # The model that ``PartResult.data`` is parsed with on the owner. Set only
+    # together with ``split``; when ``None`` the data stays a dict.
+    part_data_model: ClassVar[type[BaseModel] | None] = None
 
     # Backing field for :attr:`app_config`. A class-level ``None`` (rather
     # than an ``__init__`` assignment) keeps the property working on
@@ -510,6 +514,56 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         and ``on_window_complete`` is refused at startup.
         """
         raise NotImplementedError('arrange_stream() is optional; override it instead of arrange()')
+
+    def split(self, message: SourceMessage) -> AsyncIterator[BaseModel | bytes]:
+        """Turn one source message into parts that run across the fleet, one part per yield.
+
+        Optional. Write it as an async generator with one form. Each ``yield``
+        gives one part: a pydantic model (written as its JSON) or ``bytes``
+        (written as they are). It is called once for each source message, on
+        the owner, only when ``split.enabled`` is true. A generator that ends
+        before its first ``yield`` makes the message local: it runs here, as
+        an ordinary message. A raise is a failure of the job. The generator is
+        closed like the one of ``arrange_stream``: at most 5 seconds, and
+        ``try``/``finally`` works.
+        """
+        raise NotImplementedError('split() is optional; override it to split a message into parts')
+
+    async def part_data(self, group: MessageGroup) -> BaseModel | None:
+        """Return a small model that travels in the result of one part, or None.
+
+        Optional. Runs on the worker that ran the part, after
+        ``on_message_complete`` and its delivery. The model is parsed with
+        ``part_data_model`` on the owner. When it is larger than
+        ``split.max_part_data``, or the hook raises, the data is dropped and
+        the part result says why in ``data_error``; the part still counts as
+        finished. Valid only with ``split``.
+        """
+        return None
+
+    async def aggregate(self, job: SplitJob) -> CollectResult | JobAction | None:
+        """Process the end of a split job, once every part has a result.
+
+        Runs on the owner. Return a ``CollectResult`` to deliver it to the
+        aggregate sinks and end the job, ``None`` or ``JobAction.DONE`` to end
+        it with nothing delivered, or ``JobAction.DLQ`` to send the original
+        message to the DLQ and end the job. The default returns
+        ``JobAction.DLQ`` when ``job.failed_parts`` is above 0, else ``None``.
+        Valid only with ``split``.
+        """
+        if job.failed_parts > 0:
+            return JobAction.DLQ
+        return None
+
+    async def on_job_timeout(self, job: SplitJob) -> CollectResult | JobAction | None:
+        """Process a split job whose timeout fired before every part had a result.
+
+        Runs on the owner, and its answer is handled like the answer of
+        ``aggregate``. The default returns ``JobAction.DLQ``. An override can
+        accept a partial job, for example with ``return await
+        self.aggregate(job)``. Valid only with ``split``.
+        """
+        return JobAction.DLQ
 
     def task_run_seconds(self, result: ExecutorResult) -> float | None:
         """Return the run time to draw for this task, or None to use the framework measure.
@@ -1026,6 +1080,16 @@ def _overrides(handler: object, attr: str) -> bool:
 def uses_arrange_stream(handler: object) -> bool:
     """Whether the handler overrides ``arrange_stream``, so it turns each message into a stream of task groups."""
     return _overrides(handler, 'arrange_stream')
+
+
+def overrides_hook(handler: object, hook_name: str) -> bool:
+    """Whether the handler's class overrides the hook of that name; the public form of the class-level check."""
+    return _overrides(handler, hook_name)
+
+
+def handler_splits(handler: object) -> bool:
+    """Whether the handler overrides ``split``, so it can turn a message into parts."""
+    return _overrides(handler, 'split')
 
 
 def overrides_arrange(handler: object) -> bool:

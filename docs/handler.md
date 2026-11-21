@@ -14,6 +14,10 @@ and what happens to a message when a step fails.
 | `on_ready(config, db_pool)` | After sinks connected, before polling | Once per worker lifetime | `None` |
 | `arrange(messages, pending)` | A window of messages is ready to process | Once per window per partition | `list[`[`ExecutorTask`](executor.md#executortask)`]` |
 | `arrange_stream(message)` | Instead of `arrange`: one message is ready to process; an async generator | Once per message; one group per `yield` | yields `list[`[`ExecutorTask`](executor.md#executortask)`]` |
+| `split(message)` | Optional; one message is accepted, and `split.enabled` is true; an async generator | Once per source message; one part per `yield` | yields a pydantic model or `bytes` |
+| `part_data(group)` | Optional; after `on_message_complete` of a part and its delivery | Once per part, only with `split` | `BaseModel \| None` |
+| `aggregate(job)` | Optional; every part of a split job has a result | Once per job, on the owner, only with `split` | [`CollectResult`](sinks.md#collectresult) `\| JobAction \| None` |
+| `on_job_timeout(job)` | Optional; a timeout of a split job fired | Once per timed-out job, on the owner, only with `split` | [`CollectResult`](sinks.md#collectresult) `\| JobAction \| None` |
 | `on_task_complete(result)` | A single task completes successfully (exit 0) | Once per successful task | [`CollectResult`](sinks.md#collectresult) `\| None` |
 | `on_group_complete(group, results, errors)` | All tasks of one group of `arrange_stream` reached a terminal state, with their hooks and deliveries | Once per group (stream handlers only) | [`CollectResult`](sinks.md#collectresult) `\| None` |
 | `on_message_complete(group)` | All tasks derived from a single source message reached a terminal state | Once per source message | [`CollectResult`](sinks.md#collectresult) `\| None` |
@@ -398,6 +402,123 @@ worker logs one info line `arrange_stream_enabled` at startup: it says that
 
 The framework finds every hook on the handler **class**. A function set on
 an instance (`handler.arrange_stream = ...`) is not seen.
+
+### Splitting a message
+
+The four hooks of this section, and `part_data_model`, are called only when
+`split.enabled` is true. With `split.enabled` false a handler that overrides
+`split()` starts and never calls it. A handler may override `part_data()`,
+`aggregate()`, `on_job_timeout()` or set `part_data_model` only together with
+`split()`.
+
+```python
+class ScanHandler(dk.BaseDrakkarHandler[Request, Output]):
+    part_data_model = PartSummary                       # optional
+
+    async def split(self, message: dk.SourceMessage):   # an async generator
+        if len(message.payload.items) < 500:
+            return                                      # local: process here as usual
+        for chunk in chunks(message.payload.items, 100):
+            yield message.payload.model_copy(update={'items': chunk})
+
+    async def part_data(self, group: dk.MessageGroup) -> PartSummary | None:
+        return PartSummary(matches=count_matches(group))
+
+    async def aggregate(self, job: dk.SplitJob) -> dk.CollectResult | dk.JobAction | None:
+        if job.failed_parts > job.total_parts // 100:
+            return dk.JobAction.DLQ
+        return dk.CollectResult(kafka=[dk.KafkaPayload(sink='summaries', data=Summary(parts=job.total_parts))])
+
+    async def on_job_timeout(self, job: dk.SplitJob) -> dk.CollectResult | dk.JobAction | None:
+        return dk.JobAction.DLQ                         # the default
+```
+
+- `split(message)` is an async generator with one form. Each `yield` gives one
+  part: a pydantic model (written as its JSON) or `bytes` (written as they
+  are). It is called once for each source message, on the owner. A generator
+  that ends before its first `yield` makes the message local. A raise fails
+  the job. The generator is closed like the one of
+  [`arrange_stream`](#arrange_stream): at most 5 seconds, and `try`/`finally`
+  works.
+- `part_data(group)` returns a small model that travels in the result of the
+  part. It runs where the part ran. Larger than `split.max_part_data`, or a
+  raise: the data is dropped and `data_error` says why.
+- `aggregate(job)` runs on the owner once every part has a result. It
+  returns a `CollectResult` (delivered to the aggregate sinks, then the job is
+  done), `None` or `JobAction.DONE` (done, nothing delivered), or
+  `JobAction.DLQ` (the original message goes to the DLQ, then the job is
+  done). The default returns `JobAction.DLQ` when `job.failed_parts` is above
+  0, else `None`.
+- `on_job_timeout(job)` runs on the owner when a timeout fires. It returns the
+  same types, and its answer is handled like the answer of `aggregate`. The
+  default returns `JobAction.DLQ`. An override can accept a partial job, for
+  example with `return await self.aggregate(job)`.
+- `part_data_model` is a class attribute: the model that `PartResult.data` is
+  parsed with. Without it, `data` is a dict.
+
+#### SplitJob
+
+| Field | Meaning |
+|---|---|
+| `source_message` | The original `SourceMessage`. |
+| `job_id` | The id of the job. |
+| `attempt` | The number of the attempt. |
+| `local` | True when the message ran on the owner as one part. |
+| `total_parts` | The number of parts; `None` while the split has not finished. |
+| `received_parts` | How many parts have a result. |
+| `failed_parts` | How many parts failed. |
+| `dlq_parts` | How many parts ended in a `dlq` outcome. |
+| `tasks_succeeded`, `tasks_failed`, `tasks_replaced` | Task counts, summed over the parts. |
+| `deliveries` | For each part sink `<type>/<name>`: `delivered`, `skipped`, `failed`. |
+| `timed_out` | `''`, `job` or `idle`. |
+| `opened_at` | Epoch seconds when the job was opened. |
+| `duration_seconds` | The age of the job. |
+| `missing_parts()` | The part numbers that have no result. |
+| `results()` | An async iterator of `PartResult`. |
+
+#### PartResult
+
+| Field | Meaning |
+|---|---|
+| `index` | The part number inside its job, from 0. |
+| `worker` | The name of the worker that ran the part. |
+| `outcome` | `ok`, or `failed` when the part did not run to a normal end. |
+| `tasks_succeeded`, `tasks_failed`, `tasks_replaced` | Task counts of the part. |
+| `deliveries` | Counts per part sink `<type>/<name>`: `delivered`, `skipped`, `failed`. |
+| `dlq` | `None`, or `stage`, `sink`, `task_id`, `error`, `attempts` of the `dlq` outcome. |
+| `error` | The text of a parse failure or of an `arrange` error. |
+| `data` | The answer of `part_data`: a model of `part_data_model`, else a dict; `None` when absent. |
+| `data_error` | Why the data was dropped, when it was. |
+| `duration_seconds` | The run time of the part. |
+| `finished_at` | Epoch seconds when the part finished. |
+
+A part is `failed` when it did not run to a normal end: a parse failure, an
+error of `arrange` or of the stream, or a `dlq` outcome. A task that failed
+and was skipped does not make the part `failed`; it counts in `tasks_failed`.
+
+Read the part results in a loop:
+
+```python
+async def aggregate(self, job):
+    total = 0
+    async for result in job.results():     # reads the results topic; seconds for a large job
+        if result.data is not None:
+            total += result.data.matches
+    return dk.CollectResult(...)
+```
+
+Each call of `job.results()` reads the results topic again, so it costs
+seconds for a large job. Keep the totals in `part_data` when a count is
+enough, and read the list only when you need every part.
+
+#### Startup checks for split
+
+| Condition | Result |
+|---|---|
+| `split.enabled` is true and the handler does not override `split()` | startup fails |
+| the handler overrides `part_data()`, `aggregate()` or `on_job_timeout()`, or sets `part_data_model`, without `split()` | startup fails |
+| `split()` is not an async generator function | startup fails |
+| the handler overrides `split()` and `split.enabled` is false | the worker starts and never calls `split()` |
 
 ### on_task_complete
 

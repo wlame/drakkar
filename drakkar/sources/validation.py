@@ -2,22 +2,28 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Sequence
 from typing import Any
 
 from drakkar.config import SourcesConfig
 from drakkar.models import ConfigurationError
 
+# Hooks that only a handler with ``split`` can use, in the order the checks report them.
+_SPLIT_ONLY_HOOKS = ('part_data', 'aggregate', 'on_job_timeout')
 
-def validate_handler_for_sources(handler: Any, sources: SourcesConfig) -> None:
+
+def validate_handler_for_sources(handler: Any, sources: SourcesConfig, *, split_enabled: bool = False) -> None:
     """Raise ``ConfigurationError`` unless the handler implements the hooks every enabled source calls.
 
-    The checks of the streaming arrange hook run first, whatever sources are
-    enabled: they are faults of the handler class alone.
+    The checks of the streaming arrange hook and of the split hooks run first,
+    whatever sources are enabled: they are faults of the handler class alone,
+    except that the split checks also read ``split.enabled``.
     """
     from drakkar.handler import overrides_arrange, uses_arrange_stream
 
     validate_stream_hooks(handler)
+    validate_split_hooks(handler, split_enabled=split_enabled)
     if sources.kafka.enabled and not overrides_arrange(handler) and not uses_arrange_stream(handler):
         raise ConfigurationError(
             f'sources.kafka.enabled=true but {type(handler).__name__} does not override arrange() or '
@@ -57,6 +63,31 @@ def validate_stream_hooks(handler: Any) -> None:
     if _is_set(group_labels):
         raise ConfigurationError(
             f'{name} sets group_labels without arrange_stream(); groups exist only for a stream handler'
+        )
+
+
+def validate_split_hooks(handler: Any, *, split_enabled: bool) -> None:
+    """Raise ``ConfigurationError`` when the split hooks of the handler do not fit each other or ``split.enabled``."""
+    from drakkar.handler import handler_splits, overrides_hook
+
+    handler_cls = type(handler)
+    name = handler_cls.__name__
+    if handler_splits(handler):
+        if not inspect.isasyncgenfunction(handler_cls.split):
+            raise ConfigurationError(f'{name}.split must be an async generator function')
+        return
+    for hook in _SPLIT_ONLY_HOOKS:
+        if overrides_hook(handler, hook):
+            raise ConfigurationError(
+                f'{name} overrides {hook}() without split(); it is called only for a handler that splits'
+            )
+    if getattr(handler_cls, 'part_data_model', None) is not None:
+        raise ConfigurationError(
+            f'{name} sets part_data_model without split(); it is read only for a handler that splits'
+        )
+    if split_enabled:
+        raise ConfigurationError(
+            f'split.enabled=true but {name} does not override split() — implement it or set split.enabled to false'
         )
 
 

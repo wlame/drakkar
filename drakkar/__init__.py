@@ -57,6 +57,16 @@ from drakkar.models import (
 )
 from drakkar.periodic import periodic
 from drakkar.probe import probe_field
+from drakkar.split import (
+    JobAction,
+    PartDLQ,
+    PartResult,
+    SinkCounts,
+    SplitJob,
+    SplitPart,
+    SplitResultsExpired,
+    SplitResultsUnavailable,
+)
 from drakkar.timefmt import format_rfc3339_micro
 from drakkar.timeline_events import NoOpTimelineEventEmitter, TimelineEventEmitter, TimelineMatch
 from drakkar.utils import make_request_id
@@ -93,22 +103,30 @@ __all__ = [
     'ExecutorTask',
     'FilePayload',
     'HttpPayload',
+    'JobAction',
     'KafkaPayload',
     'KafkaSourceConfig',
     'MessageGroup',
     'MessageParseError',
     'MongoPayload',
     'NoOpTimelineEventEmitter',
+    'PartDLQ',
+    'PartResult',
     'PendingContext',
     'PostgresOp',
     'PostgresPayload',
     'PrecomputedResult',
     'RedisOp',
     'RedisPayload',
+    'SinkCounts',
     'SinkDeliveryFailedError',
     'SinkDeliverySummary',
     'SourceMessage',
     'SourcesConfig',
+    'SplitJob',
+    'SplitPart',
+    'SplitResultsExpired',
+    'SplitResultsUnavailable',
     'TaskGroup',
     'TaskOrigin',
     'TimelineEventEmitter',
