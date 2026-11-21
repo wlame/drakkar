@@ -685,6 +685,81 @@ services:
       - "9101:9101"
       - "8095:8095"
 
+  # --- Split workers (profile split) ---
+  #
+  # A handler with split(): a request of more than 20 items is cut into
+  # parts of 5 items that all three workers run; the owner of the request's
+  # partition sums the part results up (integration/split-worker/). Their
+  # own topics (split-requests with 6 partitions, the parts and results
+  # topics, split-items, split-summaries, split-requests_dlq), consumer
+  # group and cluster, with filesystem autodiscover in a volume of their
+  # own (the detach budget). scenario-split.sh starts them, kills and
+  # restarts them, and removes them; a plain `just integration-up` does not
+  # start them. The job timeout comes from SPLIT_JOB_TIMEOUT, so the
+  # scenario can recreate the workers with a short one.
+  split-worker-1:
+    profiles: ["split"]
+    build:
+      context: ..
+      dockerfile: integration/split-worker/Dockerfile
+      args:
+        PYTHON_IMAGE: ${HARNESS_PYTHON_IMAGE:-python:3.13-slim}
+        EXTRA_APT: ${HARNESS_EXTRA_APT:-}
+    image: drakkar-harness-split-worker:local
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment: &split-worker-env
+      WORKER_ID: split-worker-1
+      DK_CONFIG: /app/drakkar.yaml
+      DK_METRICS__PORT: "9111"
+      DK_API__PORT: "8110"
+      DK_API__PUBLIC_URL: "http://split-worker-1:8110/"
+      DK_SPLIT__JOB_TIMEOUT: ${SPLIT_JOB_TIMEOUT:-5m}
+    ports:
+      - "9111:9111"
+      - "8110:8110"
+    volumes:
+      - split-shared:/split-shared
+
+  # split-worker-2 and split-worker-3 run the image that split-worker-1
+  # builds; scenario-split.sh builds it before it starts them.
+  split-worker-2:
+    profiles: ["split"]
+    image: drakkar-harness-split-worker:local
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *split-worker-env
+      WORKER_ID: split-worker-2
+      DK_METRICS__PORT: "9112"
+      DK_API__PORT: "8111"
+      DK_API__PUBLIC_URL: "http://split-worker-2:8111/"
+    ports:
+      - "9112:9112"
+      - "8111:8111"
+    volumes:
+      - split-shared:/split-shared
+
+  split-worker-3:
+    profiles: ["split"]
+    image: drakkar-harness-split-worker:local
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *split-worker-env
+      WORKER_ID: split-worker-3
+      DK_METRICS__PORT: "9113"
+      DK_API__PORT: "8112"
+      DK_API__PUBLIC_URL: "http://split-worker-3:8112/"
+    ports:
+      - "9113:9113"
+      - "8112:8112"
+    volumes:
+      - split-shared:/split-shared
+
   # --- HTTP-only worker (http cluster) ---
   #
   # Runs the ripgrep pipeline with the Kafka source disabled. The producer
@@ -809,3 +884,8 @@ services:
       RANK_SCORE_MIN: "5"
       RANK_SCORE_MAX: "30"
     restart: on-failure
+
+volumes:
+  # The shared folder of the split cluster (its autodiscover cards and
+  # detach slots); `just integration-down` removes it.
+  split-shared:

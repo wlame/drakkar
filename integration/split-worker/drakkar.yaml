@@ -1,0 +1,102 @@
+# Split worker config: a large request is split into parts that every worker
+# of the consumer group runs; the owner of the request's partition sums the
+# part results up and only then commits the request's offset. Its own source
+# topic, consumer group and cluster, so it takes no message of the other
+# clusters. The parts topic and the results topic have the default names
+# (split-requests_drakkar-split_split_parts, ..._split_results); the
+# harness's Kafka init job creates them.
+
+worker:
+  name_env: "WORKER_ID"
+cluster:
+  name: "split cluster"
+
+connections:
+  kafka:
+    main:
+      brokers: "kafka:9092"
+
+sources:
+  kafka:
+    enabled: true
+    # Six partitions: the requests of a scenario spread over the owners.
+    topic: "split-requests"
+    consumer_group: "drakkar-split"
+    # A killed worker leaves the group after this long, so its partitions
+    # move within seconds (the default is 45 s).
+    session_timeout: 10s
+    heartbeat_interval: 3s
+    # The detach of the owner during a job (scenario-split.sh): the budget
+    # of detached workers lives in the autodiscover store, the lease is the
+    # shortest allowed, and there is no cooldown.
+    detach:
+      enabled: true
+      lease: 40s
+      cooldown: "0"
+
+split:
+  enabled: true
+  aggregate_sinks: [kafka/split_summaries]
+  # Overridden from the environment (DK_SPLIT__JOB_TIMEOUT): the scenario
+  # runs one check with a short timeout.
+  job_timeout: 5m
+
+executor:
+  binary_path: "/usr/local/bin/split-task"
+  max_executors: 4
+  # Longer than the job timeout of the timeout check and than the sleep of
+  # an item of mode `hang`, so such a task runs past the job timeout.
+  task_timeout: 5m
+  max_retries: 0
+  drain_timeout: 30s
+
+sinks:
+  # Longer than the 60 s broker pause of scenario-split.sh: with the default
+  # 30 s a delivery of a part sink fails during the pause, the part ends
+  # with a dlq outcome (on_failure: dlq), and the default aggregate sends
+  # the whole request to the DLQ.
+  defaults:
+    delivery_timeout: 2m
+  kafka:
+    # A part sink: one record per finished item.
+    split_items:
+      topic: "split-items"
+    # The aggregate sink: one summary per request.
+    split_summaries:
+      topic: "split-summaries"
+
+dlq:
+  enabled: true
+  topic: "split-requests_dlq"
+
+storage:
+  # The shared folder of the split cluster: the autodiscover cards and the
+  # detach slots live here.
+  shared_dir: "/split-shared"
+
+autodiscover:
+  enabled: true
+  provider: filesystem
+
+metrics:
+  enabled: true
+  port: 9090
+
+logging:
+  level: "INFO"
+  format: "json"
+
+api:
+  host: "0.0.0.0"
+  port: 8080
+
+# The UI routes are on for the detach routes; no bundle is fetched, so the
+# pages answer 503 and the JSON routes work.
+ui:
+  enabled: true
+  detach_enabled: true
+  release:
+    enabled: false
+
+recorder:
+  enabled: false

@@ -29,6 +29,23 @@ for topic in stream-requests stream-records; do
         --replication-factor 1
 done
 
+# The split worker's topics. The source topic has 6 partitions; the results
+# topic must have exactly as many (the worker checks it at start); the parts
+# topic has 6, at least one for each of the three workers.
+for topic in \
+        split-requests \
+        split-requests_drakkar-split_split_parts \
+        split-requests_drakkar-split_split_results \
+        split-items \
+        split-summaries \
+        split-requests_dlq; do
+    /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+        --create --if-not-exists \
+        --topic "$topic" \
+        --partitions 6 \
+        --replication-factor 1
+done
+
 echo "Topics created successfully"
 
 /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list

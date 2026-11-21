@@ -127,6 +127,32 @@ does not start it.
 |--------|-----|---------|--------|
 | stream-worker | [localhost:8095](http://localhost:8095/readyz) | [localhost:9101](http://localhost:9101/metrics) | 4 executors, `executor.max_pending_tasks: 40`, one Kafka sink, no UI, no recorder, DLQ off |
 
+### Split Workers (profile `split`)
+
+Three workers with a handler that implements [`split()`](split.md)
+(`integration/split-worker/`), in the cluster `split cluster` with the
+consumer group `drakkar-split`. They read their own topic,
+`split-requests` (6 partitions), and use the parts topic and the results
+topic with their default names. A request carries a list of items; a
+request with more than 20 items is split into parts of 5 items, a smaller
+one runs on its owner as a local message. Each item is one task that
+sleeps its `sleep_ms` and exits by its `mode` (`ok`, `fail`, or `hang` for
+150 s). `on_task_complete()` writes one record per item to `split-items`
+(a part sink), and `aggregate()` writes one summary per request to
+`split-summaries` (the aggregate sink) with the part counts and the items
+counted from `job.results()`. A failed item under `fail_policy: dlq` ends
+its part with a `dlq` outcome. The workers run filesystem autodiscover in
+a volume of their own and have the detach routes on, so an operator can
+detach one. `split.job_timeout` comes from `SPLIT_JOB_TIMEOUT` (default
+`5m`). `scenario-split.sh` starts and removes them; `just integration-up`
+does not start them.
+
+| Worker | API | Metrics | Config |
+|--------|-----|---------|--------|
+| split-worker-1 | [localhost:8110](http://localhost:8110/readyz) | [localhost:9111](http://localhost:9111/metrics) | 4 executors, `split.enabled`, two Kafka sinks, DLQ on, no recorder |
+| split-worker-2 | [localhost:8111](http://localhost:8111/readyz) | [localhost:9112](http://localhost:9112/metrics) | as split-worker-1 |
+| split-worker-3 | [localhost:8112](http://localhost:8112/readyz) | [localhost:9113](http://localhost:9113/metrics) | as split-worker-1 |
+
 ### HTTP Cluster (the same search, over HTTP)
 
 One worker, no consumer group. `http-worker` runs with
@@ -466,6 +492,11 @@ list. Each icon opens that page in a drawer beside the live view.
 | `search-results-http` | 50 | http cluster | -- |
 | `stream-requests` | 1 | `scenario-arrange-stream.sh` | stream worker |
 | `stream-records` | 1 | stream worker | -- |
+| `split-requests` | 6 | `scenario-split.sh` | split workers |
+| `split-requests_drakkar-split_split_parts` | 6 | split workers (owners) | split workers |
+| `split-requests_drakkar-split_split_results` | 6 (the count of `split-requests`) | split workers | split workers (owners) |
+| `split-items`, `split-summaries` | 6 | split workers | -- |
+| `split-requests_dlq` | 6 | split workers (DLQ) | -- |
 
 Browse topics in the [Kafka UI](http://localhost:8088).
 
@@ -583,13 +614,14 @@ is a pass/fail gate, not an invitation to read three dashboards.
 
 ## Provider outage scenarios
 
-Fifteen scripts check how the main cluster's registry and cluster tasks
+Sixteen scripts check how the main cluster's registry and cluster tasks
 behave when their provider, the network or a worker fails, how the
 recorder memory store works with and without a recorder file, what the
 DLQ record of a message that cannot be parsed holds, whether the
 backpressure caps hold under load, whether a twin worker name is refused,
 whether the routes of the Databases view answer, and how a stream handler
-holds its pending tasks and runs a message again after a restart. Start the harness with a
+holds its pending tasks and runs a message again after a restart, and
+how split jobs survive kills, restarts, a detach and a broker pause. Start the harness with a
 provider, wait until the workers are healthy, then run the scenarios with
 the same provider:
 
@@ -599,7 +631,7 @@ just integration-scenarios provider=redis
 just integration-down
 ```
 
-`just integration-scenarios` runs the fifteen scripts in the order below and
+`just integration-scenarios` runs the sixteen scripts in the order below and
 stops at the first failure. Each script prints one `VERDICT` line and
 exits 0 on a pass (or when it does not apply to the provider) and 1 on a
 failure. You can also run one script alone, for example
@@ -637,6 +669,7 @@ the restart of worker-2 for its leftover).
 | `scenario-agent.sh` | Reads the [agent routes](agent.md) on worker-1 (`agent.enabled` true, with a token), on worker-2 (the default, off) and on `headless-recorder` (no UI, the agent on), which it starts and removes. | worker-2 answers `404` with the surface-off message; worker-1 answers `401` with no token and with a wrong one; with the token the index has schema 1, the worker name and the five agent routes; `manual?topic=concept:pipeline` answers the pipeline concept; `state?parts=budget,partitions` answers the budget numbers and a partition list; `diagnose` lists every framework rule in `checked` and none in `failed`; `config?parts=connections` and `config?parts=agent` show the DSN, the Consul token and the agent token masked and hold no password. headless-recorder answers `/api/v1/agent` with its token and `404` on `/api/v1/identity`. Runs with every provider. |
 | `scenario-arrange-stream.sh` | Starts `stream-worker` (profile `stream`) and produces 3 requests of 30 groups of 10 tasks of 0.3 s into `stream-requests`. Until their 93 records are delivered and no task is pending, it samples `drakkar_pending_tasks` every 0.25 s (a peak shorter than that can be missed). Then it reads `stream-records`. It produces a fourth request, stops the worker once at least 8 of its group records arrived and before its final record, starts it again, and waits for that request's final record. It removes the worker at the end. | Every sample is at most the limit plus one group (50; the source topic has one partition, so one message streams at a time), and the peak reaches the limit (40); `drakkar_window_admission_wait_seconds_total{limit="tasks"}` is above 0. `stream-records` holds 90 group records (each group of each request once, 10 succeeded tasks, every task labelled with its group) and 3 final records (30 groups, done total 300), each final after the 30 group records of its request; `drakkar_stream_group_tasks_count` is 90 and its `_sum` 900. The stop logs `arrange_stream_abandoned`. The fourth request has records of two runs: the first run delivered group records and no final record, and the second run delivered each of the 30 groups once (every group of the first run again, so the message ran from its first group), then one final record. The first 3 requests did not run again. Runs with every provider. |
 | `scenario-detach.sh` | worker-1, worker-2 and worker-3 run with `sources.kafka.detach` on, a 40 s lease, no cooldown and the operator routes on (`DK_SOURCES__KAFKA__DETACH__*` and `DK_UI__DETACH_ENABLED` in `docker-compose.yml`). The scenario detaches worker-2 through `POST /api/v1/debug/detach` (60 s), asks for a detach of worker-3 while worker-2 is away, attaches worker-2 through `POST /api/v1/debug/attach`, detaches it for 15 s and lets the deadline end it, then detaches it for 300 s and kills it, asks for a detach of worker-3 at once and again every few seconds, and starts worker-2 again. Last it writes the file `detach-request-worker-3` into the shared folder: the periodic task `detach_on_request` of the harness handler (`integration/worker/handler.py`) takes the file and calls `self.detach(duration=20)`, an example of a temporary detach from handler code. | A detach moves every partition of worker-2 to worker-1 and worker-3 within `executor.drain_timeout` plus 15 s; worker-2 then holds none, `/readyz` answers 200, and worker-1 lists it with `detached: true`. A second detach while one worker is away answers `budget_full`, and that worker keeps its partitions. An attach gives worker-2 partitions again within 30 s. The deadline ends a detach without a new `last_request` and logs `worker_attached` with cause `deadline`. The slot of a killed detached worker stays held until its lease ends: a detach of worker-3 answers `budget_full` right after the kill and succeeds after the lease, while the started worker-2 is attached and holds partitions. The handler detach logs `harness_detach_result` with `detached` true, shows the origin `handler`, and ends by its deadline 20 s later. The scenario ends with the three workers attached, so it can run twice. Runs with every provider. |
+| `scenario-split.sh` | Starts `split-worker-1`, `-2` and `-3` (profile `split`) and runs ten checks, each with its own request and its own `CHECK <n>` line; before each check the three workers are ready and the committed offset of `drakkar-split` is at the end of every partition of `split-requests`, and after it a killed, detached or stopped worker comes back. 1: a request of 60 items (12 parts). 2: a request of 10 items. 3: a worker that is not the owner is killed (`docker kill`) while it runs parts. 4: the owner (the worker that logged `split_job_opened` for the request id) is killed after `split_job_done`. 5: the owner is killed during a split slowed by `split_pause_ms`. 6: one item fails under `fail_policy: dlq`. 7: the workers are recreated with `SPLIT_JOB_TIMEOUT=90s` and one item hangs past it (about two minutes), then recreated with the default. 8: the three workers are restarted one after another during a job. 9: the owner detaches through `POST /api/v1/debug/detach` during a job, and is attached again. 10: the broker is paused for 60 s during a job. The scenario removes the workers at the end. | 1: at least two workers ran parts (`drakkar_split_parts_processed_total`), one summary with 12 parts, 12 received, 60 items, and the committed offset of the request's partition stayed at or below the request while its parts ran and was never seen past it before the owner logged `split_job_closed`. 2: one summary of a local job with 1 part and 10 items, and no record on the parts topic. 3: one summary with every part received. 4: another worker logs `split_job_resumed` and closes the job; the parts topic has as many records of the request after the end as before the kill; one or two summaries, every part received. 5: another worker logs `split_attempt_started`; one summary of attempt 2 or later with 12 received parts. 6: one DLQ record with the request's key and value byte for byte, `dk-stage` `execute`, `dk-record-version` `1` and a `dk-error`; no summary. 7: `split_job_timed_out`, one DLQ record with `dk-stage` `aggregate` and a `dk-error` that starts with `job timed out after`; no summary. 8 and 10: the job ends with summaries that each have every part received; in 10 no worker container exited or restarted. 9: another worker logs `split_job_resumed` and closes the job; one or two summaries. After each check the committed offset reaches the end of every partition. Runs with every provider. |
 
 The scenarios change the harness (a killed and restarted worker, a paused
 service), so run `just integration-down` before the next run.
@@ -720,7 +753,7 @@ For `filesystem`, `postgres`, `redis` and `consul`, in this order, the recipe
 clears `integration/shared/` (except `README.md`; it is a bind mount that
 `integration-down` does not clear) from inside a container, so the Docker VM
 of a macOS host sees the delete at once, starts the harness with
-`integration-up`, waits with `wait-ready.sh`, runs the fifteen scenarios and
+`integration-up`, waits with `wait-ready.sh`, runs the sixteen scenarios and
 `verify-after-drain.sh`, and runs `integration-down`, also after a failure. It
 goes on after a failing step, prints a table with PASS, FAIL or N/A for each
 provider and step, and exits non-zero when any step failed. `N/A` means the
