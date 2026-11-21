@@ -380,7 +380,7 @@ attach_total = Counter(
 )
 
 # --- Split: messages cut into parts that run on many workers ---
-# These series exist for a worker with ``split.enabled`` only; the ``outcome``
+# These series carry values only for a worker with ``split.enabled``; the ``outcome``
 # and ``reason`` values are listed in the agent registry.
 
 split_jobs_open = Gauge(

@@ -32,39 +32,6 @@
   related:
     - concept:at-least-once
 
-- key: split.enabled
-  summary: Whether messages of the Kafka source may be cut into parts that run on every worker and are put together again.
-  advice: Turn it on only with the Kafka source on; the parts and results topics must exist and live longer than the longest job.
-  related:
-    - config:split.aggregate_sinks
-    - config:split.job_timeout
-
-- key: split.aggregate_sinks
-  summary: The sinks of the aggregate stage, each written type/name; every other sink is a part sink.
-  advice: Name the sinks that receive the one result of a whole message; a sink depends only on sinks of its own stage.
-  related:
-    - config:split.enabled
-
-- key: split.job_timeout
-  summary: The longest time a job may run, from 1m to 30d; 0 means no limit.
-  advice: Set it above the longest expected job; with 0 the idle_timeout must be set.
-  related:
-    - config:split.idle_timeout
-    - metric:drakkar_split_oldest_job_age_seconds
-
-- key: split.idle_timeout
-  summary: The longest time a job may go without a new part result, from 1m to 30d; 0 means no limit.
-  advice: Set it above the longest time one part needs; it must be below job_timeout when both are set.
-  related:
-    - config:split.job_timeout
-
-- key: split.max_attempts
-  summary: How many times a job may be split, from 1 to 10, the first attempt included.
-  advice: Keep it low; each new attempt publishes the parts again.
-  related:
-    - metric:drakkar_split_jobs_total
-    - metric:drakkar_split_parts_published_total
-
 - key: sources.kafka.detach.enabled
   summary: Whether this worker may leave its consumer group for a bounded time and join it again.
   advice: Turn it on only with autodiscover on, and set max_detached and min_attached to the same values on every worker of the group.
@@ -112,6 +79,39 @@
   related:
     - concept:detach
     - concept:autodiscover
+
+- key: split.enabled
+  summary: Whether messages of the Kafka source may be cut into parts that run on every worker and are put together again.
+  advice: Turn it on only with the Kafka source on; the parts and results topics must exist and live longer than split.job_timeout.
+  related:
+    - config:split.aggregate_sinks
+    - config:split.job_timeout
+
+- key: split.aggregate_sinks
+  summary: The sinks of the aggregate stage, each written type/name; every other sink is a part sink.
+  advice: Name the sinks that receive the one result of a whole message; a sink depends only on sinks of its own stage.
+  related:
+    - config:split.enabled
+
+- key: split.job_timeout
+  summary: The longest time a job may run, from 1m to 30d; 0 means no limit.
+  advice: Set it above the longest expected job; with 0 the idle_timeout must be set.
+  related:
+    - config:split.idle_timeout
+    - metric:drakkar_split_oldest_job_age_seconds
+
+- key: split.idle_timeout
+  summary: The longest time a job may go without a new part result, from 1m to 30d; 0 means no limit.
+  advice: Set it above the longest time one part needs; it must be below job_timeout when both are set.
+  related:
+    - config:split.job_timeout
+
+- key: split.max_attempts
+  summary: How many times a job may be split, from 1 to 10, the first attempt included.
+  advice: Keep it low; each new attempt publishes the parts again.
+  related:
+    - metric:drakkar_split_jobs_total
+    - metric:drakkar_split_parts_published_total
 
 - key: sources.http.request_timeout
   summary: The time limit of one HTTP request.

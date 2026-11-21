@@ -194,7 +194,7 @@
 
 - key: drakkar_split_parts_processed_total
   summary: Parts this worker ran, by outcome.
-  meaning: The outcome is ok or failed; a failed part follows the failure policy of the sinks of the part stage.
+  meaning: The outcome is ok or failed; a failed part is reported to the owner in its part result.
   healthy: Failed stays near 0.
   related:
     - metric:drakkar_split_parts_published_total
@@ -215,7 +215,7 @@
 
 - key: drakkar_split_result_write_failures_total
   summary: Failed attempts to write a part result.
-  meaning: The part runs again when its result cannot be written; the job waits for it.
+  meaning: The write is tried again; the part's offset stays pending until it succeeds.
   healthy: 0; alert on any rate.
   related:
     - metric:drakkar_split_parts_processed_total

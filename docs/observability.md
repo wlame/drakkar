@@ -175,7 +175,7 @@ Prometheus needed for a quick read.
 
 #### Split
 
-These metrics exist only for a worker with `split.enabled`.
+These metrics carry values only for a worker with `split.enabled`.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|

@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `9e03d6d1138ba068`.
+Registry version: `8a1715b639962dc9`.
 
 ## Concepts
 
@@ -515,46 +515,6 @@ The longest time between two polls before Kafka evicts the consumer.
 
 **Related:** `concept:at-least-once`
 
-### `config:split.enabled`
-
-Whether messages of the Kafka source may be cut into parts that run on every worker and are put together again.
-
-**Advice:** Turn it on only with the Kafka source on; the parts and results topics must exist and live longer than the longest job.
-
-**Related:** `config:split.aggregate_sinks`, `config:split.job_timeout`
-
-### `config:split.aggregate_sinks`
-
-The sinks of the aggregate stage, each written type/name; every other sink is a part sink.
-
-**Advice:** Name the sinks that receive the one result of a whole message; a sink depends only on sinks of its own stage.
-
-**Related:** `config:split.enabled`
-
-### `config:split.job_timeout`
-
-The longest time a job may run, from 1m to 30d; 0 means no limit.
-
-**Advice:** Set it above the longest expected job; with 0 the idle_timeout must be set.
-
-**Related:** `config:split.idle_timeout`, `metric:drakkar_split_oldest_job_age_seconds`
-
-### `config:split.idle_timeout`
-
-The longest time a job may go without a new part result, from 1m to 30d; 0 means no limit.
-
-**Advice:** Set it above the longest time one part needs; it must be below job_timeout when both are set.
-
-**Related:** `config:split.job_timeout`
-
-### `config:split.max_attempts`
-
-How many times a job may be split, from 1 to 10, the first attempt included.
-
-**Advice:** Keep it low; each new attempt publishes the parts again.
-
-**Related:** `metric:drakkar_split_jobs_total`, `metric:drakkar_split_parts_published_total`
-
 ### `config:sources.kafka.detach.enabled`
 
 Whether this worker may leave its consumer group for a bounded time and join it again.
@@ -610,6 +570,46 @@ The lease of the detach slot in the autodiscover store.
 **Advice:** Keep the default unless the store is slow; a longer lease keeps a slot longer after a worker died.
 
 **Related:** `concept:detach`, `concept:autodiscover`
+
+### `config:split.enabled`
+
+Whether messages of the Kafka source may be cut into parts that run on every worker and are put together again.
+
+**Advice:** Turn it on only with the Kafka source on; the parts and results topics must exist and live longer than split.job_timeout.
+
+**Related:** `config:split.aggregate_sinks`, `config:split.job_timeout`
+
+### `config:split.aggregate_sinks`
+
+The sinks of the aggregate stage, each written type/name; every other sink is a part sink.
+
+**Advice:** Name the sinks that receive the one result of a whole message; a sink depends only on sinks of its own stage.
+
+**Related:** `config:split.enabled`
+
+### `config:split.job_timeout`
+
+The longest time a job may run, from 1m to 30d; 0 means no limit.
+
+**Advice:** Set it above the longest expected job; with 0 the idle_timeout must be set.
+
+**Related:** `config:split.idle_timeout`, `metric:drakkar_split_oldest_job_age_seconds`
+
+### `config:split.idle_timeout`
+
+The longest time a job may go without a new part result, from 1m to 30d; 0 means no limit.
+
+**Advice:** Set it above the longest time one part needs; it must be below job_timeout when both are set.
+
+**Related:** `config:split.job_timeout`
+
+### `config:split.max_attempts`
+
+How many times a job may be split, from 1 to 10, the first attempt included.
+
+**Advice:** Keep it low; each new attempt publishes the parts again.
+
+**Related:** `metric:drakkar_split_jobs_total`, `metric:drakkar_split_parts_published_total`
 
 ### `config:sources.http.request_timeout`
 
@@ -1141,7 +1141,7 @@ Parts published to the parts topic.
 
 Parts this worker ran, by outcome.
 
-**Meaning:** The outcome is ok or failed; a failed part follows the failure policy of the sinks of the part stage.
+**Meaning:** The outcome is ok or failed; a failed part is reported to the owner in its part result.
 
 **Healthy:** Failed stays near 0.
 
@@ -1171,7 +1171,7 @@ Records of the results topic the job tracker ignored, by reason.
 
 Failed attempts to write a part result.
 
-**Meaning:** The part runs again when its result cannot be written; the job waits for it.
+**Meaning:** The write is tried again; the part's offset stays pending until it succeeds.
 
 **Healthy:** 0; alert on any rate.
 
