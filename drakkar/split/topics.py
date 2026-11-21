@@ -6,7 +6,6 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
-from confluent_kafka import KafkaException
 from confluent_kafka.admin import AdminClient, ConfigResource
 
 from drakkar.config import DrakkarConfig
@@ -81,8 +80,8 @@ async def _retention_warnings(
     for topic in topics:
         try:
             retention_ms = await retention(topic)
-        except (KafkaException, TimeoutError) as exc:
-            # Often the worker may not describe topic configs: this check only warns, so it never stops the start.
+        except Exception as exc:
+            # Any failed read, a malformed value included, is a warning. Often the worker may not describe topic configs: this check only warns, so it never stops the start.
             warnings.append(_unreadable_retention_warning(topic, exc))
             continue
         if retention_ms is None or retention_ms == NO_RETENTION_LIMIT_MS:
@@ -117,7 +116,8 @@ def topic_retention_ms(
 ) -> Callable[[str], Awaitable[int | None]]:
     """A ``retention`` callable for ``check_split_topics``: the blocking client call runs on a thread.
 
-    A read the broker refuses raises ``KafkaException``; ``check_split_topics`` turns it into a warning.
+    A read the broker refuses raises ``KafkaException`` and a malformed value ``ValueError``;
+    ``check_split_topics`` turns any failed read into a warning.
     """
 
     def read(topic: str) -> int | None:

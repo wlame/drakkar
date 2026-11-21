@@ -187,7 +187,9 @@ class FakeProducerClient(FailureSwitches):
         self._lock = threading.Lock()
         self._pending: deque[_Pending] = deque()
         self._delivery_errors: deque[KafkaError] = deque()
+        self._purged: deque[_Pending] = deque()
         self.produced = 0
+        self.rejected: list[bytes | None] = []
 
     def fail_next_deliveries(self, error: KafkaError, *, times: int = 1) -> None:
         """Make the delivery reports of the next ``times`` records carry ``error``; they are not written."""
@@ -206,12 +208,18 @@ class FakeProducerClient(FailureSwitches):
         self._maybe_fail('produce')
         with self._lock:
             if self.queue_capacity is not None and len(self._pending) >= self.queue_capacity:
+                self.rejected.append(value)
                 raise BufferError('Local: Queue full')
             self._pending.append(_Pending(topic, max(partition, 0), key, value, list(headers or []), on_delivery))
             self.produced += 1
 
     def _deliver_all(self) -> int:
         """Deliver every queued record, in order, unless deliveries are held back; returns how many."""
+        with self._lock:
+            purged, self._purged = list(self._purged), deque()
+        for item in purged:
+            if item.on_delivery:
+                item.on_delivery(KafkaError(KafkaError._PURGE_QUEUE), FakeMessage(topic=item.topic))
         with self._lock:
             if self.hold_deliveries:
                 return 0
@@ -244,6 +252,12 @@ class FakeProducerClient(FailureSwitches):
         with self._lock:
             return len(self._pending)
 
+    def purge(self, in_queue: bool = True, in_flight: bool = True, blocking: bool = True) -> None:
+        """Drop every queued record; each one gets a delivery report with the purge error, served by ``poll``."""
+        with self._lock:
+            dropped, self._pending = list(self._pending), deque()
+            self._purged.extend(dropped)
+
     def release_deliveries(self) -> None:
         """Stop holding deliveries back; the next poll delivers what waits."""
         self.hold_deliveries = False
@@ -252,10 +266,12 @@ class FakeProducerClient(FailureSwitches):
 class FakeConsumerClient(FailureSwitches):
     """The asyncio consumer over a ``FakeLog``, with the semantics a real broker check found."""
 
-    def __init__(self, log: FakeLog, *, group_id: str = 'fake-group') -> None:
+    def __init__(self, log: FakeLog, *, group_id: str = 'fake-group', auto_offset_reset: str = 'earliest') -> None:
         super().__init__()
         self.log = log
         self.group_id = group_id
+        # Where a position below the low watermark goes: 'earliest', 'latest', or 'error' (an error message).
+        self.auto_offset_reset = auto_offset_reset
         self.closed = False
         self._positions: dict[tuple[str, int], int] = {}
         self.error_messages: deque[FakeMessage] = deque()
@@ -272,17 +288,22 @@ class FakeConsumerClient(FailureSwitches):
         committed = self.log.committed(self.group_id, tp.topic, tp.partition)
         return low if committed is None else committed
 
+    def _check_open(self, method: str) -> None:
+        self._maybe_fail(method)
+        if self.closed:
+            raise RuntimeError('Consumer closed')
+
     async def assign(self, partitions: list[TopicPartition]) -> None:
-        self._maybe_fail('assign')
+        self._check_open('assign')
         self._positions = {(tp.topic, tp.partition): self._start_offset(tp) for tp in partitions}
 
     async def incremental_assign(self, partitions: list[TopicPartition]) -> None:
-        self._maybe_fail('incremental_assign')
+        self._check_open('incremental_assign')
         for tp in partitions:
             self._positions[(tp.topic, tp.partition)] = self._start_offset(tp)
 
     async def incremental_unassign(self, partitions: list[TopicPartition]) -> None:
-        self._maybe_fail('incremental_unassign')
+        self._check_open('incremental_unassign')
         for tp in partitions:
             self._positions.pop((tp.topic, tp.partition), None)
 
@@ -291,11 +312,18 @@ class FakeConsumerClient(FailureSwitches):
         self.error_messages.append(FakeMessage(error=error))
 
     async def consume(self, num_messages: int = 1, timeout: float = -1) -> list[FakeMessage]:
-        self._maybe_fail('consume')
+        self._check_open('consume')
         if self.error_messages:
             return [self.error_messages.popleft()]
         messages: list[FakeMessage] = []
         for (topic, partition), position in list(self._positions.items()):
+            low, high = self.log.watermarks(topic, partition)
+            if position < low:
+                if self.auto_offset_reset == 'error':
+                    self._positions[(topic, partition)] = low
+                    return [FakeMessage(error=KafkaError(KafkaError._AUTO_OFFSET_RESET))]
+                position = low if self.auto_offset_reset == 'earliest' else high
+                self._positions[(topic, partition)] = position
             records = self.log.read(topic, partition, position, num_messages - len(messages))
             for record in records:
                 messages.append(FakeMessage(topic=topic, partition=partition, record=record))
@@ -310,12 +338,18 @@ class FakeConsumerClient(FailureSwitches):
     async def commit(
         self, message: Any = None, offsets: list[TopicPartition] | None = None, asynchronous: bool = False
     ):
-        self._maybe_fail('commit')
-        for tp in offsets or []:
+        self._check_open('commit')
+        if offsets is None and message is not None:
+            offsets = [TopicPartition(message.topic(), message.partition(), message.offset() + 1)]
+        if offsets is None:
+            offsets = [
+                TopicPartition(topic, partition, position) for (topic, partition), position in self._positions.items()
+            ]
+        for tp in offsets:
             self.log.commit(self.group_id, tp.topic, tp.partition, tp.offset)
 
     async def committed(self, partitions: list[TopicPartition], timeout: float | None = None) -> list[TopicPartition]:
-        self._maybe_fail('committed')
+        self._check_open('committed')
         found = []
         for tp in partitions:
             offset = self.log.committed(self.group_id, tp.topic, tp.partition)
@@ -325,7 +359,7 @@ class FakeConsumerClient(FailureSwitches):
     async def get_watermark_offsets(
         self, partition: TopicPartition, timeout: float | None = None, cached: bool = False
     ) -> tuple[int, int]:
-        self._maybe_fail('get_watermark_offsets')
+        self._check_open('get_watermark_offsets')
         return self.log.watermarks(partition.topic, partition.partition)
 
     async def close(self) -> None:

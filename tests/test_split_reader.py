@@ -1,5 +1,7 @@
 """Reading the part results of one job from the results log."""
 
+import asyncio
+
 import pytest
 from confluent_kafka import KafkaError, KafkaException
 from pydantic import BaseModel
@@ -56,7 +58,7 @@ def job_state(first: int, last: int | None, parts: int | None = None) -> JobStat
 
 async def read(log: FakeLog, job: JobState, model=None, consumers: list | None = None) -> list[PartResult]:
     def factory():
-        consumer = FakeConsumerClient(log, group_id='results')
+        consumer = FakeConsumerClient(log, group_id='results', auto_offset_reset='error')
         (consumers if consumers is not None else []).append(consumer)
         return consumer
 
@@ -203,11 +205,91 @@ async def test_error_message_from_the_consumer_raises_unavailable(log):
             pass
 
 
+class SilentConsumer(FakeConsumerClient):
+    """A consumer whose broker returns nothing."""
+
+    async def consume(self, num_messages=1, timeout=-1):
+        await asyncio.sleep(0.005)
+        return []
+
+
+class StutteringConsumer(FakeConsumerClient):
+    """A consumer that returns one empty poll after its first batch."""
+
+    polls = 0
+
+    async def consume(self, num_messages=1, timeout=-1):
+        self.polls += 1
+        if self.polls == 2:
+            await asyncio.sleep(0.005)
+            return []
+        return await super().consume(num_messages=1, timeout=timeout)
+
+
+class RacingConsumer(FakeConsumerClient):
+    """The low watermark moves up between the check and the fetch."""
+
+    async def assign(self, partitions):
+        await super().assign(partitions)
+        self.log.raise_low(TOPIC, PARTITION, partitions[0].offset + 1)
+
+
 async def test_read_that_makes_no_progress_raises_unavailable(log, monkeypatch):
     first = add_open(log)
+    last = add_result(log, 0)
     monkeypatch.setattr(reader, 'NO_PROGRESS_LIMIT_SECONDS', 0.05)
     with pytest.raises(SplitResultsUnavailable, match='no record'):
-        await read(log, job_state(first, first + 10))
+        await _read_with(SilentConsumer(log), job_state(first, last))
+
+
+async def _read_with(consumer, job):
+    return [
+        r
+        async for r in read_results(
+            consumer_factory=lambda: consumer,
+            topic=TOPIC,
+            partition=PARTITION,
+            job=job,
+            group=GROUP,
+            part_data_model=None,
+        )
+    ]
+
+
+async def test_slow_caller_between_yields_is_not_a_stalled_broker(log, monkeypatch):
+    first = add_open(log)
+    add_result(log, 0)
+    add_result(log, 1)
+    last = add_result(log, 2)
+    monkeypatch.setattr(reader, 'NO_PROGRESS_LIMIT_SECONDS', 0.05)
+    consumer = StutteringConsumer(log)
+    got = []
+    async for result in read_results(
+        consumer_factory=lambda: consumer,
+        topic=TOPIC,
+        partition=PARTITION,
+        job=job_state(first, last),
+        group=GROUP,
+        part_data_model=None,
+    ):
+        got.append(result.index)
+        await asyncio.sleep(0.1)
+    assert got == [0, 1, 2]
+
+
+async def test_stops_at_the_high_watermark_when_the_last_result_is_not_there(log):
+    first = add_open(log)
+    add_result(log, 0)
+    results = await asyncio.wait_for(read(log, job_state(first, first + 50)), 2)
+    assert [r.index for r in results] == [0]
+
+
+async def test_position_that_fell_below_the_low_watermark_is_expired_not_unavailable(log):
+    first = add_open(log)
+    add_result(log, 0)
+    last = add_result(log, 1)
+    with pytest.raises(SplitResultsExpired):
+        await _read_with(RacingConsumer(log, auto_offset_reset='error'), job_state(first, last))
 
 
 async def test_consumer_is_closed_when_the_caller_stops_early(log):

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -19,6 +20,7 @@ from confluent_kafka import KafkaError, KafkaException, Message, Producer
 
 from drakkar.config.connections import KafkaConnectionConfig
 from drakkar.kafka_security import merge_client_config
+from drakkar.providers.resilience import RateLimitedLog
 from drakkar.split.records import WireRecord
 
 logger = structlog.get_logger()
@@ -26,6 +28,7 @@ logger = structlog.get_logger()
 POLL_TIMEOUT_SECONDS = 0.1
 BUFFER_FULL_WAIT_SECONDS = 0.01
 POLL_THREAD_NAME = 'split-producer'
+CLOSED_MESSAGE = 'the split producer was closed before the record was delivered'
 
 # Errors that a retry cannot fix, besides the ones the client marks as fatal.
 FINAL_ERROR_CODES: frozenset[int] = frozenset(
@@ -85,6 +88,11 @@ class SplitProducer:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._stopping = threading.Event()
+        # One waiter at a time takes the next place in the client queue, so records keep their order.
+        self._enqueue_lock = asyncio.Lock()
+        self._unsettled: set[asyncio.Future[None]] = set()
+        # Only the poll thread uses it.
+        self._poll_failure_log = RateLimitedLog(time.monotonic)
 
     def _client_config(self) -> dict[str, Any]:
         """Brokers, security and raw properties of the connection, then the framework's delivery settings."""
@@ -97,7 +105,9 @@ class SplitProducer:
         return config
 
     async def start(self) -> None:
-        """Build the client and start the thread that serves delivery reports."""
+        """Build the client and start the thread that serves delivery reports; a second call does nothing."""
+        if self._thread is not None:
+            return
         self._loop = asyncio.get_running_loop()
         self._producer = self._producer_factory(self._client_config())
         self._stopping.clear()
@@ -110,20 +120,39 @@ class SplitProducer:
             try:
                 self._producer.poll(POLL_TIMEOUT_SECONDS)
             except Exception as exc:  # a failed poll must not end the thread: reports would stop for ever
-                logger.error('split_producer_poll_failed', category='split', error=str(exc))
+                suppressed = self._poll_failure_log.admit('poll')
+                if suppressed is not None:
+                    logger.error('split_producer_poll_failed', category='split', error=str(exc), suppressed=suppressed)
                 self._stopping.wait(POLL_TIMEOUT_SECONDS)
 
     async def close(self, timeout: float) -> None:
-        """Stop the poll thread, then flush what is queued, for at most ``timeout`` seconds."""
+        """Stop the poll thread, flush what is queued for at most ``timeout`` seconds, and fail what is left.
+
+        After it every future has ended and ``enqueue`` is refused.
+        """
         thread, producer = self._thread, self._producer
         if thread is None or producer is None:
             return
         self._stopping.set()
         await asyncio.to_thread(thread.join)
         self._thread = None
-        remaining = await asyncio.to_thread(producer.flush, timeout)
+        remaining = await asyncio.to_thread(self._flush_and_purge, producer, timeout)
         if remaining:
             logger.warning('split_producer_close_incomplete', category='split', remaining=remaining)
+        self._producer = None
+        # Reports of purged records reached the loop before this point; fail any future that is still open.
+        for future in list(self._unsettled):
+            if not future.done():
+                future.set_exception(SplitProduceError(CLOSED_MESSAGE, final=False))
+
+    @staticmethod
+    def _flush_and_purge(producer: Any, timeout: float) -> int:
+        """Flush, then drop what the flush could not deliver and serve the reports of the dropped records."""
+        remaining = producer.flush(timeout)
+        if remaining:
+            producer.purge()
+            producer.poll(0)
+        return remaining
 
     def _delivery_callback(self, loop: asyncio.AbstractEventLoop, future: asyncio.Future[None]) -> Callable[..., None]:
         """The callback for one record; the client calls it on the poll thread."""
@@ -154,14 +183,26 @@ class SplitProducer:
         Waits only while the client queue is full. A record the client refuses at once raises
         ``SplitProduceError``; a failed delivery ends the future with it.
         """
-        loop = self._loop
-        if loop is None or self._producer is None:
+        loop, producer = self._loop, self._producer
+        if loop is None or producer is None or self._stopping.is_set():
             raise RuntimeError('the split producer is not started')
         future: asyncio.Future[None] = loop.create_future()
         callback = self._delivery_callback(loop, future)
+        async with self._enqueue_lock:
+            await self._produce_when_room(producer, topic, record, callback)
+        self._unsettled.add(future)
+        future.add_done_callback(self._unsettled.discard)
+        return future
+
+    async def _produce_when_room(
+        self, producer: Any, topic: str, record: WireRecord, callback: Callable[..., None]
+    ) -> None:
+        """Give the record to the client; while its queue is full, wait, unless the producer is closing."""
         while True:
+            if self._stopping.is_set():
+                raise SplitProduceError(CLOSED_MESSAGE, final=False)
             try:
-                self._producer.produce(
+                producer.produce(
                     topic=topic,
                     key=record.key,
                     value=record.value,
@@ -169,7 +210,7 @@ class SplitProducer:
                     partition=record.partition,
                     on_delivery=callback,
                 )
-                return future
+                return
             except BufferError:
                 await asyncio.sleep(BUFFER_FULL_WAIT_SECONDS)
             except KafkaException as exc:

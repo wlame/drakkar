@@ -191,3 +191,93 @@ async def test_a_failed_poll_is_logged_and_the_thread_goes_on(log):
     await producer.publish(TOPIC, record(1))
     await producer.close(1.0)
     assert len(log.records(TOPIC, 0)) == 1
+
+
+async def test_start_twice_keeps_one_poll_thread(log):
+    producer = SplitProducer(KafkaConnectionConfig(), producer_factory=lambda config: FakeProducerClient(log))
+    await producer.start()
+    thread = producer._thread
+    await producer.start()
+    assert producer._thread is thread
+    await producer.close(1.0)
+
+
+async def test_close_fails_the_futures_the_flush_could_not_deliver(log):
+    client = FakeProducerClient(log)
+    producer = SplitProducer(KafkaConnectionConfig(), producer_factory=lambda config: client)
+    await producer.start()
+    client.hold_deliveries = True
+    future = await producer.enqueue(TOPIC, record(1))
+    await producer.close(0.1)
+    assert future.done()
+    with pytest.raises(SplitProduceError) as raised:
+        future.result()
+    assert not raised.value.final
+
+
+async def test_future_the_client_never_reports_is_failed_by_close(log):
+    class Forgetful(FakeProducerClient):
+        def purge(self, *args, **kwargs):
+            self._pending.clear()  # drops records without any report
+
+    client = Forgetful(log)
+    producer = SplitProducer(KafkaConnectionConfig(), producer_factory=lambda config: client)
+    await producer.start()
+    client.hold_deliveries = True
+    future = await producer.enqueue(TOPIC, record(1))
+    await producer.close(0.1)
+    with pytest.raises(SplitProduceError, match='closed'):
+        future.result()
+
+
+async def test_enqueue_after_close_is_refused(log):
+    producer = SplitProducer(KafkaConnectionConfig(), producer_factory=lambda config: FakeProducerClient(log))
+    await producer.start()
+    await producer.close(1.0)
+    with pytest.raises(RuntimeError, match='not started'):
+        await producer.enqueue(TOPIC, record())
+
+
+async def test_waiter_on_a_full_queue_gives_up_when_the_producer_closes(log):
+    client = FakeProducerClient(log, queue_capacity=1)
+    producer = SplitProducer(KafkaConnectionConfig(), producer_factory=lambda config: client)
+    await producer.start()
+    client.hold_deliveries = True
+    await producer.enqueue(TOPIC, record(1))
+    waiter = asyncio.create_task(producer.enqueue(TOPIC, record(2)))
+    await asyncio.sleep(0.05)
+    await producer.close(0.1)
+    with pytest.raises(SplitProduceError) as raised:
+        await asyncio.wait_for(waiter, 2)
+    assert not raised.value.final
+
+
+async def test_only_the_first_of_two_waiters_tries_the_full_queue(log):
+    client = FakeProducerClient(log, queue_capacity=1)
+    producer = SplitProducer(KafkaConnectionConfig(), producer_factory=lambda config: client)
+    await producer.start()
+    client.hold_deliveries = True
+    await producer.enqueue(TOPIC, record(1))
+    second = asyncio.create_task(producer.enqueue(TOPIC, record(2)))
+    third = asyncio.create_task(producer.enqueue(TOPIC, record(3)))
+    await asyncio.sleep(0.05)
+    assert set(client.rejected) == {b'2'}
+    client.release_deliveries()
+    await asyncio.wait_for(await asyncio.wait_for(second, 2), 2)
+    await asyncio.wait_for(await asyncio.wait_for(third, 2), 2)
+    assert [r.value for r in log.records(TOPIC, 0)] == [b'1', b'2', b'3']
+    await producer.close(1.0)
+
+
+async def test_repeated_poll_failures_are_logged_once_in_the_interval(log, monkeypatch):
+    from drakkar.split import producer as producer_module
+
+    lines = []
+    monkeypatch.setattr(producer_module.logger, 'error', lambda event, **fields: lines.append(fields))
+    client = FakeProducerClient(log)
+    client.fail_next('poll', RuntimeError('boom'), times=3)
+    producer = SplitProducer(KafkaConnectionConfig(), producer_factory=lambda config: client)
+    await producer.start()
+    await producer.publish(TOPIC, record(1))
+    await producer.close(1.0)
+    assert len(lines) == 1

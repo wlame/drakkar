@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import structlog
-from confluent_kafka import KafkaException, TopicPartition
+from confluent_kafka import KafkaError, KafkaException, TopicPartition
 from confluent_kafka.aio import AIOConsumer
 from pydantic import BaseModel, ValidationError
 
@@ -24,6 +24,8 @@ POLL_TIMEOUT_SECONDS = 1.0
 WATERMARK_TIMEOUT_SECONDS = 5.0
 NO_PROGRESS_LIMIT_SECONDS = 30.0
 READER_MAX_WORKERS = 2
+# The client reports a read below the low watermark with one of these, as ``auto.offset.reset=error`` asks.
+OUT_OF_RANGE_CODES = frozenset({KafkaError._AUTO_OFFSET_RESET, KafkaError.OFFSET_OUT_OF_RANGE})
 
 
 def results_consumer_factory(connection: KafkaConnectionConfig, group: str) -> Callable[[], Any]:
@@ -94,8 +96,9 @@ def _with_typed_data(result: PartResult, part_data_model: type[BaseModel] | None
         return result
 
 
-async def _check_not_expired(consumer: Any, topic: str, partition: int, job: JobState) -> None:
-    low, _high = await consumer.get_watermark_offsets(
+async def _check_not_expired(consumer: Any, topic: str, partition: int, job: JobState) -> int:
+    """Raise when the log lost the start of the job; otherwise return the high watermark."""
+    low, high = await consumer.get_watermark_offsets(
         TopicPartition(topic, partition), timeout=WATERMARK_TIMEOUT_SECONDS
     )
     if low > job.first_open_offset:
@@ -103,6 +106,11 @@ async def _check_not_expired(consumer: Any, topic: str, partition: int, job: Job
             f'the results log of partition {partition} starts at offset {low}, '
             f'after the first record of the job at offset {job.first_open_offset}'
         )
+    return high
+
+
+def _is_out_of_range(error: Any) -> bool:
+    return error.code() in OUT_OF_RANGE_CODES
 
 
 async def read_results(
@@ -150,7 +158,11 @@ async def _read(
     loop = asyncio.get_running_loop()
     seen = bytearray()
     try:
-        await _check_not_expired(consumer, topic, partition, job)
+        high = await _check_not_expired(consumer, topic, partition, job)
+        # Nothing at or above the high watermark of this moment can be a counted result.
+        end = min(last, high - 1)
+        if job.first_open_offset > end:
+            return
         await consumer.assign([TopicPartition(topic, partition, job.first_open_offset)])
         last_progress = loop.time()
         done = False
@@ -163,18 +175,24 @@ async def _read(
                     f'no record of partition {partition} for {NO_PROGRESS_LIMIT_SECONDS:.0f} seconds'
                 )
             for message in messages:
-                if message.error():
-                    raise SplitResultsUnavailable(f'reading the results log failed: {message.error()}')
-                if message.offset() > last:
+                error = message.error()
+                if error:
+                    if _is_out_of_range(error):
+                        raise SplitResultsExpired(f'the results log of partition {partition} lost records: {error}')
+                    raise SplitResultsUnavailable(f'reading the results log failed: {error}')
+                if message.offset() > end:
                     done = True
                     break
                 body = _is_job_record(message, job, group)
                 result = _part_result(body, job) if body is not None else None
                 if result is not None and _mark(seen, result.index):
                     yield _with_typed_data(result, part_data_model)
-                if message.offset() == last:
+                if message.offset() == end:
                     done = True
                     break
+            if messages:
+                # Time the caller spent between yields is not a stalled broker.
+                last_progress = loop.time()
             await asyncio.sleep(0)
     except KafkaException as exc:
         raise SplitResultsUnavailable(f'reading the results log failed: {exc}') from exc

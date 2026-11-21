@@ -97,7 +97,11 @@ class FakeAdmin:
         if topic == 'denied':
             future.set_exception(KafkaException(KafkaError(KafkaError.TOPIC_AUTHORIZATION_FAILED)))
         else:
-            entries = {} if topic == 'bare' else {'retention.ms': SimpleNamespace(value='60000')}
+            entries = (
+                {}
+                if topic == 'bare'
+                else {'retention.ms': SimpleNamespace(value='abc' if topic == 'malformed' else '60000')}
+            )
             future.set_result(entries)
         return {resources[0]: future}
 
@@ -120,7 +124,9 @@ async def test_retention_read_that_the_broker_refuses_raises_the_client_error():
         await read('denied')
 
 
-@pytest.mark.parametrize('error', [KafkaException('no right to describe configs'), TimeoutError('slow')])
+@pytest.mark.parametrize(
+    'error', [KafkaException('no right to describe configs'), TimeoutError('slow'), ValueError('invalid literal')]
+)
 async def test_unreadable_retention_is_a_warning_and_does_not_stop_the_start(error):
     async def metadata():
         return {'items': 1, PARTS: 1, RESULTS: 1}
@@ -135,3 +141,16 @@ async def test_unreadable_retention_is_a_warning_and_does_not_stop_the_start(err
         f"split: the retention of the topic '{PARTS}' could not be read: {error}",
         f"split: the retention of the topic '{RESULTS}' (1h) is shorter than split.job_timeout (1d)",
     ]
+
+
+async def test_malformed_retention_value_from_the_real_query_is_a_warning():
+    read = topic_retention_ms(KafkaConnectionConfig(), admin_factory=FakeAdmin)
+
+    async def metadata():
+        return {'items': 1, PARTS: 1, RESULTS: 1}
+
+    async def retention(topic: str):
+        return await read('malformed' if topic == PARTS else topic)
+
+    warnings = await check_split_topics(make_config(job_timeout='24h'), metadata=metadata, retention=retention)
+    assert warnings[0].startswith(f"split: the retention of the topic '{PARTS}' could not be read: ")
