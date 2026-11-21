@@ -588,6 +588,8 @@ class PartitionProcessor:
     def enqueue(self, message: SourceMessage) -> None:
         """Add a message to this partition's processing queue."""
         self._queue.put_nowait(message)
+        if self._owner is not None:
+            self._owner.note_delivered((message.offset,))
         if self._recorder:
             if self._partition_label == self._partition_id:
                 self._recorder.record_consumed(message)
@@ -597,8 +599,26 @@ class PartitionProcessor:
         partition_queue_size.labels(partition=str(self._partition_label)).set(self._queue.qsize())
 
     def attach_split_owner(self, owner: SplitOwner) -> None:
-        """Give the processor the owner of its split jobs; called once, before ``start``."""
+        """Give the processor the owner of its split jobs; called once, before ``start``.
+
+        The owner learns of every message that is in the queue already, so
+        it never takes the job of a message this processor was given for
+        one the source no longer gives.
+        """
         self._owner = owner
+        owner.note_delivered(self._queued_offsets())
+
+    def _queued_offsets(self) -> list[int]:
+        """The offsets of the messages in the queue, in their order; the queue is left as it was."""
+        queued: list[SourceMessage] = []
+        while True:
+            try:
+                queued.append(self._queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        for message in queued:
+            self._queue.put_nowait(message)
+        return [message.offset for message in queued]
 
     def mark_dead(self, reason: str) -> None:
         """Mark a processor that can never start as dead, so ``/readyz`` names its partition."""
@@ -1366,10 +1386,19 @@ class PartitionProcessor:
 
         A message that fails to parse leaves the window unless the policy is
         ``skip``, and its offset is already tracked when its failure is handled.
+
+        Every offset of the window is tracked before the first await, and
+        the owner of the split jobs is told of them all: when the loop dies
+        in the middle of the window, the commit can never pass a message of
+        the window that was not handled, and the owner never takes the job
+        of such a message for one the source no longer gives.
         """
-        accepted: list[SourceMessage] = []
         for msg in messages:
             self._offset_tracker.register(msg.offset)
+        if self._owner is not None:
+            self._owner.note_delivered(msg.offset for msg in messages)
+        accepted: list[SourceMessage] = []
+        for msg in messages:
             if self._part_mode is not None and self._owner is None:
                 if await self._accept_part(msg, self._part_mode):
                     accepted.append(msg)

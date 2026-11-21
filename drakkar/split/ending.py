@@ -102,7 +102,12 @@ def _whole_seconds(seconds: float) -> str:
 
 
 def _missing_parts(received_bits: bytes, parts: int | None) -> list[int]:
-    """The part numbers below ``parts`` whose bit is not set; empty while ``parts`` is unknown."""
+    """The part numbers below ``parts`` whose bit is not set; empty while ``parts`` is unknown.
+
+    It looks at every part number with no pause, so it costs time in
+    proportion to the number of parts (about 3 seconds for 16 million) and
+    holds the event loop that long. It is meant for a timeout handler.
+    """
     if parts is None:
         return []
     return [

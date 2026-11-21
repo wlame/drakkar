@@ -373,7 +373,7 @@ hook answered.
 | `timed_out` | `''`, `job` or `idle`. |
 | `opened_at` | Epoch seconds of the first `open` record of the job. |
 | `duration_seconds` | Seconds since `opened_at`. |
-| `missing_parts()` | The part numbers that have no result. |
+| `missing_parts()` | The part numbers that have no result. It checks every part number in one go, so its time grows with the number of parts (about 3 seconds for 16 million parts). Call it in `on_job_timeout`, not for every job. |
 | `results()` | An async iterator of the part results; see below. |
 
 Each part result is a `PartResult`:
@@ -499,7 +499,7 @@ sinks, and their results are ignored.
 | Key | Default | Meaning |
 |---|---|---|
 | `split.job_timeout` | `24h` | The time since the first `open` record of the job. `0` is no limit. |
-| `split.idle_timeout` | `0` | The time since the last new result of the job, or since `split-done`. It applies only after `split-done` of the current attempt: before it, the lack of results says nothing about a lost part. `0` is off. |
+| `split.idle_timeout` | `0` | The time since the last new result of the job, or since `split-done`. It applies only after `split-done` of the current attempt: before it, the lack of results says nothing about a lost part. `0` is off. The time of a result is the later of two times: the time in its record, and the time at which the owner read it. So a worker whose clock is behind cannot make the timeout fire early. |
 | `split.max_attempts` | `3` | How many attempts of one job may die during their split (no `split-done` and no `split-cancelled`) before the job goes to the DLQ. |
 
 - The job tracker checks the open jobs every 5 seconds.
@@ -758,7 +758,9 @@ is current:
 | The owner dies between the aggregate sinks and `closed` | The new owner aggregates again: the aggregate sinks receive the result twice. |
 | The owner dies between `closed` and the commit | The new owner reads the message again, finds `closed`, and completes the offset. |
 | The source offset is committed and the job is still open in the log | The job is finished at the next restore. |
-| The source message of a restored job never comes back | The job closes as `orphaned`, with a warning. |
+| The source message of a restored job never comes back | The job closes as `orphaned`, with a warning. This happens only when the source gave the worker a later message of the partition and never gave it this one (the message expired, or the position of the group was moved). |
+| The worker received the message of a restored job and could not begin it: the message fails to parse, the partition loop failed in the middle of the window, or a stop came first | The job stays open and is never closed as `orphaned`. The next worker that receives the message goes on with the job. A message that fails to parse on every worker leaves its job open until the records of the job expire from the results topic. |
+| A partition of the parts topic is stalled or dead on its worker | Every job that has a part in that partition waits for it. The job ends by its timeout, or goes on when another worker gets the partition. |
 | A stop or a revoke cancels a split | `split-cancelled` is written. The next owner starts a new attempt, which does not count against `split.max_attempts`. |
 | Two fleets with different source groups read one source topic | They use different default topic names, and records of another group are skipped. |
 | The log records of a job expired | A new owner splits the message again as a new job. A live owner has the job in memory and goes on. |

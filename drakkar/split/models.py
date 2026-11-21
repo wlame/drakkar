@@ -112,7 +112,12 @@ class SplitJob:
         self._results_source = results_source
 
     def missing_parts(self) -> list[int]:
-        """The part numbers that have no result yet."""
+        """The part numbers that have no result yet.
+
+        Meant for a timeout handler: it checks every part number in one go,
+        so its time grows with the number of parts (about 3 seconds for 16
+        million parts), and the event loop waits that long.
+        """
         return self._missing()
 
     def results(self) -> AsyncIterator[PartResult]:

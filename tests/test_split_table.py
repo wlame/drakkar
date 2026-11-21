@@ -574,3 +574,29 @@ def test_the_grace_time_of_a_split_counts_from_the_open_of_the_current_attempt(l
 
     assert not job.is_split_left_behind(log.ms + grace_ms - 1)
     assert job.is_split_left_behind(log.ms + grace_ms)
+
+
+@pytest.mark.parametrize('kind', ['split-done', 'result'])
+def test_idle_timeout_counts_from_the_time_of_the_reader_when_the_clock_of_the_writer_is_behind(kind):
+    table = JobTable(partition=PARTITION, group=GROUP)
+    reader_ms = 1_000_000
+    behind_ms = reader_ms - 30_000
+    table.apply(open_entry(ref()), offset=0, timestamp_ms=behind_ms, applied_at_ms=reader_ms)
+    last = done_entry(ref(), 2)
+    if kind == 'result':
+        table.apply(last, offset=1, timestamp_ms=behind_ms - 60_000, applied_at_ms=reader_ms - 60_000)
+        last = result_entry(ref(), 0)
+
+    table.apply(last, offset=2, timestamp_ms=behind_ms, applied_at_ms=reader_ms)
+
+    assert table.due(now_ms=reader_ms + 59_999, job_timeout=0, idle_timeout=60) == []
+    assert [kind for _, kind in table.due(now_ms=reader_ms + 60_000, job_timeout=0, idle_timeout=60)] == ['idle']
+
+
+def test_a_record_time_ahead_of_the_reader_stays_the_progress_time():
+    table = JobTable(partition=PARTITION, group=GROUP)
+    table.apply(open_entry(ref()), offset=0, timestamp_ms=1_000_000, applied_at_ms=1_000_000)
+
+    table.apply(done_entry(ref(), 2), offset=1, timestamp_ms=1_020_000, applied_at_ms=1_000_000)
+
+    assert table.due(now_ms=1_020_000 + 59_999, job_timeout=0, idle_timeout=60) == []

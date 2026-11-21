@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import time
-from collections.abc import Awaitable, Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine, Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
@@ -260,8 +260,10 @@ class SplitOwner:
         )
         # The open jobs whose source message this owner holds, by source offset.
         self._jobs: dict[int, _HeldJob] = {}
-        # The open jobs of the restored table whose source message has not arrived yet. One whose
-        # message never arrives is closed as orphaned when a later message is accepted.
+        # The open jobs of the restored table whose source message the source has not given to the
+        # processor yet. One whose message the source passes (a later message is begun, and this
+        # one was never given) is closed as orphaned. A message that was given leaves this set at
+        # once (``note_delivered``), whatever the processor then does with it.
         self._restored_waiting: set[int] = {job.offset for job in table.open_jobs()}
         # The job whose ``begin`` is waiting now: only its split gives the window reservation back.
         self._beginning: _HeldJob | None = None
@@ -294,6 +296,18 @@ class SplitOwner:
         if late:
             await asyncio.gather(*late, return_exceptions=True)
 
+    def note_delivered(self, offsets: Iterable[int]) -> None:
+        """The source gave the processor the messages of these offsets: their jobs can never be orphans.
+
+        Called when a message enters the queue of the processor and again
+        when a window is taken, before any await. A message that was given
+        can still miss ``begin``: it fails to parse, the loop crashes in the
+        middle of its window, or a stop drops it. Its job then stays open
+        for the next holder of the message; only a message the source no
+        longer gives makes an orphan.
+        """
+        self._restored_waiting.difference_update(offsets)
+
     async def begin(self, message: SourceMessage) -> BeginOutcome:
         """Decide what one accepted source message is: a local message, a job, a closed job, or a failed one.
 
@@ -303,8 +317,8 @@ class SplitOwner:
         still has to be made (no ``split-done``, and no timeout passed)
         starts its next attempt, unless the attempts are spent. Any other
         job is held, and the rules of a holder act on it at once. Every
-        restored job with a lower offset whose message did not arrive is
-        closed as orphaned. At a stop this returns at once: the offset is
+        restored job with a lower offset whose message the source never
+        gave to the processor is closed as orphaned. At a stop this returns at once: the offset is
         held, and a split in progress is cancelled in its own task.
         """
         offset = message.offset
@@ -689,37 +703,47 @@ class SplitOwner:
         return job is not None and job.closed is not None
 
     def _close_orphans_below(self, offset: int) -> None:
-        """Close every restored job below ``offset`` whose source message did not arrive.
+        """Close every restored job below ``offset`` whose message the source never gave to the processor.
 
         The source gives its messages in offset order, so such a message was
-        passed: it expired, or the position of the group was moved. The
-        ``closed`` record is written by a task of the owner, so ``begin``
-        does not wait for the results topic.
+        passed: it expired, or the position of the group was moved. A
+        message that was given and not begun is not in the set (see
+        ``note_delivered``). The ``closed`` record is written by a task of
+        the owner, so ``begin`` does not wait for the results topic.
         """
         for orphan in sorted(candidate for candidate in self._restored_waiting if candidate < offset):
             self._restored_waiting.discard(orphan)
             job = self._table.job(orphan)
             if job is None or job.closed is not None:
                 continue
-            split_jobs.labels(outcome='orphaned').inc()
-            logger.warning(
-                'split_job_orphaned',
-                category='split',
-                partition=self._label,
-                job=job_id(self._partition, job.offset, job.attempt),
-                received=job.received_count,
-                parts=job.parts,
-                hint='the source no longer gives the message of this job; it is closed with nothing delivered',
-            )
-            self._spawn(
-                self._ender.write_closed(
-                    self._ref_of(job),
-                    'orphaned',
-                    received=job.received_count,
-                    parts=job.parts,
-                    duration=self._settings.clock() - job.opened_at_ms / MS_PER_SECOND,
-                )
-            )
+            self._spawn(self._close_orphan(job))
+
+    async def _close_orphan(self, job: JobState) -> None:
+        """Write the ``closed`` record of an orphan; it is counted and logged only when the record is written.
+
+        A write that a stop ended, or that can never work, leaves the job
+        open in the results log: the next holder of the partition judges it
+        again, so it is not counted here.
+        """
+        written = await self._ender.write_closed(
+            self._ref_of(job),
+            'orphaned',
+            received=job.received_count,
+            parts=job.parts,
+            duration=self._settings.clock() - job.opened_at_ms / MS_PER_SECOND,
+        )
+        if not isinstance(written, int):
+            return
+        split_jobs.labels(outcome='orphaned').inc()
+        logger.warning(
+            'split_job_orphaned',
+            category='split',
+            partition=self._label,
+            job=job_id(self._partition, job.offset, job.attempt),
+            received=job.received_count,
+            parts=job.parts,
+            hint='the source no longer gives the message of this job; it is closed with nothing delivered',
+        )
 
     # --- the split of a job ---
 

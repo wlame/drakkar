@@ -485,7 +485,7 @@ class ItemHandler(dk.BaseDrakkarHandler[Request, Output]):
 | `timed_out` | `''`, `job` or `idle`. |
 | `opened_at` | Epoch seconds of the first `open` record of the job. |
 | `duration_seconds` | Seconds since `opened_at`. |
-| `missing_parts()` | The part numbers that have no result. |
+| `missing_parts()` | The part numbers that have no result. It checks every part number in one go, so its time grows with the number of parts (about 3 seconds for 16 million parts). Call it in `on_job_timeout`, not for every job. |
 | `results()` | An async iterator of `PartResult`. |
 
 #### PartResult

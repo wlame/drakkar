@@ -625,7 +625,9 @@ class JobTracker:
 
     def _apply(self, state: _Followed, entry: LogEntry, offset: int, message: Any) -> Applied:
         now_ms = int(self._clock() * MS_PER_SECOND)
-        return state.table.apply(entry, offset=offset, timestamp_ms=_timestamp_ms(message, now_ms))
+        return state.table.apply(
+            entry, offset=offset, timestamp_ms=_timestamp_ms(message, now_ms), applied_at_ms=now_ms
+        )
 
     def _apply_live(self, state: _Followed, entry: LogEntry, offset: int, message: Any) -> None:
         """Apply a live record and send the events it causes."""

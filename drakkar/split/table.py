@@ -190,8 +190,8 @@ class JobState:
         self.cancelled = False
         self.received_bits = bytearray()
 
-    def _count(self, result: PartResult, offset: int, timestamp_ms: int) -> None:
-        """Add one first result of a part to the counters."""
+    def _count(self, result: PartResult, offset: int, progress_ms: int) -> None:
+        """Add one first result of a part to the counters; ``progress_ms`` is the new progress time."""
         self._mark(result.index)
         self.received_count += 1
         self.tasks_succeeded += result.tasks_succeeded
@@ -209,7 +209,7 @@ class JobState:
             if self.first_failure is None or result.index < self.first_failure.index:
                 self.first_failure = PartFailure(index=result.index, dlq=result.dlq, error=result.error)
         self.last_result_offset = offset
-        self.last_progress_ms = timestamp_ms
+        self.last_progress_ms = progress_ms
 
     def _close(self, outcome: ClosedOutcome) -> None:
         """Mark the job closed and free what a closed job no longer needs."""
@@ -246,7 +246,7 @@ class JobTable:
         self._partition = partition
         self._group = group
         self._jobs: dict[int, JobState] = {}
-        self._handlers: dict[str, Callable[[LogEntry, JobState | None, int, int], Applied]] = {
+        self._handlers: dict[str, Callable[[LogEntry, JobState | None, int, int, int], Applied]] = {
             'open': self._apply_open,
             'split-done': self._apply_split_done,
             'split-cancelled': self._apply_split_cancelled,
@@ -257,8 +257,17 @@ class JobTable:
     def __len__(self) -> int:
         return len(self._jobs)
 
-    def apply(self, entry: LogEntry, *, offset: int, timestamp_ms: int) -> Applied:
-        """Apply one record of the results log, read at ``offset`` with the Kafka timestamp ``timestamp_ms``."""
+    def apply(self, entry: LogEntry, *, offset: int, timestamp_ms: int, applied_at_ms: int | None = None) -> Applied:
+        """Apply one record of the results log, read at ``offset`` with the Kafka timestamp ``timestamp_ms``.
+
+        ``applied_at_ms`` is the clock of the reader at this call, the clock
+        that later judges the idle timeout. The progress time of a job is
+        the later of the two: the timestamp of a ``result`` comes from the
+        clock of the worker that ran the part, and a clock that is behind
+        must not make the idle timeout fire early. Without it the progress
+        time is the timestamp of the record.
+        """
+        progress_ms = timestamp_ms if applied_at_ms is None else max(timestamp_ms, applied_at_ms)
         if entry.ref.group != self._group:
             return _ignored(None, IgnoreReason.FOREIGN_GROUP)
         if entry.ref.partition != self._partition:
@@ -267,7 +276,7 @@ class JobTable:
         handler = self._handlers.get(entry.kind)
         if handler is None:
             return _ignored(job, IgnoreReason.MALFORMED)
-        return handler(entry, job, offset, timestamp_ms)
+        return handler(entry, job, offset, timestamp_ms, progress_ms)
 
     def job(self, source_offset: int) -> JobState | None:
         """The job of the source message at ``source_offset``, if the table has it."""
@@ -297,7 +306,9 @@ class JobTable:
                 found.append((job, kind))
         return found
 
-    def _apply_open(self, entry: LogEntry, job: JobState | None, offset: int, timestamp_ms: int) -> Applied:
+    def _apply_open(
+        self, entry: LogEntry, job: JobState | None, offset: int, timestamp_ms: int, progress_ms: int
+    ) -> Applied:
         if job is not None and job.closed is not None:
             return _ignored(job, IgnoreReason.CLOSED_JOB)
         if job is not None and entry.ref.attempt_id == job.attempt_id:
@@ -338,7 +349,9 @@ class JobTable:
             return IgnoreReason.OLD_ATTEMPT
         return None
 
-    def _apply_split_done(self, entry: LogEntry, job: JobState | None, offset: int, timestamp_ms: int) -> Applied:
+    def _apply_split_done(
+        self, entry: LogEntry, job: JobState | None, offset: int, timestamp_ms: int, progress_ms: int
+    ) -> Applied:
         reason = self._current(entry, job)
         if reason is not None:
             return _ignored(job, reason)
@@ -356,10 +369,12 @@ class JobTable:
         job._drop_results_from(parts)
         if job.first_failure is not None and job.first_failure.index >= parts:
             job.first_failure = None
-        job.last_progress_ms = timestamp_ms
+        job.last_progress_ms = progress_ms
         return Applied(job=job, completed=job.is_complete)
 
-    def _apply_split_cancelled(self, entry: LogEntry, job: JobState | None, offset: int, timestamp_ms: int) -> Applied:
+    def _apply_split_cancelled(
+        self, entry: LogEntry, job: JobState | None, offset: int, timestamp_ms: int, progress_ms: int
+    ) -> Applied:
         reason = self._current(entry, job)
         if reason is not None:
             return _ignored(job, reason)
@@ -369,7 +384,9 @@ class JobTable:
         job.cancelled = True
         return Applied(job=job)
 
-    def _apply_result(self, entry: LogEntry, job: JobState | None, offset: int, timestamp_ms: int) -> Applied:
+    def _apply_result(
+        self, entry: LogEntry, job: JobState | None, offset: int, timestamp_ms: int, progress_ms: int
+    ) -> Applied:
         reason = self._current(entry, job)
         if reason is not None:
             return _ignored(job, reason)
@@ -384,10 +401,12 @@ class JobTable:
             return _ignored(job, IgnoreReason.UNKNOWN_JOB)
         if job.has_result(result.index):
             return _ignored(job, IgnoreReason.DUPLICATE)
-        job._count(result, offset, timestamp_ms)
+        job._count(result, offset, progress_ms)
         return Applied(job=job, completed=job.is_complete)
 
-    def _apply_closed(self, entry: LogEntry, job: JobState | None, offset: int, timestamp_ms: int) -> Applied:
+    def _apply_closed(
+        self, entry: LogEntry, job: JobState | None, offset: int, timestamp_ms: int, progress_ms: int
+    ) -> Applied:
         outcome = entry.body.get('outcome')
         if job is not None and job.closed is not None:
             return _ignored(job, IgnoreReason.CLOSED_JOB)
