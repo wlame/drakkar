@@ -455,6 +455,18 @@ class OwnerWorker:
     def dlq_records(self) -> list[Any]:
         return [record for record, _ in self.dlq.sent]
 
+    def hold_tracker_reads(self) -> asyncio.Event:
+        """Make the job tracker read nothing from the results log until the returned event is set.
+
+        A tracker reads a record some time after its acknowledgement; with
+        this a test decides how long.
+        """
+        [consumer] = self.tracker_consumers
+        released = asyncio.Event()
+        collect = consumer._collect
+        consumer._collect = lambda num_messages: collect(num_messages) if released.is_set() else []
+        return released
+
     async def stop(self) -> None:
         """A clean stop: the processor first, then the runtime."""
         await self.processor.stop()

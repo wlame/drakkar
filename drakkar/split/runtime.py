@@ -37,37 +37,26 @@ class _OwnerEvents:
     """Hands each event of the job tracker to the owner of its partition.
 
     A partition has no owner from the start of its restore until its
-    processor is ready. The tracker goes live at the end of the restore, a
-    few loop turns before the owner exists, and it tells a timeout only
-    once. So the events of a partition that is being followed are kept and
-    given to its owner when it registers. An event of a partition that is
-    neither followed nor owned is dropped.
+    processor is ready, and an event of a partition with no owner is
+    dropped. Nothing is lost by that: an owner acts on what the job table
+    says when it takes hold of a message, so it needs no event that came
+    before.
     """
 
     def __init__(self) -> None:
         self._owners: dict[int, SplitOwner] = {}
-        self._kept: dict[int, list[Callable[[SplitOwner], None]]] = {}
-
-    def expect(self, partition: int) -> None:
-        """A restore of ``partition`` starts: keep its events until its owner registers."""
-        self._owners.pop(partition, None)
-        self._kept[partition] = []
 
     def register(self, partition: int, owner: SplitOwner) -> None:
-        """Give ``owner`` the events kept for its partition, and every later one."""
+        """Give ``owner`` every later event of its partition."""
         self._owners[partition] = owner
-        for deliver in self._kept.pop(partition, []):
-            deliver(owner)
 
     def forget(self, partition: int) -> None:
-        """The partition is no longer followed: drop its owner and what was kept for it."""
+        """The partition is no longer followed: drop its owner."""
         self._owners.pop(partition, None)
-        self._kept.pop(partition, None)
 
     def clear(self) -> None:
-        """Drop every owner and every kept event."""
+        """Drop every owner."""
         self._owners.clear()
-        self._kept.clear()
 
     def owners(self) -> dict[int, SplitOwner]:
         """The registered owners, by partition."""
@@ -77,8 +66,6 @@ class _OwnerEvents:
         owner = self._owners.get(partition)
         if owner is not None:
             deliver(owner)
-        elif partition in self._kept:
-            self._kept[partition].append(deliver)
 
     def job_complete(self, partition: int, job: JobState) -> None:
         """Every part of ``job`` has a result."""
@@ -103,6 +90,10 @@ class _OwnerEvents:
     def job_closed(self, partition: int, job: JobState) -> None:
         """``job`` got its ``closed`` record."""
         self._send(partition, lambda owner: owner.job_closed(job))
+
+    def log_read(self, partition: int) -> None:
+        """The tracker read on in the results log of ``partition``."""
+        self._send(partition, lambda owner: owner.log_read())
 
 
 class SplitRuntime:
@@ -211,8 +202,8 @@ class SplitRuntime:
             # One start for every caller: partitions assigned together follow at the same time.
             self._tracker_start = asyncio.ensure_future(self.tracker.start())
         await asyncio.shield(self._tracker_start)
-        # From here on no event of the partition is lost: the owner gets them when it registers.
-        self._events.expect(partition)
+        # The owner of an earlier assignment of the partition gets no event of this one.
+        self._events.forget(partition)
         return await self.tracker.follow(partition, committed_source_offset=committed_source_offset)
 
     def owner_for(
@@ -244,6 +235,7 @@ class SplitRuntime:
             instance=self.instance,
             max_attempts=self._config.split.max_attempts,
             results_reader=self._results_reader,
+            read_position=self.tracker.read_position,
             job_timeout=self._config.split.job_timeout,
             idle_timeout=self._config.split.idle_timeout,
             clock=self._clock,

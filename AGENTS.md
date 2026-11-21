@@ -240,9 +240,15 @@ parametrize).
     never forgets a job whose message it holds while it owns the partition.
     Its rules read the job table and the clock; an event of the tracker only
     wakes them, so an event that came before the message is never needed.
-    The end of a job works on a snapshot of one attempt, and its offset
-    completes only when the table shows `closed`: every reader ignores a
-    `closed` record of an older attempt.
+    The owner decides about a job only on a table that has read every record
+    the owner itself wrote for it (the producer gives the offset of each
+    record, `JobTracker.read_position` says how far the table is): the
+    tracker reads a record about a second after its acknowledgement, and a
+    rule that ran before would take the owner's own new attempt for missing.
+    The end of a job works on a snapshot of one attempt. Every `closed` the
+    owner writes for a held job (an end, a failed split, spent attempts) names
+    the attempt that was judged, and the offset completes only when the table
+    shows `closed`: every reader ignores a `closed` record of an older attempt.
     The offset of an open job is not drainable, and a stop or revoke cancels
     a split outside the drain, because a job can last hours. A part's offset
     completes only after its `result` record is acknowledged

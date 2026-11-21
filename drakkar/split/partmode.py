@@ -200,8 +200,10 @@ def _result_ref(part: SplitPart) -> JobRef:
     )
 
 
-async def publish_or_stop(producer: SplitProducer, topic: str, record: WireRecord, stopped: asyncio.Event) -> None:
+async def publish_or_stop(producer: SplitProducer, topic: str, record: WireRecord, stopped: asyncio.Event) -> int:
     """Publish ``record`` and wait for its delivery report; after a stop the write gets only the grace time.
+
+    Gives the offset of the record in its partition.
 
     The write and the stop are awaited together, so a write that waits for
     room in the client queue ends at a stop too. A write that starts after
@@ -225,7 +227,7 @@ async def publish_or_stop(producer: SplitProducer, topic: str, record: WireRecor
             # A record already in the client queue may still be written: a reader of
             # the results log ignores a second record of the same kind for one job.
             raise asyncio.CancelledError(STOPPED_MESSAGE)
-        publish.result()
+        return publish.result()
     finally:
         if not publish.done():
             publish.cancel()

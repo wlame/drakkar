@@ -91,6 +91,8 @@ class SplitResult:
     end: SplitEnd
     parts: int = 0
     open_enqueued: bool = False
+    # The highest offset of a record of the results log that this run wrote and that was acknowledged; -1 for none.
+    written_through: int = -1
     reason: InterruptReason | None = None
     failure: str = ''
     cause: BaseException | None = None
@@ -160,8 +162,10 @@ class SplitRun:
         self._stream: AsyncIterator[Any] | None = None
         self._pull_task: asyncio.Task | None = None
         self._left_scope: PipelineHookScope | None = None
-        self._in_flight: dict[asyncio.Future[None], WireRecord] = {}
+        self._in_flight: dict[asyncio.Future[int], WireRecord] = {}
         self.open_enqueued = False
+        # The highest acknowledged offset of a record this run wrote to the results log; -1 for none.
+        self.written_through = -1
         self.parts = 0
         # Set by the owner when the job tracker read the ``open`` record of this attempt.
         self.own_open_seen = False
@@ -218,7 +222,13 @@ class SplitRun:
         cause: BaseException | None = None,
     ) -> SplitResult:
         return SplitResult(
-            end=end, parts=self.parts, open_enqueued=self.open_enqueued, reason=reason, failure=failure, cause=cause
+            end=end,
+            parts=self.parts,
+            open_enqueued=self.open_enqueued,
+            written_through=self.written_through,
+            reason=reason,
+            failure=failure,
+            cause=cause,
         )
 
     # --- the generator ---
@@ -349,7 +359,7 @@ class SplitRun:
         body = open_body(worker=settings.worker, instance=settings.instance, request_id=message.request_id)
         # From here on the record may reach the log, also when its delivery report never comes.
         self.open_enqueued = True
-        await self._deliver_record(settings.results_topic, log_record(ref, 'open', body))
+        await self._write_to_log(log_record(ref, 'open', body))
         logger.info(
             'split_job_opened',
             category='split',
@@ -363,7 +373,7 @@ class SplitRun:
             await self._send_part(item)
             item = await self._pull(stream)
         await self._settle_parts()
-        await self._deliver_record(settings.results_topic, log_record(ref, 'split-done', {'parts': self.parts}))
+        await self._write_to_log(log_record(ref, 'split-done', {'parts': self.parts}))
         logger.info(
             'split_job_done',
             category='split',
@@ -406,7 +416,7 @@ class SplitRun:
         if len(self._in_flight) >= MAX_UNACKED_PARTS:
             await self._settle_parts()
 
-    async def _enqueue(self, topic: str, record: WireRecord) -> asyncio.Future[None]:
+    async def _enqueue(self, topic: str, record: WireRecord) -> asyncio.Future[int]:
         """Give ``record`` to the producer and return its delivery future.
 
         While the client queue has room this creates no task and does not
@@ -465,11 +475,22 @@ class SplitRun:
             await self._deliver_record(self._settings.parts_topic, record, failed=error)
             split_parts_published.inc()
 
-    async def _deliver_record(self, topic: str, record: WireRecord, *, failed: SplitProduceError | None = None) -> None:
+    async def _write_to_log(self, record: WireRecord) -> None:
+        """Write one record of this attempt to the results log and note how far the log holds what this run wrote.
+
+        Raises:
+            _SplitFailed: the record can never be delivered.
+            _SplitInterrupted: the split must stop.
+        """
+        offset = await self._deliver_record(self._settings.results_topic, record)
+        self.written_through = max(self.written_through, offset)
+
+    async def _deliver_record(self, topic: str, record: WireRecord, *, failed: SplitProduceError | None = None) -> int:
         """Produce one record and wait for its acknowledgement; a failure a retry can fix is tried again.
 
-        The waits are 1, 2, 4 ... 30 seconds, for as long as it takes.
-        ``failed`` is the error of a first attempt the caller already made.
+        Gives the offset of the record in its partition. The waits are 1, 2,
+        4 ... 30 seconds, for as long as it takes. ``failed`` is the error of
+        a first attempt the caller already made.
 
         Raises:
             _SplitFailed: the record can never be delivered.
@@ -482,8 +503,7 @@ class SplitRun:
                 try:
                     future = await self._enqueue(topic, record)
                     await self._wait(future)
-                    future.result()
-                    return
+                    return future.result()
                 except SplitProduceError as produce_error:
                     self._check_not_final(produce_error)
                     error = produce_error
@@ -534,10 +554,11 @@ class SplitRun:
         """Write ``split-cancelled`` within its time limit; a failure is logged and nothing else follows."""
         record = log_record(self.ref, 'split-cancelled', {})
         try:
-            await asyncio.wait_for(
+            offset = await asyncio.wait_for(
                 self._settings.producer.publish(self._settings.results_topic, record),
                 timeout=self._settings.cancel_write_seconds,
             )
+            self.written_through = max(self.written_through, offset)
         except (TimeoutError, SplitProduceError, RuntimeError) as error:
             logger.warning(
                 'split_cancel_write_failed',

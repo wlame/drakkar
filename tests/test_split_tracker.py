@@ -78,6 +78,8 @@ class Listener:
         # What the tracker told about attempts and closes: name, partition, offset, attempt id, instance.
         self.attempts: list[tuple[str, int, int, str, str]] = []
         self.restoring_at_event: list[bool] = []
+        # Each telling that the tracker read on: the partition and the read position at that moment.
+        self.read: list[tuple[int, int | None]] = []
         self._tracker_ref = tracker_ref
         self.fail = False
 
@@ -110,6 +112,11 @@ class Listener:
 
     def job_closed(self, partition: int, job: JobState) -> None:
         self._attempt('closed', partition, job)
+
+    def log_read(self, partition: int) -> None:
+        # The position at each telling: the tracker has read every record below it.
+        tracker = self._tracker_ref()
+        self.read.append((partition, tracker.read_position(partition) if tracker is not None else None))
 
 
 class FakeSleep:
@@ -1277,5 +1284,28 @@ async def test_a_batch_collected_before_a_seek_and_returned_after_it_is_dropped(
         table = await asyncio.wait_for(follow, timeout=2)
         await wait_until(lambda: table.job(11) is not None)
         assert [job.offset for job in table.open_jobs()] == [10, 11]
+    finally:
+        await h.t.stop()
+
+
+async def test_the_read_position_is_the_next_offset_and_is_told_after_each_batch_of_live_records():
+    h = Harness()
+    await h.t.start()
+    try:
+        assert h.t.read_position(PARTITION) is None
+        first = h.writer.open(40)
+        await h.follow()
+        # The restore read the open record.
+        assert h.t.read_position(PARTITION) == first + 1
+        done = h.writer.done(40, 2)
+        await settle()
+        assert h.t.read_position(PARTITION) == done + 1
+        assert h.listener.read[-1] == (PARTITION, done + 1)
+        # A record that the table ignores moves the position too.
+        ignored = h.writer.result(40, 0, attempt_id=ATTEMPT_2)
+        await settle()
+        assert h.listener.read[-1] == (PARTITION, ignored + 1)
+        await h.t.release(PARTITION)
+        assert h.t.read_position(PARTITION) is None
     finally:
         await h.t.stop()

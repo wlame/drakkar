@@ -50,7 +50,8 @@ MAX_RESULTS_RETRIES = 20
 
 SleepFn = Callable[[float], Awaitable[None]]
 # How a ``closed`` write ended: acknowledged, refused for good, or given up at a stop.
-ClosedWrite = Literal['written', 'final', 'stopped']
+# How the write of a ``closed`` record ended without the record: it can never be written, or a stop ended the retries.
+ClosedWriteFailure = Literal['final', 'stopped']
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,19 @@ class EndFacts:
 
     job: SplitJob
     first_failure: PartFailure | None
+
+
+@dataclass(frozen=True)
+class ClosedRecord:
+    """An acknowledged ``closed`` record of a job: where it is in the results log, and what it says.
+
+    ``job`` is the view of an end through a hook; None for a failed split.
+    """
+
+    offset: int
+    outcome: ClosedOutcome
+    duration: float
+    job: SplitJob | None = None
 
 
 def error_text(error: BaseException) -> str:
@@ -218,8 +232,11 @@ class JobEnder:
         *,
         rebuild: Callable[[], EndFacts],
         closing_ref: Callable[[], JobRef | None] | None,
-    ) -> bool:
-        """Call the hook of the end, act on its answer, then close the job; true when the offset may complete.
+    ) -> bool | ClosedRecord:
+        """Call the hook of the end, act on its answer, then write ``closed``; the acknowledged record.
+
+        For a local message, and for a job the results log already has as
+        closed, no record is written and the answer is true.
 
         ``state`` is the DLQ state of the original message. ``rebuild`` makes
         the facts anew, of the same attempt, for a second call of the hook.
@@ -463,11 +480,14 @@ class JobEnder:
             )
         return True
 
-    async def _close(self, ref: JobRef | None, job: SplitJob, outcome: ClosedOutcome) -> bool:
-        """Write ``closed`` after the answer of the hook was acted on, then count and log the end of the job.
+    async def _close(self, ref: JobRef | None, job: SplitJob, outcome: ClosedOutcome) -> bool | ClosedRecord:
+        """Write ``closed`` after the answer of the hook was acted on; the acknowledged record.
 
-        With no ``ref`` the results log has the job as closed already, by
-        another owner: nothing more is written.
+        Nothing is counted or logged here: the results log may ignore the
+        record, and only the owner sees what the log did with it
+        (:meth:`note_closed`). With no ``ref`` the results log has the job
+        as closed already, by another owner: nothing is written, and the
+        answer is true. False when the record can never be written.
 
         Raises:
             asyncio.CancelledError: a stop ended the retries of the write; the offset stays pending.
@@ -482,25 +502,35 @@ class JobEnder:
             raise asyncio.CancelledError(STOPPED_MESSAGE)
         if written == 'final':
             return False
-        split_job_duration.observe(duration)
-        split_jobs.labels(outcome=outcome).inc()
+        return ClosedRecord(offset=written, outcome=outcome, duration=duration, job=job)
+
+    def note_closed(self, record: ClosedRecord) -> None:
+        """Count and log the end of a job whose ``closed`` record the results log took.
+
+        A job that ended through a hook is timed and logged; a failed split
+        is only counted, its failure was logged when it happened.
+        """
+        split_jobs.labels(outcome=record.outcome).inc()
+        job = record.job
+        if job is None:
+            return
+        split_job_duration.observe(record.duration)
         logger.info(
             'split_job_closed',
             category='split',
             partition=self._label,
             job=job.job_id,
-            outcome=outcome,
+            outcome=record.outcome,
             parts=job.total_parts,
             received=job.received_parts,
             failed_parts=job.failed_parts,
-            seconds=round(duration, 3),
+            seconds=round(record.duration, 3),
         )
-        return True
 
     async def write_closed(
         self, ref: JobRef, outcome: ClosedOutcome, *, received: int, parts: int | None, duration: float
-    ) -> ClosedWrite:
-        """Write the ``closed`` record of a job and say how the write ended.
+    ) -> int | ClosedWriteFailure:
+        """Write the ``closed`` record of a job; its offset in the results log, or how the write failed.
 
         A failure a retry can fix is tried again after 1, 2, 4 ... 30
         seconds. A stop ends the retries, never the first attempt
@@ -515,8 +545,9 @@ class JobEnder:
         wait = RETRY_FIRST_WAIT_SECONDS
         while True:
             try:
-                await publish_or_stop(self._settings.producer, self._settings.results_topic, record, self._stopped)
-                return 'written'
+                return await publish_or_stop(
+                    self._settings.producer, self._settings.results_topic, record, self._stopped
+                )
             except SplitProduceError as error:
                 self._note_closed_failure(ref, outcome, error)
                 if error.final:

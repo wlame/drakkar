@@ -19,7 +19,7 @@ from structlog.testing import capture_logs
 from drakkar import partition as partition_module
 from drakkar.budget import BudgetAccount, PendingBudget
 from drakkar.handler import BaseDrakkarHandler
-from drakkar.metrics import dlq_dropped_payloads, split_jobs, split_parts_published
+from drakkar.metrics import dlq_dropped_payloads, split_job_duration, split_jobs, split_parts_published
 from drakkar.models import CollectResult, KafkaPayload
 from drakkar.split import partmode
 from drakkar.split import splitting as splitting_module
@@ -1253,11 +1253,17 @@ async def test_an_end_works_on_one_attempt_when_another_instance_opens_the_job_m
     # While the hook runs, another instance opens attempt 2: the live state of the job is reset.
     world.put_open(500, 'e' * 16, attempt=2, instance='b' * 16)
     await worker.caught_up()
+    counted = split_jobs.labels(outcome='aggregated')._value.get()
+    timed = split_job_duration._sum.get()
     with capture_logs() as logs:
         gate.set()
         await wait_until(lambda: world.kinds()[-1] == 'closed')
         await worker.caught_up()
         await wait_until(lambda: any(line['event'] == 'split_job_end_superseded' for line in logs))
+    # The log ignored the closed record of this end, so the end of the job is not counted, timed or logged.
+    assert split_jobs.labels(outcome='aggregated')._value.get() == counted
+    assert split_job_duration._sum.get() == timed
+    assert not any(line['event'] == 'split_job_closed' for line in logs)
 
     # The end stayed on its attempt: the view, the results it read back, and its closed record.
     assert seen == [('3:500#1', 1, 2, 2, [0, 1])]
@@ -1276,6 +1282,7 @@ async def test_an_end_works_on_one_attempt_when_another_instance_opens_the_job_m
     await wait_until(lambda: worker.committed == 501)
     assert seen[1] == ('3:500#2', 2, 1, 1, [0])
     assert worker.aggregate_sink.calls == 2
+    assert split_jobs.labels(outcome='aggregated')._value.get() == counted + 1
     assert world.entries()[-1].ref.attempt_id == 'e' * 16
     await worker.stop()
 

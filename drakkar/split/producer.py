@@ -27,6 +27,8 @@ logger = structlog.get_logger()
 
 POLL_TIMEOUT_SECONDS = 0.1
 BUFFER_FULL_WAIT_SECONDS = 0.01
+# The offset of a delivered record whose delivery report names none.
+NO_OFFSET = -1
 POLL_THREAD_NAME = 'split-producer'
 CLOSED_MESSAGE = 'the split producer was closed before the record was delivered'
 
@@ -90,7 +92,7 @@ class SplitProducer:
         self._stopping = threading.Event()
         # One waiter at a time takes the next place in the client queue, so records keep their order.
         self._enqueue_lock = asyncio.Lock()
-        self._unsettled: set[asyncio.Future[None]] = set()
+        self._unsettled: set[asyncio.Future[int]] = set()
         # Only the poll thread uses it.
         self._poll_failure_log = RateLimitedLog(time.monotonic)
 
@@ -154,7 +156,7 @@ class SplitProducer:
             producer.poll(0)
         return remaining
 
-    def _delivery_callback(self, loop: asyncio.AbstractEventLoop, future: asyncio.Future[None]) -> Callable[..., None]:
+    def _delivery_callback(self, loop: asyncio.AbstractEventLoop, future: asyncio.Future[int]) -> Callable[..., None]:
         """The callback for one record; the client calls it on the poll thread."""
 
         def settle(error: KafkaError | None, message: Message | None) -> None:
@@ -162,7 +164,10 @@ class SplitProducer:
                 return
             failure = _report_error(error, message)
             if failure is None:
-                future.set_result(None)
+                offset = message.offset() if message is not None else None
+                # A report with no error carries the offset of the record. Without one the caller
+                # gets NO_OFFSET, which is below every offset: it cannot wait for that record to be read.
+                future.set_result(NO_OFFSET if offset is None or offset < 0 else offset)
             elif isinstance(failure, SplitProduceError):
                 future.set_exception(failure)
             else:
@@ -188,26 +193,28 @@ class SplitProducer:
             raise RuntimeError('the split producer is not started')
         return loop, producer
 
-    def _track(self, future: asyncio.Future[None]) -> asyncio.Future[None]:
+    def _track(self, future: asyncio.Future[int]) -> asyncio.Future[int]:
         """Keep the delivery future of a queued record until it ends, so ``close`` can fail what is left."""
         self._unsettled.add(future)
         future.add_done_callback(self._unsettled.discard)
         return future
 
-    async def enqueue(self, topic: str, record: WireRecord) -> asyncio.Future[None]:
+    async def enqueue(self, topic: str, record: WireRecord) -> asyncio.Future[int]:
         """Put ``record`` in the client queue and return its delivery future.
 
-        Waits only while the client queue is full. A record the client refuses at once raises
-        ``SplitProduceError``; a failed delivery ends the future with it.
+        The future gives the offset of the record in its partition. Waits
+        only while the client queue is full. A record the client refuses at
+        once raises ``SplitProduceError``; a failed delivery ends the future
+        with it.
         """
         loop, producer = self._started_client()
-        future: asyncio.Future[None] = loop.create_future()
+        future: asyncio.Future[int] = loop.create_future()
         callback = self._delivery_callback(loop, future)
         async with self._enqueue_lock:
             await self._produce_when_room(producer, topic, record, callback)
         return self._track(future)
 
-    def enqueue_nowait(self, topic: str, record: WireRecord) -> asyncio.Future[None] | None:
+    def enqueue_nowait(self, topic: str, record: WireRecord) -> asyncio.Future[int] | None:
         """Put ``record`` in the client queue when it has room now; its delivery future, or None when it has none.
 
         None also while another caller waits for room, so records keep their
@@ -217,7 +224,7 @@ class SplitProducer:
         loop, producer = self._started_client()
         if self._enqueue_lock.locked():
             return None
-        future: asyncio.Future[None] = loop.create_future()
+        future: asyncio.Future[int] = loop.create_future()
         try:
             self._produce(producer, topic, record, self._delivery_callback(loop, future))
         except BufferError:
@@ -260,7 +267,7 @@ class SplitProducer:
             except BufferError:
                 await asyncio.sleep(BUFFER_FULL_WAIT_SECONDS)
 
-    async def publish(self, topic: str, record: WireRecord) -> None:
-        """Enqueue ``record`` and wait for its delivery report."""
+    async def publish(self, topic: str, record: WireRecord) -> int:
+        """Enqueue ``record`` and wait for its delivery report; the offset of the record in its partition."""
         future = await self.enqueue(topic, record)
-        await future
+        return await future

@@ -86,6 +86,9 @@ class JobState:
     crashed_attempts: int = 0
     cancelled: bool = False
     closed: ClosedOutcome | None = None
+    # The offset of the ``closed`` record that closed the job: a writer of such a record can tell
+    # whether the log took its record or the record of another owner.
+    closed_offset: int | None = None
     received_bits: bytearray = field(default_factory=bytearray, repr=False)
 
     @property
@@ -408,4 +411,5 @@ class JobTable:
             )
             self._jobs[job.offset] = job
         job._close(cast(ClosedOutcome, outcome))
+        job.closed_offset = offset
         return Applied(job=job, closed=True)

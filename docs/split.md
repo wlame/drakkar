@@ -96,7 +96,10 @@ offset 500.
 The order at the end is always: aggregate sinks, then `closed`, then the
 offset. The owner completes the offset when its job tracker has read the
 `closed` record back from the results topic, which takes up to about one
-second.
+second. The same holds for every record the owner writes for a job: it
+decides the next step of the job only when its job tracker has read that
+record back. A wait that lasts 30 seconds is logged
+(`split_read_back_waiting`), and again every 60 seconds.
 
 The offset of the job stays uncommitted while the job is open. Later
 messages of partition 7 are processed meanwhile, but their offsets are not
@@ -712,7 +715,13 @@ is current:
   `closed` record names the older attempt, so the results topic still has
   the job as open (`split_job_end_superseded`). The owner does not complete
   the offset; it keeps the message and follows the newer attempt, and the
-  aggregate sinks may receive a second result when that attempt ends.
+  aggregate sinks may receive a second result when that attempt ends. Such
+  an end is not counted on `drakkar_split_jobs_total`.
+- The same holds for a split that failed, and for a job whose attempts are
+  spent: when a newer attempt of another worker is before the `closed`
+  record in the results topic, the job goes on under that attempt. The DLQ
+  record of the failure is written by then, so the request can have a DLQ
+  record and a result.
 - When the attempt that an owner follows is cancelled, the owner starts the
   next attempt itself. When it shows neither `split-done` nor
   `split-cancelled` for 300 seconds after its `open`, its worker is taken
@@ -861,10 +870,11 @@ The life of a job, on the owner:
 | `split_attempt_started` | warning | A new attempt starts for a job that the results log already has: after a restart, a cancel or a takeover. Fields `partition`, `job`, `attempt`, `crashed_attempts`. |
 | `split_job_resumed` | info | A restored job goes on with the arrival of its source message. Fields `partition`, `job`, `attempt`, `parts`, `received`. |
 | `split_job_timed_out` | warning | A timeout fired; `on_job_timeout` runs. Fields `partition`, `job`, `kind` (`job` or `idle`), `received`, `parts`. |
-| `split_job_closed` | info | The job is closed. Fields `partition`, `job`, `outcome`, `parts`, `received`, `failed_parts`. |
+| `split_job_closed` | info | The job is closed by the record of this worker. Fields `partition`, `job`, `outcome`, `parts`, `received`, `failed_parts`. |
 | `split_job_closed_elsewhere` | info | Another worker closed a job whose message this worker holds; the offset completes with no hook. Fields `partition`, `job`, `outcome`. |
 | `split_job_superseded` | warning | Another worker opened a newer attempt; this worker stopped its split and follows that attempt. |
-| `split_job_end_superseded` | warning | Another worker opened a newer attempt while this worker ended the job. The offset is not completed, and this worker follows the newer attempt. Fields `partition`, `job`. |
+| `split_job_end_superseded` | warning | Another worker opened a newer attempt before the `closed` record that this worker wrote for the job (after its end, a failed split, or spent attempts). The offset is not completed, and this worker follows the newer attempt. Fields `partition`, `job`. |
+| `split_read_back_waiting` | warning | The job tracker has not read a record that this worker wrote for a job; the job waits for it. Written after 30 seconds and then every 60 seconds. Fields `partition`, `job` (`<partition>:<offset>`), `offset` (of the record in the results topic), `seconds`. |
 | `split_job_orphaned` | warning | The source message of a restored job did not arrive; the job closes as `orphaned`. Fields `partition`, `job`, `received`, `parts`. |
 
 Failures of a job, on the owner:

@@ -1,12 +1,13 @@
 """The split producer: delivery futures, error classes, a full client queue, order and the loop staying free."""
 
 import asyncio
+from unittest.mock import MagicMock
 
 import pytest
 from confluent_kafka import KafkaError, KafkaException
 
 from drakkar.config.connections import KafkaConnectionConfig
-from drakkar.split.producer import SplitProduceError, SplitProducer, is_final_error
+from drakkar.split.producer import NO_OFFSET, SplitProduceError, SplitProducer, is_final_error
 from drakkar.split.records import WireRecord
 from tests.split_helpers import FakeLog, FakeProducerClient
 
@@ -321,3 +322,27 @@ async def test_enqueue_nowait_raises_for_a_record_the_client_refuses_and_before_
     assert raised.value.final
     with pytest.raises(RuntimeError, match='not started'):
         SplitProducer(KafkaConnectionConfig()).enqueue_nowait(TOPIC, record())
+
+
+async def test_a_delivered_record_gives_its_offset_in_the_partition(producer, log):
+    assert await producer.publish(TOPIC, record(0, partition=3)) == 0
+    assert await producer.publish(TOPIC, record(1, partition=3)) == 1
+    # Another partition counts for itself.
+    assert await producer.publish(TOPIC, record(2, partition=4)) == 0
+    queued = await producer.enqueue(TOPIC, record(3, partition=3))
+    at_once = producer.enqueue_nowait(TOPIC, record(4, partition=3))
+    assert at_once is not None
+    assert (await queued, await at_once) == (2, 3)
+    assert [stored.offset for stored in log.records(TOPIC, 3)] == [0, 1, 2, 3]
+
+
+async def test_a_delivery_report_that_names_no_offset_gives_the_mark_for_no_offset(producer):
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[int] = loop.create_future()
+    message = MagicMock()
+    message.error.return_value = None
+    message.offset.return_value = None
+
+    producer._delivery_callback(loop, future)(None, message)
+
+    assert await asyncio.wait_for(future, 2) == NO_OFFSET

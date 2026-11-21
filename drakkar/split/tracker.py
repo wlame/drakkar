@@ -83,6 +83,9 @@ class JobEvents(Protocol):
     def job_closed(self, partition: int, job: JobState) -> None:
         """``job`` got its ``closed`` record."""
 
+    def log_read(self, partition: int) -> None:
+        """The tracker read on in the live log of ``partition``: ``read_position`` may have moved."""
+
 
 @dataclass
 class _Followed:
@@ -215,6 +218,18 @@ class JobTracker:
         """The job table of a followed partition, or None while it restores or when it is not followed."""
         state = self._followed.get(partition)
         return None if state is None or state.restoring else state.table
+
+    def read_position(self, partition: int) -> int | None:
+        """The next offset the tracker reads in the live results log of ``partition``.
+
+        Every record below it is in the job table. None for a partition that
+        is not followed or is still restoring. A writer that knows the offset
+        of its own record can tell from this whether the table has it.
+        """
+        state = self._followed.get(partition)
+        if state is None or state.restoring:
+            return None
+        return state.next_offset
 
     def is_restoring(self, partition: int) -> bool:
         """True while the job table of ``partition`` is being restored."""
@@ -507,6 +522,11 @@ class JobTracker:
                 continue
             seen.add(message.partition())
             self._handle_message_safely(message, batch)
+        for partition in sorted(seen):
+            state = self._followed.get(partition)
+            if state is not None and not state.restoring:
+                # Once for a batch: whoever waits for the table to hold a record it wrote looks again.
+                self._emit('log_read', partition)
         for state in list(self._followed.values()):
             if state.reposition and state.assign_complete:
                 await self._seek_back(state)
