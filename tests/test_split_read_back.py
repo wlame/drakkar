@@ -33,6 +33,10 @@ from tests.split_owner_helpers import (
 )
 from tests.test_split_restart import FIRST, NEW_INSTANCE, SECOND, THIRD, events, jobs_counted
 
+# How long a test waits before it asserts that nothing happened. What it waits for is held by the
+# test itself, so a longer wait proves nothing more.
+NOTHING_HAPPENS_SECONDS = 0.05
+
 
 @pytest.fixture(autouse=True)
 def fast_commits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -176,7 +180,7 @@ async def test_a_record_of_the_split_whose_report_names_no_offset_is_still_waite
     world.report_all()
 
     # The table has not read the split-done of this owner: nothing is decided, and nothing starts again.
-    await asyncio.sleep(0.2)
+    await asyncio.sleep(NOTHING_HAPPENS_SECONDS)
     assert worker.owner is not None and worker.owner._jobs[500].catching_up
     assert handler.jobs == [] and handler.split_calls == [500] and worker.commits == []
 
@@ -201,7 +205,7 @@ async def test_a_split_cancelled_record_whose_report_names_no_offset_is_still_wa
     world.clock.advance(61_000)
     await worker.sleep.fire(TIMEOUT_CHECK_SECONDS)
     await wait_until(lambda: world.kinds() == ['open', 'split-cancelled'])
-    await asyncio.sleep(0.2)
+    await asyncio.sleep(NOTHING_HAPPENS_SECONDS)
     assert handler.timeouts == [] and worker.commits == []
 
     released.set()
@@ -241,7 +245,7 @@ async def test_a_closed_record_whose_report_names_no_offset_ends_the_job_once():
 
     with capture_logs() as logs:
         await wait_until(lambda: len(closed_records(world)) == 1)
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(NOTHING_HAPPENS_SECONDS)
         assert len(handler.jobs) == 1 and len(closed_records(world)) == 1 and worker.commits == []
         released.set()
         await wait_until(lambda: worker.committed == 501)
@@ -284,7 +288,7 @@ async def test_a_closed_record_that_the_table_has_not_read_is_never_taken_for_a_
 
     with capture_logs() as logs:
         await wait_until(lambda: len(closed_records(world)) == 1)
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(NOTHING_HAPPENS_SECONDS)
         # The table still shows the attempt of the record as open: the record is not read yet.
         assert len(handler.jobs) == 1 and len(closed_records(world)) == 1 and worker.commits == []
         released.set()
@@ -326,7 +330,7 @@ async def test_a_stop_while_the_end_of_the_log_cannot_be_read_leaves_the_offset_
     [consumer] = worker.tracker_consumers
     await wait_until(lambda: worker.sleep.waiting(owner_module.END_OFFSET_RETRY_FIRST_SECONDS))
 
-    await asyncio.wait_for(worker.stop(), timeout=2)
+    await asyncio.wait_for(worker.stop(), timeout=10)
 
     assert worker.owner is not None and worker.owner._jobs[500].own_unplaced
     assert worker.commits == [] and worker.pending == 1 and len(handler.jobs) == 1
@@ -471,11 +475,11 @@ async def test_a_read_of_the_tracker_wakes_every_wait_for_the_table():
     loop.call_soon(lambda: loop.call_soon(second_wait_then_a_read))
     owner.log_read()
 
-    await wait_until(lambda: ended == ['second'], timeout=0.5)
+    await wait_until(lambda: ended == ['second'])
     assert not first.done()
     position = 11
     owner.log_read()
-    await wait_until(lambda: ended == ['second', 'first'], timeout=0.5)
+    await wait_until(lambda: ended == ['second', 'first'])
     await worker.stop()
 
 

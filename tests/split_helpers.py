@@ -446,3 +446,17 @@ class FakeConsumerClient(FailureSwitches):
     async def close(self) -> None:
         self._maybe_fail('close')
         self.closed = True
+
+
+# A limit that only guards against a hang: a slow machine must never fail a test by it.
+WAIT_LIMIT_SECONDS = 10.0
+
+
+async def wait_until(condition: Callable[[], bool], timeout: float = WAIT_LIMIT_SECONDS) -> None:
+    """Poll ``condition`` every millisecond; fail the test when it does not hold in time."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        if loop.time() > deadline:
+            raise AssertionError('condition not met in time')
+        await asyncio.sleep(0.001)

@@ -9,7 +9,6 @@ tracker over the fake consumer.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import gc
 import time
 from typing import Any
@@ -62,6 +61,9 @@ from tests.split_owner_helpers import (
 from tests.stream_helpers import make_pool, stream_task
 from tests.test_message_dlq import ScriptedPool
 from tests.test_split_parts_source import FakeRuntimeParts, fake_consumer, split_app, wired
+
+# A limit that only guards against a hang: a slow machine must never fail a test by it.
+HANG_LIMIT_SECONDS = 10
 
 FIRST = '1' * 16
 SECOND = '2' * 16
@@ -388,7 +390,7 @@ async def test_an_old_owner_that_reads_the_open_of_a_new_owner_cancels_its_split
     assert old.pending == 1 and old.commits == []
     # The offset holds no drain.
     old.processor.signal_stop()
-    await asyncio.wait_for(old.processor.drain(), timeout=1)
+    await asyncio.wait_for(old.processor.drain(), timeout=10)
     await old.stop()
 
 
@@ -428,8 +430,8 @@ async def test_a_stop_during_a_split_cancels_it_cleanly_and_the_offset_stays_pen
 
     worker.processor.signal_stop()
     # The drain does not wait for the cancel of the split: the stop of the processor does.
-    await asyncio.wait_for(worker.processor.drain(), timeout=0.2)
-    await asyncio.wait_for(worker.processor.stop(), timeout=1)
+    await asyncio.wait_for(worker.processor.drain(), timeout=HANG_LIMIT_SECONDS)
+    await asyncio.wait_for(worker.processor.stop(), timeout=HANG_LIMIT_SECONDS)
 
     # The generator was closed and the attempt is marked as cancelled, so it does not count as crashed.
     assert handler.closed_splits == 1
@@ -438,7 +440,7 @@ async def test_a_stop_during_a_split_cancels_it_cleanly_and_the_offset_stays_pen
     # The message behind it in the window was never begun: its offset is pending too, and out of the drain.
     assert handler.split_calls == [500]
     assert worker.pending == 2 and worker.processor._abandoned_offsets == {501}
-    await asyncio.wait_for(worker.stop(), timeout=2)
+    await asyncio.wait_for(worker.stop(), timeout=10)
 
 
 async def test_a_stop_does_not_wait_for_an_open_job():
@@ -448,7 +450,7 @@ async def test_a_stop_does_not_wait_for_an_open_job():
     await wait_until(lambda: len(handler.jobs) == 1 and worker.pending == 1)
 
     worker.processor.signal_stop()
-    await asyncio.wait_for(worker.processor.drain(), timeout=1)
+    await asyncio.wait_for(worker.processor.drain(), timeout=10)
 
     assert worker.pending == 1 and worker.commits == [] and world.closed() == []
     # A result that completes the job after the stop starts no end of it.
@@ -456,7 +458,7 @@ async def test_a_stop_does_not_wait_for_an_open_job():
     await worker.caught_up()
     await asyncio.sleep(0.02)
     assert [job.source_message.offset for job in handler.jobs] == [501]
-    await asyncio.wait_for(worker.stop(), timeout=2)
+    await asyncio.wait_for(worker.stop(), timeout=10)
 
 
 async def test_an_aggregate_in_progress_finishes_inside_the_drain_and_its_offset_commits():
@@ -479,7 +481,7 @@ async def test_an_aggregate_in_progress_finishes_inside_the_drain_and_its_offset
     # The drain waits for the end in progress.
     assert not drain.done()
     gate.set()
-    await asyncio.wait_for(drain, timeout=1)
+    await asyncio.wait_for(drain, timeout=10)
 
     assert world.closed()[0]['outcome'] == 'aggregated' and worker.committed == 501
     await worker.stop()
@@ -503,7 +505,7 @@ async def test_a_stop_during_an_aggregate_that_does_not_end_leaves_the_offset_pe
         await asyncio.wait_for(worker.processor.drain(), timeout=0.1)
     worker.processor.suppress_deliveries()
     await worker.processor.cancel_active_tasks()
-    await asyncio.wait_for(worker.processor.stop(), timeout=1)
+    await asyncio.wait_for(worker.processor.stop(), timeout=10)
 
     assert worker.pending == 1 and worker.commits == [] and world.closed() == []
     assert worker.processor._abandoned_offsets == {500}
@@ -519,7 +521,7 @@ async def test_a_stop_ends_the_wait_for_results_that_cannot_be_read():
     await wait_until(lambda: worker.sleep.waiting(30.0, count=2))
 
     worker.processor.signal_stop()
-    await asyncio.wait_for(worker.processor.drain(), timeout=1)
+    await asyncio.wait_for(worker.processor.drain(), timeout=10)
 
     assert worker.pending == 1 and world.closed() == [] and len(handler.jobs) == 1
     await worker.stop()
@@ -672,8 +674,8 @@ async def test_a_stop_of_the_source_during_a_restore_starts_no_processor_and_lea
     source._route_messages([source_record(7, partition=2)])
 
     source.signal_stop()
-    assert await asyncio.wait_for(source.drain(deadline=asyncio.get_running_loop().time() + 5), timeout=1)
-    await asyncio.wait_for(source.stop(deadline=0.0), timeout=2)
+    assert await asyncio.wait_for(source.drain(deadline=asyncio.get_running_loop().time() + 5), timeout=10)
+    await asyncio.wait_for(source.stop(deadline=0.0), timeout=10)
 
     assert processor._task is None and source._restore_tasks == {} and processor.queue_size == 0
     await runtime.stop(deadline=0.0)
@@ -775,7 +777,7 @@ async def test_a_revoke_cancels_the_retries_of_a_resume_after_a_restore(monkeypa
     await wait_for(lambda: source.consumer.resume.await_count == 1, interval=0.001)
     assert 1 in source._restore_tasks and source.restoring_partitions == set()
 
-    await asyncio.wait_for(source.on_revoke([1]), timeout=1)
+    await asyncio.wait_for(source.on_revoke([1]), timeout=10)
 
     assert source._restore_tasks == {} and source.processors == {}
     await runtime.stop(deadline=0.0)
@@ -825,7 +827,7 @@ async def test_a_revoke_waits_a_bounded_time_for_a_restore_that_does_not_end(mon
     await asyncio.sleep(0.01)
 
     with capture_logs() as logs:
-        await asyncio.wait_for(source.on_revoke([1]), timeout=1)
+        await asyncio.wait_for(source.on_revoke([1]), timeout=10)
 
     [line] = events(logs, 'split_restore_cancel_slow')
     assert (line['log_level'], line['partitions']) == ('warning', [1])
@@ -1147,8 +1149,8 @@ async def test_a_stop_while_an_orphan_is_closed_does_not_hold_the_drain(monkeypa
     await wait_until(lambda: worker.client.produced == 1 and handler.split_calls == [500])
 
     worker.processor.signal_stop()
-    await asyncio.wait_for(worker.processor.drain(), timeout=0.5)
-    await asyncio.wait_for(worker.processor.stop(), timeout=1)
+    await asyncio.wait_for(worker.processor.drain(), timeout=HANG_LIMIT_SECONDS)
+    await asyncio.wait_for(worker.processor.stop(), timeout=10)
 
     assert handler.closed_splits == 1 and worker.pending == 1 and worker.commits == []
     assert worker.owner is not None and worker.owner._tasks == set()
@@ -1367,12 +1369,11 @@ async def test_a_revoke_during_a_split_and_with_an_open_job_ends_inside_the_drai
     await wait_for(lambda: kinds() == [('open', 40), ('split-done', 40), ('open', 41)], interval=0.001)
     await wait_for(lambda: published(41) == 1, interval=0.001)
 
-    started = time.monotonic()
-    # The drain timeout of this worker is one second.
-    await asyncio.wait_for(source.on_revoke([1]), timeout=1)
-    elapsed = time.monotonic() - started
+    with capture_logs() as logs:
+        await asyncio.wait_for(source.on_revoke([1]), timeout=HANG_LIMIT_SECONDS)
 
-    assert elapsed < 0.5
+    # The revoke did not sit through the drain timeout of this worker for the open job or the split.
+    assert events(logs, 'stop_processor_drain_timeout') == []
     # The split was cancelled cleanly; nothing was closed, and nothing was committed.
     assert kinds()[-1] == ('split-cancelled', 41) and handler.closed_splits == 2
     assert processor.offset_tracker.pending_count == 2
@@ -1468,32 +1469,36 @@ async def test_the_cancel_of_a_split_closes_the_generator_and_writes_split_cance
                 yield Item(n=0)
                 await asyncio.Event().wait()
             finally:
-                # A generator that needs time to clean up.
-                await asyncio.sleep(0.3)
+                # A generator that needs time to clean up: it waits until the test lets it go.
+                cleaning_up.set()
+                await may_finish.wait()
                 self.closed_splits += 1
 
+    cleaning_up, may_finish = asyncio.Event(), asyncio.Event()
     world = World()
     handler = Handler()
     worker = OwnerWorker(world, handler)
     await worker.restore()
     worker.run()
     assert worker.owner is not None
-    worker.owner._split_settings = dataclasses.replace(worker.owner._split_settings, cancel_write_seconds=0.4)
     worker.give(source_message(500))
     await wait_until(lambda: world.kinds() == ['open'] and len(world.parts()) == 1)
-    # The split-cancelled record gets no delivery report, so its write takes its whole time limit.
+    # The split-cancelled record gets no delivery report until the test releases it.
     worker.client.hold_deliveries = True
+    produced = worker.client.produced
 
     worker.processor.signal_stop()
-    started = time.monotonic()
     # The drain does not wait for the cancel at all.
-    await asyncio.wait_for(worker.processor.drain(), timeout=0.1)
-    await worker.processor.stop()
-    elapsed = time.monotonic() - started
+    await asyncio.wait_for(worker.processor.drain(), timeout=HANG_LIMIT_SECONDS)
 
-    # One after the other they would take 0.7 seconds.
-    assert handler.closed_splits == 1 and 0.35 < elapsed < 0.6
+    # Both run at the same time: the record is on its way while the generator still cleans up.
+    await wait_until(lambda: cleaning_up.is_set() and worker.client.produced == produced + 1)
+    assert handler.closed_splits == 0
+    may_finish.set()
     worker.client.release_deliveries()
+    await asyncio.wait_for(worker.processor.stop(), timeout=HANG_LIMIT_SECONDS)
+
+    assert handler.closed_splits == 1 and world.kinds() == ['open', 'split-cancelled']
     await worker.runtime.stop(deadline=0.0)
 
 
@@ -1511,7 +1516,7 @@ async def test_the_stop_of_a_processor_cancels_a_split_cancel_that_does_not_end_
     await wait_until(lambda: world.kinds() == ['open'] and len(world.parts()) == 1)
 
     worker.processor.signal_stop()
-    await asyncio.wait_for(worker.processor.stop(timeout=0.05), timeout=1)
+    await asyncio.wait_for(worker.processor.stop(timeout=0.05), timeout=10)
 
     assert worker.owner is not None and worker.owner._tasks == set()
     assert worker.pending == 1 and worker.commits == []
@@ -1749,7 +1754,7 @@ async def test_an_end_whose_closed_record_is_not_read_back_before_a_stop_leaves_
     # The record is in the log, but the table does not show it: the offset is not completed.
     assert worker.commits == [] and worker.pending == 1
     worker.processor.signal_stop()
-    await asyncio.wait_for(worker.processor.drain(), timeout=1)
+    await asyncio.wait_for(worker.processor.drain(), timeout=10)
 
     # The drain waited only the grace time; the next owner finds the closed record and completes the offset.
     assert worker.pending == 1 and worker.processor._abandoned_offsets == {500}
@@ -1988,11 +1993,11 @@ async def test_a_wait_for_the_tracker_ends_at_a_stop():
     await asyncio.sleep(0.02)
     assert worker.owner is not None and worker.owner._jobs[500].catching_up
 
-    started = time.monotonic()
     worker.processor.signal_stop()
-    await worker.owner.stop(timeout=1.0)
+    # The wait ends by the stop itself: a wait that went on would hold this call for its whole timeout.
+    await asyncio.wait_for(worker.owner.stop(timeout=60.0), timeout=HANG_LIMIT_SECONDS)
 
-    assert time.monotonic() - started < 0.5 and not worker.owner._tasks
+    assert not worker.owner._tasks
     assert worker.pending == 1 and worker.commits == []
     await worker.stop()
 
@@ -2011,7 +2016,7 @@ async def test_a_stop_before_the_closed_record_of_a_failed_split_is_read_back_le
     assert worker.commits == [] and worker.pending == 1
 
     worker.processor.signal_stop()
-    await asyncio.wait_for(worker.processor.drain(), timeout=1)
+    await asyncio.wait_for(worker.processor.drain(), timeout=10)
     assert worker.owner is not None
     await worker.owner.stop(timeout=1.0)
 

@@ -10,7 +10,7 @@ owner builds a second ``OwnerWorker`` on the same world.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from typing import Any
 
 from pydantic import BaseModel
@@ -37,7 +37,15 @@ from drakkar.split.records import (
 )
 from drakkar.split.runtime import SplitRuntime
 from drakkar.split.table import JobTable
-from tests.split_helpers import FakeClock, FakeConsumerClient, FakeLog, FakeMessage, FakeProducerClient, FakeRecord
+from tests.split_helpers import (
+    FakeClock,
+    FakeConsumerClient,
+    FakeLog,
+    FakeMessage,
+    FakeProducerClient,
+    FakeRecord,
+    wait_until,
+)
 from tests.test_message_dlq import CountingSink, FanOutHandler, ScriptedPool
 from tests.test_sink_delivery_policy import CollectingRecorder, RecordingDLQ
 
@@ -137,16 +145,6 @@ class ManualSleep:
             if not future.done():
                 future.set_result(None)
         await asyncio.sleep(0.01)
-
-
-async def wait_until(condition: Callable[[], bool], timeout: float = 3.0) -> None:
-    """Poll ``condition`` every millisecond; fail the test when it does not hold in time."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while not condition():
-        if loop.time() > deadline:
-            raise AssertionError('condition not met in time')
-        await asyncio.sleep(0.001)
 
 
 class World:

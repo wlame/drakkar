@@ -26,7 +26,7 @@ from drakkar.split.tracker import (
     TIMEOUT_CHECK_SECONDS,
     JobTracker,
 )
-from tests.split_helpers import START_MS, FakeClock, FakeConsumerClient, FakeLog
+from tests.split_helpers import START_MS, FakeClock, FakeConsumerClient, FakeLog, wait_until
 
 TOPIC = 'items_g_split_results'
 SOURCE_GROUP = 'items-group'
@@ -149,15 +149,6 @@ class FakeSleep:
             if not future.done():
                 future.set_result(None)
         await settle()
-
-
-async def wait_until(condition: Callable[[], bool], timeout: float = 2.0) -> None:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while not condition():
-        if loop.time() > deadline:
-            raise AssertionError('condition not met in time')
-        await asyncio.sleep(0.001)
 
 
 async def settle() -> None:
@@ -425,7 +416,7 @@ async def test_a_restore_that_fails_twice_then_works(harness):
         follow = asyncio.create_task(harness.t.follow(PARTITION, committed_source_offset=None))
         await harness.sleep.fire(1.0)
         await harness.sleep.fire(2.0)
-        table = await asyncio.wait_for(follow, timeout=2)
+        table = await asyncio.wait_for(follow, timeout=10)
     assert [job.offset for job in table.open_jobs()] == [10]
     failures = [entry for entry in logs if entry['event'] == 'split_restore_failed']
     assert [entry['attempt'] for entry in failures] == [1]  # the second line is held back by the rate limit
@@ -449,7 +440,7 @@ async def test_a_consume_error_during_a_restore_starts_the_restore_again():
         # The restore backs off for 1 s; the read loop pauses for its own error pause.
         await h.sleep.fire(1.0)
         await h.sleep.fire(CONSUMER_ERROR_PAUSE_SECONDS)
-        table = await asyncio.wait_for(follow, timeout=2)
+        table = await asyncio.wait_for(follow, timeout=10)
         assert [job.offset for job in table.open_jobs()] == [10]
         assert h.sleep.calls.count(CONSUMER_ERROR_PAUSE_SECONDS) == 1
     finally:
@@ -498,7 +489,7 @@ async def test_restoring_gauge_counts_partitions_waiting_for_their_restore(harne
     assert harness.t.is_restoring(PARTITION)
     assert harness.t.table(PARTITION) is None
     await harness.sleep.fire(1.0)
-    await asyncio.wait_for(follow, timeout=2)
+    await asyncio.wait_for(follow, timeout=10)
     assert split_restoring_partitions._value.get() == 0
 
 
@@ -510,7 +501,7 @@ async def test_note_source_commit_during_a_restore_retires_at_its_end(harness):
     await wait_until(lambda: harness.sleep.waiting(1.0))
     harness.t.note_source_commit(PARTITION, 15)
     await harness.sleep.fire(1.0)
-    table = await asyncio.wait_for(follow, timeout=2)
+    table = await asyncio.wait_for(follow, timeout=10)
     assert [job.offset for job in table.open_jobs()] == [20]
 
 
@@ -944,7 +935,7 @@ async def test_a_pending_seek_back_keeps_a_known_position_from_ending_the_restor
     assert harness.t.is_restoring(PARTITION) and state.next_offset == 0
     state.reposition = False
     gate.set()
-    table = await asyncio.wait_for(follow, timeout=2)
+    table = await asyncio.wait_for(follow, timeout=10)
     assert [job.offset for job in table.open_jobs()] == [10]
 
 
@@ -1117,7 +1108,7 @@ async def test_a_failed_end_check_is_logged_and_the_restore_waits(monkeypatch):
         await wait_until(lambda: h.consumer.overstate == 0)
         h.consumer.fail_next('get_watermark_offsets', KafkaException(KafkaError(KafkaError._TRANSPORT)), times=3)
         with capture_logs() as logs:
-            table = await asyncio.wait_for(follow, timeout=2)
+            table = await asyncio.wait_for(follow, timeout=10)
         assert len(table) == 1
         assert 'split_restore_end_check_failed' in [entry['event'] for entry in logs]
     finally:
@@ -1159,7 +1150,7 @@ async def test_two_follows_of_one_partition_at_once_leave_one_restore(harness):
     first = asyncio.create_task(harness.t.follow(PARTITION, committed_source_offset=None))
     second = asyncio.create_task(harness.t.follow(PARTITION, committed_source_offset=None))
     third = asyncio.create_task(harness.t.follow(PARTITION, committed_source_offset=None))
-    results = await asyncio.wait_for(asyncio.gather(first, second, third, return_exceptions=True), timeout=2)
+    results = await asyncio.wait_for(asyncio.gather(first, second, third, return_exceptions=True), timeout=10)
     tables = [result for result in results if not isinstance(result, BaseException)]
     assert len(tables) == 1 and [job.offset for job in tables[0].open_jobs()] == [10]
     assert sum(isinstance(result, asyncio.CancelledError) for result in results) == 2
@@ -1192,7 +1183,7 @@ async def test_a_committed_row_with_an_error_is_a_failed_restore(harness):
     with capture_logs() as logs:
         follow = asyncio.create_task(harness.t.follow(PARTITION, committed_source_offset=None))
         await harness.sleep.fire(1.0)
-        table = await asyncio.wait_for(follow, timeout=2)
+        table = await asyncio.wait_for(follow, timeout=10)
     # The second attempt read the committed position; a row with an error was not taken as "none".
     assert [job.offset for job in table.open_jobs()] == [11]
     assert [entry['event'] for entry in logs].count('split_restore_failed') == 1
@@ -1304,7 +1295,7 @@ async def test_a_batch_collected_before_a_seek_and_returned_after_it_is_dropped(
         await wait_until(lambda: not h.t._followed[PARTITION].reposition)
         consumer.hold_returns = False
         consumer.return_gate.set()
-        table = await asyncio.wait_for(follow, timeout=2)
+        table = await asyncio.wait_for(follow, timeout=10)
         await wait_until(lambda: table.job(11) is not None)
         assert [job.offset for job in table.open_jobs()] == [10, 11]
     finally:

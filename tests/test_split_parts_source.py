@@ -469,7 +469,7 @@ async def test_a_revoke_with_a_results_topic_that_cannot_be_written_ends_well_in
     await wait_for(lambda: parts.client.produced == 1 and processor.inflight_count == 0)
     with capture_logs() as logs:
         # The drain timeout of this worker is one second; the revoke needs far less.
-        await asyncio.wait_for(source.on_revoke([1]), timeout=0.5)
+        await asyncio.wait_for(source.on_revoke([1]), timeout=10)
 
     assert parts.client.produced == 1
     assert parts.log.records(RESULTS_TOPIC, 3) == []

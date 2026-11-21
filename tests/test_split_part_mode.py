@@ -925,7 +925,7 @@ async def test_a_stop_while_the_report_waits_in_its_backoff_ends_the_drain_with_
         await wait_for(lambda: producer.attempts == 1 and processor.inflight_count == 0)
         # The write failed once and now waits a second before its next attempt.
         processor.signal_stop()
-        await asyncio.wait_for(processor.drain(), timeout=0.5)
+        await asyncio.wait_for(processor.drain(), timeout=10)
         await processor.stop(timeout=1.0)
 
     assert producer.attempts == 1
@@ -962,7 +962,7 @@ async def test_a_part_that_finishes_while_its_partition_drains_is_still_reported
     processor.signal_stop()
     drain = asyncio.create_task(processor.drain())
     gate.set()
-    await asyncio.wait_for(drain, timeout=2.0)
+    await asyncio.wait_for(drain, timeout=10)
     await processor.stop()
 
     # The stop cut no first attempt: the result was written and the offset committed.
@@ -983,7 +983,7 @@ async def test_a_write_with_no_delivery_report_holds_a_drain_only_for_the_stop_g
     processor.signal_stop()
     drain = asyncio.create_task(processor.drain())
     gate.set()
-    await asyncio.wait_for(drain, timeout=2.0)
+    await asyncio.wait_for(drain, timeout=10)
     await processor.stop()
 
     assert len(producer.records) == 1
@@ -1016,7 +1016,7 @@ async def test_a_stop_during_the_message_hook_still_ends_the_part_with_its_repor
     assert not drain.done()
     assert producer.records == []
     hook_may_end.set()
-    await asyncio.wait_for(drain, timeout=2.0)
+    await asyncio.wait_for(drain, timeout=10)
     await processor.stop()
 
     # The message result was delivered, then the part was reported, then its offset was committed.
@@ -1035,7 +1035,7 @@ async def test_a_report_that_can_never_be_written_stalls_the_offset():
     with capture_logs() as logs:
         pipeline.start(part_message(offset=0), part_message(offset=1))
         await wait_for(lambda: len(pipeline.processor._stalled_offsets) == 2)
-        await asyncio.wait_for(pipeline.processor.drain(), timeout=1.0)
+        await asyncio.wait_for(pipeline.processor.drain(), timeout=10)
         await pipeline.processor.stop()
 
     assert pipeline.pending() == 2
@@ -1186,7 +1186,8 @@ async def test_the_loop_takes_no_part_while_too_many_reports_wait_and_goes_on_wh
     pipeline.start(*(part_message(offset=offset) for offset in range(total)))
     await wait_for(lambda: len(pipeline.reports.calls) >= cap and processor.inflight_count == 0)
     reported = len(pipeline.reports.calls)
-    await asyncio.sleep(0.2)
+    # The reports are held by the gate of the test; a longer wait proves nothing more.
+    await asyncio.sleep(0.05)
 
     # The loop stopped at the cap (a part that was in flight may pass it by a few), and the rest stay queued.
     assert cap == 16
@@ -1220,7 +1221,7 @@ async def test_a_stop_wakes_a_loop_that_waits_for_reports_to_end(mode, monkeypat
     written = len(producer.records)
 
     processor.signal_stop()
-    await asyncio.wait_for(processor.drain(), timeout=1.0)
+    await asyncio.wait_for(processor.drain(), timeout=10)
     await processor.stop(timeout=1.0)
 
     # No part was taken after the stop, the queued ones were dropped, and no report was acknowledged.

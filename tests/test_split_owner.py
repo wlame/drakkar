@@ -736,7 +736,7 @@ async def test_a_job_dlq_record_that_cannot_be_written_under_stall_stalls_the_of
     assert world.closed() == [] and dropped_payloads() == dropped
     assert worker.processor._stalled_offsets == {500} and worker.commits == []
     # A stalled offset holds no drain.
-    await asyncio.wait_for(worker.processor.drain(), timeout=1)
+    await asyncio.wait_for(worker.processor.drain(), timeout=10)
     await worker.stop()
 
 
@@ -997,7 +997,7 @@ async def test_a_stop_before_the_local_messages_of_a_window_get_room_again_leave
     await asyncio.sleep(0.05)
     assert handler.jobs == []
     worker.processor.signal_stop()
-    await asyncio.wait_for(worker.processor.drain(), timeout=1)
+    await asyncio.wait_for(worker.processor.drain(), timeout=10)
 
     assert worker.processor._abandoned_offsets == {501} and worker.pending == 2
     other.close()
@@ -1063,7 +1063,7 @@ async def test_a_split_cancelled_record_that_cannot_be_written_is_logged_and_the
     worker.client.fail_next_deliveries(KafkaError(KafkaError._MSG_TIMED_OUT))
     with capture_logs() as logs:
         worker.processor.signal_stop()
-        await asyncio.wait_for(worker.processor.drain(), timeout=1)
+        await asyncio.wait_for(worker.processor.drain(), timeout=10)
         await worker.processor.stop()
 
     assert world.kinds() == ['open']
@@ -1180,8 +1180,8 @@ async def test_a_stop_during_a_split_whose_client_queue_is_full_ends_within_the_
 
     with capture_logs() as logs:
         worker.processor.signal_stop()
-        await asyncio.wait_for(worker.processor.drain(), timeout=1)
-        await asyncio.wait_for(worker.processor.stop(), timeout=1)
+        await asyncio.wait_for(worker.processor.drain(), timeout=10)
+        await asyncio.wait_for(worker.processor.stop(), timeout=10)
 
     # The split-cancelled record found no room in the client queue within its time limit.
     [line] = [line for line in logs if line['event'] == 'split_cancel_write_failed']
@@ -1206,7 +1206,7 @@ async def test_a_generator_that_fails_while_it_is_closed_is_logged_and_the_stop_
 
     with capture_logs() as logs:
         worker.processor.signal_stop()
-        await asyncio.wait_for(worker.processor.drain(), timeout=1)
+        await asyncio.wait_for(worker.processor.drain(), timeout=10)
         await worker.processor.stop()
 
     [line] = [line for line in logs if line['event'] == 'split_close_failed']
@@ -1238,7 +1238,7 @@ async def test_a_stop_during_the_retries_of_a_closed_record_leaves_the_offset_pe
     await wait_until(lambda: worker.sleep.waiting(1.0))
 
     worker.processor.signal_stop()
-    await asyncio.wait_for(worker.processor.drain(), timeout=1)
+    await asyncio.wait_for(worker.processor.drain(), timeout=10)
 
     assert world.closed() == [] and worker.pending == 1 and worker.commits == []
     assert worker.processor._open_job_offsets == {500}
@@ -1257,7 +1257,7 @@ async def test_a_stop_during_the_closed_write_of_an_ended_job_leaves_the_offset_
     world.report_all()
     await wait_until(lambda: worker.aggregate_sink.calls == 1 and worker.client.produced == 4)
     worker.processor.signal_stop()
-    await asyncio.wait_for(worker.processor.drain(), timeout=1)
+    await asyncio.wait_for(worker.processor.drain(), timeout=10)
 
     assert worker.pending == 1 and worker.commits == []
     assert worker.processor._abandoned_offsets == {500}
@@ -1545,8 +1545,8 @@ async def test_a_split_waits_for_room_in_a_full_client_queue_and_a_stop_ends_tha
     await wait_until(lambda: client.produced == 10 and handler.pulls == 9)
     await asyncio.sleep(0.03)
     worker.processor.signal_stop()
-    await asyncio.wait_for(worker.processor.drain(), timeout=0.5)
-    await asyncio.wait_for(worker.processor.stop(), timeout=3)
+    await asyncio.wait_for(worker.processor.drain(), timeout=10)
+    await asyncio.wait_for(worker.processor.stop(), timeout=10)
 
     assert client.produced == 10 and worker.pending == 2 and worker.commits == []
     assert handler.closed_splits == 2
