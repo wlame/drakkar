@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A new root config section `split`, after `sources`: the keys `enabled`, `connection`, `parts_topic`, `results_topic`, `parts_group`, `results_group`, `aggregate_sinks`, `job_timeout`, `idle_timeout`, `max_attempts` and `max_part_data`, with their load checks. It is off by default and does nothing yet. The config summary line has a new token `split=on` or `split=off` after `sources=[...]`.
 - The models of the split feature in `drakkar.split` (`SplitPart`, `PartResult`, `PartDLQ`, `SinkCounts`, `SplitJob`, `JobAction`, `SplitResultsUnavailable`, `SplitResultsExpired`) and the wire formats of its two internal topics (headers and records). `SourceMessage` has a new field `split`, `None` for an ordinary message. Nothing uses them yet.
 - The split metrics (`drakkar_split_*`) and their entries, and the entries of the `split` keys, in the agent registry
+- The split job table (`drakkar.split.table`): it reads the records of the results log in order, counts the part results of each job, knows the current attempt, and gives the timed-out jobs and the offset a restart reads from. Nothing uses it yet.
 
 ## [3.4.0] - 2026-11-20
 

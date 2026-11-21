@@ -26,7 +26,7 @@
   "record_kinds": ["open", "split-done", "split-cancelled", "result", "closed"],
   "closed_outcomes": ["aggregated", "dlq", "timeout", "split_failed", "attempts_spent", "orphaned"],
   "job_actions": ["done", "dlq"],
-  "ignore_reasons": ["duplicate", "old_attempt", "closed_job", "unknown_job", "foreign_group"],
+  "ignore_reasons": ["duplicate", "old_attempt", "closed_job", "unknown_job", "foreign_group", "malformed"],
   "partition_cases": [
     {"offset": 500, "partition_count": 6, "index": 0, "partition": 2},
     {"offset": 500, "partition_count": 6, "index": 1, "partition": 3},

@@ -22,6 +22,7 @@ from drakkar.split.records import (
     part_record,
     result_body,
 )
+from drakkar.split.table import IgnoreReason
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'split_contract.json').read_text(encoding='utf-8'))
 
@@ -64,6 +65,7 @@ def test_closed_sets_match_the_fixture():
     assert list(get_args(RecordKind)) == FIXTURE['record_kinds']
     assert list(get_args(ClosedOutcome)) == FIXTURE['closed_outcomes']
     assert [action.value for action in JobAction] == FIXTURE['job_actions']
+    assert [reason.value for reason in IgnoreReason] == FIXTURE['ignore_reasons']
 
 
 @pytest.mark.parametrize('case', FIXTURE['partition_cases'], ids=lambda c: f'{c["offset"]}-{c["index"]}')
