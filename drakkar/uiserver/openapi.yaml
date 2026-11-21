@@ -12,7 +12,7 @@
 openapi: 3.1.0
 info:
   title: Drakkar Backend API
-  version: "1.33"
+  version: "1.34"
   description: >-
     The JSON surface every Drakkar backend (Python reference and Go port)
     serves identically under /api/v1, plus the unprefixed Kubernetes probes.
@@ -1330,6 +1330,45 @@ paths:
               schema: {$ref: '#/components/schemas/ConsumePauseState'}
         '401': {$ref: '#/components/responses/Unauthorized'}
 
+  /api/v1/debug/split:
+    get:
+      tags: [debug-tools]
+      operationId: getSplit
+      summary: Split jobs of this worker
+      description: >-
+        v1.34. Read-only, from the worker's memory (no Kafka read). Always
+        200 when the main loop answers, also with the feature off (enabled
+        false, empty lists). Answers cross-origin reads like
+        /api/v1/debug/trace. Python only for now; a backend without the
+        feature answers 404, and a client hides the split views then.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 500, default: 100}
+          description: The most jobs in the answer.
+      responses:
+        '200':
+          description: The split state.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SplitState'}
+        '422':
+          description: A bad limit, in the validation envelope.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ValidationDetail'}
+        '503':
+          description: The main loop did not answer in time.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [detail]
+                properties:
+                  detail: {type: string, enum: ["the main loop did not answer in time"]}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+
   /api/v1/debug/detach:
     get:
       tags: [debug-tools]
@@ -2463,6 +2502,21 @@ components:
           type: boolean
           description: >-
             True when the cache and its exchange are on and autodiscover is on.
+        split:
+          type: object
+          description: >-
+            v1.34. Split mode. A missing key means OFF (the one capability
+            where absence is not on). enabled is true when split.enabled is
+            true and the handler defines split; otherwise the three other
+            keys are null.
+          properties:
+            enabled: {type: boolean}
+            parts_topic: {type: [string, 'null']}
+            results_topic: {type: [string, 'null']}
+            parts_partition_base:
+              type: [integer, 'null']
+              description: Added to a parts partition in metric labels, logs and recorder rows.
+          required: [enabled, parts_topic, results_topic, parts_partition_base]
 
     Worker:
       type: object
@@ -2513,6 +2567,12 @@ components:
             v1.33. features.kafka.detached of the registry card: true while
             the worker is detaching, detached or attaching, false while
             attached; null or missing when unknown.
+        # v1.34, optional: from the card's features.split.
+        split:
+          type: [boolean, 'null']
+          description: >-
+            v1.34. True with features.split on the registry card, false for a
+            card with features and no split, null or missing when unknown.
       required: [worker_name, url, is_current]
 
     ProcessorsReport:
@@ -3687,6 +3747,75 @@ components:
         resume_at_ms: {type: [integer, 'null']}
         requested_seconds: {type: [integer, 'null']}
       required: [enabled, durations_seconds, active, resume_at_ms, requested_seconds]
+
+    SplitPartition:
+      type: object
+      description: v1.34. One source partition followed by the worker's job tracker.
+      properties:
+        partition: {type: integer}
+        state: {type: string, enum: [restoring, live]}
+        state_seconds: {type: number}
+        read_position: {type: [integer, 'null']}
+        open_jobs: {type: [integer, 'null']}
+        closed_jobs: {type: [integer, 'null']}
+      required: [partition, state, state_seconds, read_position, open_jobs, closed_jobs]
+
+    SplitJob:
+      type: object
+      description: v1.34. One open split job of a live partition.
+      properties:
+        partition: {type: integer}
+        offset: {type: integer}
+        request_id: {type: [string, 'null']}
+        attempt: {type: integer}
+        phase: {type: string, enum: [splitting, waiting, waiting_message, ending]}
+        parts: {type: [integer, 'null']}
+        received: {type: integer}
+        failed: {type: integer}
+        dlq_parts: {type: integer}
+        tasks_succeeded: {type: integer}
+        tasks_failed: {type: integer}
+        opened_at: {type: string}
+        age_seconds: {type: number}
+        last_progress_at: {type: [string, 'null']}
+        timeout_at: {type: [string, 'null']}
+        timeout_kind: {type: [string, 'null'], enum: [job, idle, null]}
+      required: [partition, offset, request_id, attempt, phase, parts, received, failed, dlq_parts, tasks_succeeded, tasks_failed, opened_at, age_seconds, last_progress_at, timeout_at, timeout_kind]
+
+    SplitState:
+      type: object
+      description: >-
+        v1.34. Split jobs of one worker. With the feature off: enabled false,
+        topics and settings null, empty lists, totals 0.
+      properties:
+        enabled: {type: boolean}
+        worker:
+          type: object
+          properties:
+            name: {type: string}
+            instance: {type: string}
+          required: [name, instance]
+        source_topic: {type: [string, 'null']}
+        consumer_group: {type: [string, 'null']}
+        parts_topic: {type: [string, 'null']}
+        results_topic: {type: [string, 'null']}
+        parts_partition_base: {type: [integer, 'null']}
+        settings:
+          type: [object, 'null']
+          properties:
+            job_timeout_seconds: {type: number}
+            idle_timeout_seconds: {type: number}
+            max_attempts: {type: integer}
+          required: [job_timeout_seconds, idle_timeout_seconds, max_attempts]
+        partitions:
+          type: array
+          items: {$ref: '#/components/schemas/SplitPartition'}
+        jobs:
+          type: array
+          items: {$ref: '#/components/schemas/SplitJob'}
+        jobs_total: {type: integer}
+        result_write_failures_total: {type: integer}
+      required: [enabled, worker, source_topic, consumer_group, parts_topic, results_topic, parts_partition_base, settings, partitions, jobs, jobs_total, result_write_failures_total]
 
     DetachState:
       type: object

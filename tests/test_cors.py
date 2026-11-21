@@ -1,4 +1,4 @@
-"""Cross-origin reads for the browser fan-out (trace, trace-by-label, databases).
+"""Cross-origin reads for the browser fan-out.
 
 The page served by one worker reads these three paths from every worker of
 its cluster. They answer cross-origin requests with the same origin rule as
@@ -18,7 +18,7 @@ from drakkar.uiserver.server import create_ui_app
 from tests.conftest import kafka_connections
 
 PEER_PAGE = 'http://10.0.0.2:8080'
-FANOUT = ['/api/v1/debug/trace', '/api/v1/debug/trace-by-label', '/api/v1/debug/databases']
+FANOUT = ['/api/v1/debug/trace', '/api/v1/debug/trace-by-label', '/api/v1/debug/databases', '/api/v1/debug/split']
 
 
 def _client(*, token: str = '', allowed: list[str] | None = None) -> AsyncClient:
@@ -89,6 +89,15 @@ async def test_a_refused_preflight_answers_403(token, allowed):
 async def test_an_allowed_cross_origin_get_carries_the_cors_headers():
     async with _client() as client:
         resp = await client.get('/api/v1/debug/databases', headers={'Origin': PEER_PAGE})
+
+    assert resp.status_code == 200
+    assert resp.headers['access-control-allow-origin'] == PEER_PAGE
+    assert resp.headers['vary'] == 'Origin'
+
+
+async def test_an_allowed_cross_origin_get_of_the_split_route_carries_the_cors_headers():
+    async with _client() as client:
+        resp = await client.get('/api/v1/debug/split', headers={'Origin': PEER_PAGE})
 
     assert resp.status_code == 200
     assert resp.headers['access-control-allow-origin'] == PEER_PAGE

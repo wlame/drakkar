@@ -21,6 +21,7 @@ the drakkar-ui bundle through ``routes_spa``, not rendered here.
   * ``routes_kafka_read``    — ``/api/v1/debug/kafka/*``.
   * ``routes_consume_pause`` — ``/api/v1/debug/consume-pause``.
   * ``routes_detach`` — ``/api/v1/debug/detach`` and ``/api/v1/debug/attach``.
+  * ``routes_split`` — ``/api/v1/debug/split``.
   * ``routes_runtime``       — ``/api/v1/debug/runtime/*``.
   * ``routes_renderers``     — ``/api/v1/ui/renderers.js``.
   * ``routes_config_reference`` — ``/api/v1/config-reference``.
@@ -674,11 +675,12 @@ def create_ui_app(
     from drakkar.uiserver.routes_renderers import create_renderers_router
     from drakkar.uiserver.routes_runtime import create_runtime_router
     from drakkar.uiserver.routes_spa import create_spa_router
+    from drakkar.uiserver.routes_split import create_split_router
     from drakkar.uiserver.routes_uipages import create_uipages_router
 
     app = create_api_app(drakkar_app)
 
-    # The browser fan-out reads three debug paths cross-origin; their
+    # The browser fan-out reads four debug paths cross-origin; their
     # preflight must answer before auth (it carries no token).
     install_fanout_cors(app, config)
 
@@ -712,6 +714,7 @@ def create_ui_app(
         create_cache_router(deps),
         create_consume_pause_router(deps),
         create_detach_router(deps),
+        create_split_router(deps),
         create_kafka_read_router(deps),
         create_runtime_router(deps),
         create_config_reference_router(deps),

@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `e89098efa91789b8`.
+Registry version: `bc7df8f23c535be7`.
 
 ## Concepts
 
@@ -3866,6 +3866,14 @@ The detach state of the worker, its deadline and the outcome of the last detach 
 **Cost:** cheap
 
 **Related:** `concept:detach`, `recipe:worker-detached`
+
+### `route:GET /api/v1/debug/split`
+
+The split jobs of the worker, with each open job's progress and timeout.
+
+**Use:** Check how far a large split message is and whether a job is stuck; read it on the worker that owns the source partition.
+
+**Cost:** cheap
 
 ### `route:POST /api/v1/debug/detach`
 

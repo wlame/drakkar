@@ -1,8 +1,8 @@
 """Cross-origin reads for the browser fan-out.
 
-The page served by one worker reads the trace, the label trace and the
-databases list from every worker of its cluster. Those reads are
-cross-origin, so these three paths answer CORS: with the origin rule of the
+The page served by one worker reads the trace, the label trace, the
+databases list and the split jobs from every worker of its cluster. Those reads are
+cross-origin, so these paths answer CORS: with the origin rule of the
 WebSocket (``origin_allowed`` and ``ui.allowed_origins``, one decision
 table for both), and with a preflight that needs no token, because a
 browser sends none with it. No other path sends CORS headers.
@@ -27,6 +27,7 @@ FANOUT_PATHS = frozenset(
         '/api/v1/debug/trace',
         '/api/v1/debug/trace-by-label',
         '/api/v1/debug/databases',
+        '/api/v1/debug/split',
     }
 )
 PREFLIGHT_MAX_AGE_SECONDS = 600

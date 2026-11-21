@@ -210,6 +210,10 @@
   related:
     - concept:detach
     - recipe:worker-detached
+- key: GET /api/v1/debug/split
+  summary: The split jobs of the worker, with each open job's progress and timeout.
+  use: Check how far a large split message is and whether a job is stuck; read it on the worker that owns the source partition.
+  cost: cheap
 - key: POST /api/v1/debug/detach
   summary: Starts an operator detach from the consumer group for a bounded time and answers at once.
   use: Take the worker out of its consumer group for a while; it changes the worker, so only an operator should call it.
