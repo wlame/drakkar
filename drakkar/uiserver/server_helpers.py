@@ -24,9 +24,11 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from drakkar.config import DrakkarConfig, UIConfig
+from drakkar.split.records import PARTS_PARTITION_BASE
 
 if TYPE_CHECKING:
     from drakkar.recorder import EventRecorder
+    from drakkar.split.runtime import SplitRuntime
 
 # Default ports are implicit in browsers' Origin header but may appear
 # explicitly in the Host header (and vice-versa). We strip both sides to
@@ -239,11 +241,14 @@ def origin_allowed(origin: str | None, host_header: str, config: UIConfig) -> bo
     return not worker_on_loopback or page_on_loopback
 
 
-def capabilities_of(config: DrakkarConfig, recorder: EventRecorder | None) -> dict[str, Any]:
+def capabilities_of(
+    config: DrakkarConfig, recorder: EventRecorder | None, *, split: SplitRuntime | None
+) -> dict[str, Any]:
     """The ``capabilities`` object of ``GET /api/v1/identity``: what this worker runs.
 
     ``recorder`` is the worker's recorder object, ``None`` when it has none. The
     memory store is reported as it is: a recorder with no event capture opens none.
+    ``split`` is the worker's split runtime, ``None`` when split is off.
     """
     autodiscover = config.autodiscover
     return {
@@ -262,6 +267,12 @@ def capabilities_of(config: DrakkarConfig, recorder: EventRecorder | None) -> di
             'provider': autodiscover.provider if autodiscover.enabled else None,
         },
         'cache_exchange': config.cache.enabled and config.cache.exchange.enabled and autodiscover.enabled,
+        'split': {
+            'enabled': split is not None,
+            'parts_topic': split.parts_topic if split is not None else None,
+            'results_topic': split.results_topic if split is not None else None,
+            'parts_partition_base': PARTS_PARTITION_BASE if split is not None else None,
+        },
     }
 
 

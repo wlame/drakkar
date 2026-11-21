@@ -95,6 +95,7 @@ def _drakkar_app(config: DrakkarConfig) -> MagicMock:
     app._cluster_name = 'cluster-a'
     app._instance = '0123456789abcdef'
     app._recorder = None
+    app._split = None
     app._config_origins = None
     app._config_before_on_startup = None
     app.handler = KafkaOnlyHandler()

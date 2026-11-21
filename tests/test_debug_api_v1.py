@@ -89,6 +89,7 @@ def mock_app():
     app._consumer = None
     # A real bool: a bare MagicMock in the workers row is not JSON serializable.
     app.detach.is_detached = False
+    app._split = None
     # ``_offload_pool=None`` keeps the overview's optional ``offload`` key
     # absent (key-presence is the contract's feature flag); a bare
     # MagicMock would be truthy and leak an unserializable snapshot in.

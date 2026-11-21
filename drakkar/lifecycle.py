@@ -966,6 +966,9 @@ class AppLifecycle:
                 detached=self._is_detached(),
                 detach=kafka_source.detach,
             )
+        split = app._split
+        if split is not None:
+            features['split'] = {'parts_topic': split.parts_topic, 'results_topic': split.results_topic}
         return features
 
     def _set_lifecycle_state(self, state: str) -> None:

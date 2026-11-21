@@ -20,6 +20,10 @@ from drakkar.split.models import PartResult, SplitPart
 SPLIT_VERSION = '1'
 PARTS_PARTITION_BASE = 1_000_000
 DK_HEADER_PREFIX = 'dk-'
+# Labels the framework stamps on the tasks of a worker that splits, so the UI can group the tasks of one job.
+SPLIT_JOB_LABEL = 'split_job'
+SPLIT_PART_LABEL = 'split_part'
+SPLIT_PART_LOCAL = 'local'
 ORIGIN_KAFKA = 'kafka'
 
 H_VERSION = 'dk-split-version'

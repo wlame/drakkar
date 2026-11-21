@@ -66,6 +66,7 @@ def _serving_engine() -> MagicMock:
 def _drakkar_app(config: DrakkarConfig) -> MagicMock:
     """The parts of a worker that the always-on routes read."""
     app = MagicMock()
+    app._split = None
     app._config = config
     app.is_ready = True
     app.processors = {}
@@ -429,13 +430,14 @@ def test_capabilities_match_the_contract(
     else:
         worker_recorder = None
 
-    capabilities = capabilities_of(config, worker_recorder)
+    capabilities = capabilities_of(config, worker_recorder, split=None)
 
     assert capabilities == {
         'recorder': expected_recorder,
         'memory': expected_memory,
         'autodiscover': expected_autodiscover,
         'cache_exchange': False,
+        'split': {'enabled': False, 'parts_topic': None, 'results_topic': None, 'parts_partition_base': None},
     }
     jsonschema.validate(capabilities, _capabilities_schema())
 
@@ -456,13 +458,13 @@ def test_cache_exchange_capability_needs_cache_exchange_and_autodiscover(cache, 
         autodiscover={'enabled': autodiscover_on, 'provider': 'filesystem'},
     )
 
-    assert capabilities_of(config, None)['cache_exchange'] is expected
+    assert capabilities_of(config, None, split=None)['cache_exchange'] is expected
 
 
 def test_memory_capability_is_off_when_the_recorder_holds_no_store():
     config = _config(recorder={'capture': {'events': False}})
 
-    assert capabilities_of(config, SimpleNamespace(memory_store=None))['memory']['enabled'] is False
+    assert capabilities_of(config, SimpleNamespace(memory_store=None), split=None)['memory']['enabled'] is False
 
 
 async def test_identity_carries_the_capabilities():
@@ -478,7 +480,7 @@ async def test_identity_carries_the_capabilities():
     async with _client(create_ui_app(config.ui, recorder, drakkar_app)) as client:
         body = (await client.get('/api/v1/identity')).json()
 
-    assert body['capabilities'] == capabilities_of(config, recorder)
+    assert body['capabilities'] == capabilities_of(config, recorder, split=None)
     assert body['capabilities']['memory']['enabled'] is True
 
 

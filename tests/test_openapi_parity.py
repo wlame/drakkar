@@ -303,6 +303,7 @@ async def test_identity_and_recent_tasks_payloads_match_schemas():
     app._start_time = time.monotonic()
     app._config = DrakkarConfig(connections=kafka_connections(), sources={'kafka': {'enabled': True}})
     app.config_summary = '[schema-worker]'
+    app._split = None
     app._executor_pool = None
 
     transport = ASGITransport(app=create_ui_app(cfg, recorder, app))
@@ -496,6 +497,7 @@ async def test_workers_payload_matches_schema():
     app.cluster_tasks_hash = own_hash
     app.fleet = StubFleet()
     app.detach.is_detached = False
+    app._split = None
     app.worker_identity = WorkerIdentity(
         worker='schema-worker',
         instance='abcdef0123456789',

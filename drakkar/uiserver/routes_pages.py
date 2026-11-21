@@ -151,6 +151,8 @@ def peer_worker_row(view: PeerView, *, own_cluster: str, own_hash: str) -> dict[
     ``None`` for a peer of another cluster or with no hash. ``ui_enabled``
     is the card's ``features.ui`` when it is a boolean, else ``None``, and
     ``detached`` the card's ``features.kafka.detached`` the same way.
+    ``split`` is true when the card has ``features.split``, false when it has
+    ``features`` without it, and ``None`` for a card with no ``features``.
     """
     card = view.card
     peer_hash = card_cluster_hash(card)
@@ -158,6 +160,7 @@ def peer_worker_row(view: PeerView, *, own_cluster: str, own_hash: str) -> dict[
     ui_feature = features.get('ui')
     kafka_feature = features.get('kafka')
     detached = kafka_feature.get('detached') if isinstance(kafka_feature, dict) else None
+    split_wire = ('split' in features) if 'features' in card else None
     same_cluster = card['cluster'] == own_cluster
     row: dict[str, Any] = {
         'worker_name': card['worker'],
@@ -175,6 +178,7 @@ def peer_worker_row(view: PeerView, *, own_cluster: str, own_hash: str) -> dict[
         'cluster_tasks_match': peer_hash == own_hash if peer_hash is not None and same_cluster else None,
         'ui_enabled': ui_feature if isinstance(ui_feature, bool) else None,
         'detached': detached if isinstance(detached, bool) else None,
+        'split': split_wire,
     }
     for key in _OPTIONAL_PEER_FIELDS:
         if key in card:
@@ -401,7 +405,7 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
             'link_bases': _link_bases_wire(config.docs, config.link_bases),
             'custom_renderers': bool(config.custom_renderers_path),
             'timeline': _timeline_wire(config.timeline),
-            'capabilities': capabilities_of(drakkar_app._config, recorder),
+            'capabilities': capabilities_of(drakkar_app._config, recorder, split=drakkar_app._split),
         }
         # v1.22: absent rather than null when no docs site is configured.
         docs = _docs_wire(config.docs)
@@ -532,6 +536,7 @@ def create_pages_router(deps: UIDeps) -> tuple[APIRouter, APIRouter]:
             'ui_enabled': True,
             # Unknown (None) for a worker with no Kafka source: it has no group to leave.
             'detached': drakkar_app.detach.is_detached if drakkar_app._config.sources.kafka.enabled else None,
+            'split': drakkar_app._split is not None,
         }
 
     @router.get('/api/v1/workers')

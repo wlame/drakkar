@@ -187,6 +187,7 @@ def mock_app():
 
     app._consumer = None
     app.detach.is_detached = False
+    app._split = None
 
     sink_mgr = MagicMock()
     sink_mgr.get_sink_info.return_value = [
@@ -1378,6 +1379,7 @@ async def test_api_workers_current_worker_row_has_every_contract_field(client):
         'cluster_tasks_match': True,
         'ui_enabled': True,
         'detached': False,
+        'split': False,
     }
 
 
@@ -1438,6 +1440,7 @@ async def test_api_workers_peer_row_comes_from_the_card(client, mock_app):
         'cluster_tasks_match': None,
         'ui_enabled': None,
         'detached': None,
+        'split': False,
         'backend': 'python',
         'version': '2.4.0',
         'state': 'draining',

@@ -92,7 +92,7 @@ from drakkar.split.partmode import (
     part_request_id,
 )
 from drakkar.split.producer import SplitProduceError
-from drakkar.split.records import parse_part_headers
+from drakkar.split.records import SPLIT_JOB_LABEL, SPLIT_PART_LABEL, SPLIT_PART_LOCAL, parse_part_headers
 from drakkar.utils import make_request_id
 
 logger = structlog.get_logger()
@@ -3107,6 +3107,29 @@ class PartitionProcessor:
         """Give each task the request ids of its source messages; a value the handler set is kept."""
         for task in tasks:
             RequestIdResolver.stamp_task(task, self._request_ids_of(task.source_offsets))
+            self._stamp_split_labels(task)
+
+    def _stamp_split_labels(self, task: ExecutorTask) -> None:
+        """Label a task of a split job with its job and part; a label the handler set is kept.
+
+        A task of a part is labelled by the part's source message; a task of a local message of a worker that
+        splits is labelled by its own partition and offset, with part ``local``. Other workers get no label.
+        """
+        if self._part_mode is None and self._owner is None:
+            return
+        tracker = self._message_trackers.get(task.source_offsets[0]) if task.source_offsets else None
+        if tracker is None:
+            return
+        message = tracker.source_message
+        part = message.split
+        if part is not None:
+            job, part_label = f'{part.source_partition}:{part.source_offset}', str(part.index)
+        elif self._owner is not None:
+            job, part_label = f'{message.partition}:{message.offset}', SPLIT_PART_LOCAL
+        else:
+            return
+        task.labels.setdefault(SPLIT_JOB_LABEL, job)
+        task.labels.setdefault(SPLIT_PART_LABEL, part_label)
 
     async def _finish_message(self, tracker: MessageTracker) -> None:
         """Fire ``on_message_complete`` for a fully-terminal message and

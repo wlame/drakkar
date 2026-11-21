@@ -311,7 +311,7 @@ class AgentSurface:
                 'cluster': app._cluster_name or None,
                 'instance': app._instance,
             },
-            'capabilities': capabilities_of(config, app._recorder),
+            'capabilities': capabilities_of(config, app._recorder, split=app._split),
             'include_payloads': config.agent.include_payloads,
             'app_notes': bool(self.app_entries or self.app_config_meanings),
             'routes': [

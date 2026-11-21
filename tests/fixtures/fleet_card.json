@@ -145,6 +145,22 @@
         }
       },
       "bytes": "{\"cluster\":\"search\",\"features\":{\"kafka\":{\"detached\":true,\"group\":\"поиск-группа\",\"max_detached\":2,\"min_attached\":3}},\"schema\":1,\"url\":\"http://10.0.0.5:8080/\",\"worker\":\"w-1\"}"
+    },
+    {
+      "name": "features_split",
+      "card": {
+        "schema": 1,
+        "worker": "w-1",
+        "cluster": "search",
+        "url": "http://10.0.0.5:8080/",
+        "features": {
+          "split": {
+            "results_topic": "requests_workers_split_results",
+            "parts_topic": "requests_workers_split_parts"
+          }
+        }
+      },
+      "bytes": "{\"cluster\":\"search\",\"features\":{\"split\":{\"parts_topic\":\"requests_workers_split_parts\",\"results_topic\":\"requests_workers_split_results\"}},\"schema\":1,\"url\":\"http://10.0.0.5:8080/\",\"worker\":\"w-1\"}"
     }
   ],
   "valid": [
