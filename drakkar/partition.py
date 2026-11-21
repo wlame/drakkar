@@ -29,6 +29,7 @@ from drakkar.groups import (
 from drakkar.handler import (
     BaseDrakkarHandler,
     overridden_completion_hooks,
+    overrides_hook,
     task_run_seconds_hook,
     uses_arrange_stream,
 )
@@ -51,6 +52,8 @@ from drakkar.metrics import (
     partition_processor_deaths,
     partition_queue_size,
     queued_messages_dropped_at_stop,
+    split_parts_processed,
+    split_results_ignored,
     stream_group_tasks,
     suppressed_zombie_deliveries,
     task_retries,
@@ -71,11 +74,17 @@ from drakkar.models import (
     TaskGroup,
 )
 from drakkar.offsets import OffsetTracker
+from drakkar.providers.resilience import RateLimitedLog
 from drakkar.recorder import EventRecorder
 from drakkar.reported_run import reported_run_seconds
 from drakkar.request_ids import RequestIdResolver, reset_request_id
-from drakkar.sinks.dlq_record import DLQRecord
+from drakkar.sinks.dlq_record import DLQRecord, cut_error
 from drakkar.sinks.manager import CollectCallback, DeliveryOutcome, MessageContext, MessageDLQState, sink_ref
+from drakkar.split.models import PartResult
+from drakkar.split.partmode import PartMode, build_part_result, checked_part_data, part_data_raised, part_request_id
+from drakkar.split.producer import SplitProduceError
+from drakkar.split.records import parse_part_headers
+from drakkar.utils import make_request_id
 
 logger = structlog.get_logger()
 
@@ -151,6 +160,11 @@ PARTITION_RESTART_LIMIT = 1
 # message shape after the first sample passes the cap by one message, not by a
 # whole window sized on that sample.
 WARM_UP_WINDOWS = 3
+
+
+def _error_text(error: BaseException) -> str:
+    """The error text of a failed part: the exception text (its type when it has none), cut as ``dk-error`` is."""
+    return cut_error(str(error) or type(error).__name__)
 
 
 class _StreamInterrupted(Exception):
@@ -304,6 +318,9 @@ class MessageTracker:
     # window keeps its group's outcomes only until the group hook has run,
     # and leaves here then; an abandoned stream gives back their kept bytes.
     open_windows: dict[int, Window] = field(default_factory=dict)
+    # Parts only: the error of the stream of this part. The part ends as
+    # failed when its started groups have ended, with no message hook.
+    part_error: str | None = None
 
 
 class PartitionProcessor:
@@ -333,8 +350,19 @@ class PartitionProcessor:
         executor_on_failure: str = 'skip',
         budget: PendingBudget | None = None,
         request_ids: RequestIdResolver | None = None,
+        part_mode: PartMode | None = None,
+        partition_label: int | None = None,
     ) -> None:
         self._partition_id = partition_id
+        # The number this processor shows for its partition: in metric labels,
+        # log fields, recorder rows and what it hands to the sinks. The real
+        # number unless the source gives another one. Calls that reach the
+        # Kafka client (``on_commit``, ``on_stall``) take ``_partition_id``.
+        self._partition_label = partition_id if partition_label is None else partition_label
+        # Set for a processor of parts: every message it accepts is a part of
+        # a split job, and its result is reported before its offset completes.
+        self._part_mode = part_mode
+        self._invalid_part_log = RateLimitedLog(time.monotonic)
         # Gives each message its request id and binds ids into the log
         # context of every scope.
         self._request_ids = request_ids if request_ids is not None else RequestIdResolver(handler)
@@ -401,7 +429,10 @@ class PartitionProcessor:
         # A stream message can have many thousands of tasks, so its tracker
         # never keeps tasks, results or errors; its groups do, for
         # on_group_complete only, and only until that hook has run.
-        self._keep_message_details = implemented['message_complete'] and not self._stream_mode
+        # A part's ``part_data`` hook reads the same group as on_message_complete.
+        self._calls_part_data = part_mode is not None and overrides_hook(handler, 'part_data')
+        reads_message_details = implemented['message_complete'] or self._calls_part_data
+        self._keep_message_details = reads_message_details and not self._stream_mode
         self._keep_group_results = self._stream_mode and implemented['group_complete']
         self._group_label_names: tuple[str, ...] = tuple(getattr(handler, 'group_labels', ()))
         # Tasks (and pulls, at least one each) the stream loop started since it
@@ -413,7 +444,8 @@ class PartitionProcessor:
         self._stopping = False
         # Offsets of stream messages that cannot complete in this process: the
         # stream failed, or it was abandoned at a stop. They stay pending, so
-        # the watermark stops below them, and the drain leaves them out.
+        # the watermark stops below them, and the drain leaves them out. A part
+        # whose result was not written when a stop came is one of them too.
         self._abandoned_offsets: set[int] = set()
         # The pull in progress, run as a task so a stop or a DLQ outcome can
         # cancel it: ``aclose()`` cannot run while a pull is running.
@@ -480,6 +512,16 @@ class PartitionProcessor:
         return self._partition_id
 
     @property
+    def partition_label(self) -> int:
+        """The number this processor shows for its partition in metrics, log lines and recorder rows."""
+        return self._partition_label
+
+    @property
+    def is_stopping(self) -> bool:
+        """Whether a stop was signalled; the report of a part gives up its retries then."""
+        return self._stopping
+
+    @property
     def is_dead(self) -> bool:
         """True when the processing loop gave up and this partition is stalled.
 
@@ -512,9 +554,12 @@ class PartitionProcessor:
         """Add a message to this partition's processing queue."""
         self._queue.put_nowait(message)
         if self._recorder:
-            self._recorder.record_consumed(message)
-        messages_consumed.labels(partition=str(self._partition_id)).inc()
-        partition_queue_size.labels(partition=str(self._partition_id)).set(self._queue.qsize())
+            if self._partition_label == self._partition_id:
+                self._recorder.record_consumed(message)
+            else:
+                self._recorder.record_consumed(message, partition=self._partition_label)
+        messages_consumed.labels(partition=str(self._partition_label)).inc()
+        partition_queue_size.labels(partition=str(self._partition_label)).set(self._queue.qsize())
 
     def start(self) -> None:
         """Start the partition processing loop under its supervisor."""
@@ -648,7 +693,7 @@ class PartitionProcessor:
         await logger.awarning(
             'zombie_tasks_cancelled',
             category='partition',
-            partition=self._partition_id,
+            partition=self._partition_label,
             cancelled=len(tasks),
             hint='tasks outlived the drain timeout; their executor slots and '
             'subprocesses are released and their offsets stay uncommitted — '
@@ -657,11 +702,11 @@ class PartitionProcessor:
         return len(tasks)
 
     def _note_suppressed_delivery(self, hook: str) -> None:
-        suppressed_zombie_deliveries.labels(partition=str(self._partition_id)).inc()
+        suppressed_zombie_deliveries.labels(partition=str(self._partition_label)).inc()
         logger.warning(
             'zombie_delivery_suppressed',
             category='partition',
-            partition=self._partition_id,
+            partition=self._partition_label,
             hook=hook,
             hint='task finished after the revoke/shutdown drain timed out; '
             'the new partition owner re-processes the message — raise '
@@ -715,7 +760,7 @@ class PartitionProcessor:
         return self._task is not None and self._task.done()
 
     async def _run(self) -> None:
-        log = logger.bind(partition=self._partition_id, category='partition')
+        log = logger.bind(partition=self._partition_label, category='partition')
         await log.ainfo('partition_processor_started')
 
         try:
@@ -796,7 +841,7 @@ class PartitionProcessor:
                 # the queued messages counts it, never accepted or arranged.
                 self._held_message = message
                 break
-            partition_queue_size.labels(partition=str(self._partition_id)).set(self._queue.qsize())
+            partition_queue_size.labels(partition=str(self._partition_label)).set(self._queue.qsize())
             await self._process_stream_message(message)
 
     async def _supervise(self) -> None:
@@ -843,8 +888,8 @@ class PartitionProcessor:
         restart buys continued processing, not recovery of the lost
         window.
         """
-        log = logger.bind(partition=self._partition_id, category='partition')
-        label = str(self._partition_id)
+        log = logger.bind(partition=self._partition_label, category='partition')
+        label = str(self._partition_label)
         restarts = 0
         while True:
             try:
@@ -887,14 +932,14 @@ class PartitionProcessor:
                 dropped.append(self._queue.get_nowait())
             except asyncio.QueueEmpty:
                 break
-        partition_queue_size.labels(partition=str(self._partition_id)).set(0)
+        partition_queue_size.labels(partition=str(self._partition_label)).set(0)
         if not dropped:
             return
         queued_messages_dropped_at_stop.inc(len(dropped))
         logger.info(
             'queued_messages_dropped_at_stop',
             category='partition',
-            partition=self._partition_id,
+            partition=self._partition_label,
             count=len(dropped),
             first_offset=min(msg.offset for msg in dropped),
             hint='never arranged; the next owner of the partition reads them again',
@@ -928,7 +973,7 @@ class PartitionProcessor:
                 break
         self._reserve_window(len(messages))
 
-        partition_queue_size.labels(partition=str(self._partition_id)).set(self._queue.qsize())
+        partition_queue_size.labels(partition=str(self._partition_label)).set(self._queue.qsize())
         window_messages.observe(len(messages))
         return messages
 
@@ -1198,9 +1243,16 @@ class PartitionProcessor:
             self._message_trackers[msg.offset] = MessageTracker(
                 source_message=msg,
                 started_at=arrange_started_at,
+                dlq=self._new_dlq_state(),
             )
 
-        tasks = await self._call_arrange(window, messages)
+        try:
+            tasks = await self._call_arrange(window, messages)
+        except Exception as error:
+            if self._part_mode is None:
+                raise
+            self._fail_parts_of_window(messages, error)
+            return
         window.task_ids = [task.task_id for task in tasks]
         window.total_tasks = len(tasks)
 
@@ -1225,6 +1277,10 @@ class PartitionProcessor:
         accepted: list[SourceMessage] = []
         for msg in messages:
             self._offset_tracker.register(msg.offset)
+            if self._part_mode is not None:
+                if await self._accept_part(msg, self._part_mode):
+                    accepted.append(msg)
+                continue
             self._handler.deserialize_message(msg)
             # After the parse, so the handler hook can read msg.payload.
             self._request_ids.assign(msg)
@@ -1244,7 +1300,7 @@ class PartitionProcessor:
 
         offsets = [m.offset for m in messages]
         bind_contextvars(
-            partition=self._partition_id,
+            partition=self._partition_label,
             hook='arrange',
             window_id=self._window_counter,
             offsets=offsets,
@@ -1252,7 +1308,7 @@ class PartitionProcessor:
         request_id_tokens = self._request_ids.bind(msg.request_id for msg in messages)
         hook_token = bind_hook_context(
             hook='arrange',
-            partition=self._partition_id,
+            partition=self._partition_label,
             window_id=self._window_counter,
             offsets=tuple(offsets),
         )
@@ -1273,7 +1329,7 @@ class PartitionProcessor:
         handler_duration.labels(hook='arrange').observe(arrange_duration)
         if self._recorder:
             self._recorder.record_arranged(
-                self._partition_id,
+                self._partition_label,
                 messages,
                 tasks,
                 duration=arrange_duration,
@@ -1347,7 +1403,7 @@ class PartitionProcessor:
                     logger.warning(
                         'duplicate_task_id_in_pending',
                         category='partition',
-                        partition=self._partition_id,
+                        partition=self._partition_label,
                         task_id=task.task_id,
                     )
                 self._pending_tasks[task.task_id] = task
@@ -1383,7 +1439,9 @@ class PartitionProcessor:
         if not await self._accept_messages([message]):
             await self._note_commit_due()
             return
-        tracker = MessageTracker(source_message=message, started_at=started_at, stream_open=True)
+        tracker = MessageTracker(
+            source_message=message, started_at=started_at, stream_open=True, dlq=self._new_dlq_state()
+        )
         self._message_trackers[message.offset] = tracker
 
         # One context for the whole stream, copied from the loop's: every pull
@@ -1407,7 +1465,10 @@ class PartitionProcessor:
                 raise
             except Exception as e:
                 await self._fail_stream(stream, tracker, e)
-                raise
+                if self._part_mode is None:
+                    raise
+                await self._end_part_of_failed_stream(tracker, e)
+                return
 
             if self._abandons_stream(tracker, ended=ended):
                 await self._abandon_stream(stream, tracker)
@@ -1509,7 +1570,7 @@ class PartitionProcessor:
         await logger.aerror(
             'arrange_stream_failed',
             category='handler',
-            partition=self._partition_id,
+            partition=self._partition_label,
             offset=offset,
             group_index=self._stream_group_index,
             error=str(error),
@@ -1517,6 +1578,9 @@ class PartitionProcessor:
         )
         if stream is not None:
             await self._close_stream(stream, tracker)
+        if self._part_mode is not None:
+            # A part reports the failure instead, and its offset completes.
+            return
         # ``stream_open`` stays true, so the message never finishes; the
         # groups that started still run, deliver and leave their tracker.
         self._abandoned_offsets.add(offset)
@@ -1535,7 +1599,7 @@ class PartitionProcessor:
         logger.error(
             'arrange_stream_close_failed',
             category='handler',
-            partition=self._partition_id,
+            partition=self._partition_label,
             offset=tracker.source_message.offset,
             error='timed out' if failure.timed_out else str(failure.error),
         )
@@ -1561,7 +1625,7 @@ class PartitionProcessor:
         await logger.ainfo(
             'arrange_stream_abandoned',
             category='partition',
-            partition=self._partition_id,
+            partition=self._partition_label,
             offset=offset,
             groups_started=len(tracker.groups),
             cancelled=cancelled,
@@ -1612,7 +1676,7 @@ class PartitionProcessor:
         await logger.ainfo(
             'arrange_stream_tasks_cancelled',
             category='partition',
-            partition=self._partition_id,
+            partition=self._partition_label,
             offsets=offsets,
             cancelled=cancelled,
             hint='tasks of a failed stream were still running at a stop; the offset stays '
@@ -1759,7 +1823,7 @@ class PartitionProcessor:
         handler_duration.labels(hook='arrange_stream').observe(pull_duration)
         if self._recorder:
             self._recorder.record_arranged(
-                self._partition_id,
+                self._partition_label,
                 [message],
                 tasks,
                 duration=pull_duration,
@@ -1784,11 +1848,11 @@ class PartitionProcessor:
         scope covers each pull, not the time between two pulls.
         """
         offsets = [message.offset]
-        bind_contextvars(partition=self._partition_id, hook='arrange_stream', window_id=window_id, offsets=offsets)
+        bind_contextvars(partition=self._partition_label, hook='arrange_stream', window_id=window_id, offsets=offsets)
         request_id_tokens = self._request_ids.bind([message.request_id])
         hook_token = bind_hook_context(
             hook='arrange_stream',
-            partition=self._partition_id,
+            partition=self._partition_label,
             window_id=window_id,
             offsets=tuple(offsets),
         )
@@ -1850,7 +1914,7 @@ class PartitionProcessor:
             await logger.aerror(
                 'partition_stall_signal_failed',
                 category='partition',
-                partition=self._partition_id,
+                partition=self._partition_label,
                 error=str(e),
                 exc_info=True,
             )
@@ -1859,11 +1923,11 @@ class PartitionProcessor:
         """Leave ``offset`` permanently pending: the watermark stalls at it
         and the message is redelivered after a restart or rebalance."""
         self._stalled_offsets.add(offset)
-        delivery_stalled_offsets.labels(partition=str(self._partition_id)).inc()
+        delivery_stalled_offsets.labels(partition=str(self._partition_label)).inc()
         logger.error(
             'offset_stalled_on_delivery_failure',
             category='partition',
-            partition=self._partition_id,
+            partition=self._partition_label,
             offset=offset,
             hint='offset will not commit; message redelivered after restart/rebalance',
         )
@@ -1917,7 +1981,7 @@ class PartitionProcessor:
                 task=task,
                 error=error,
                 attempts=attempts,
-                partition_id=self._partition_id,
+                partition_id=self._partition_label,
             )
         except Exception as exc:
             # SinkDeliveryFailedError is the counted ``stall`` answer. Any
@@ -1928,7 +1992,7 @@ class PartitionProcessor:
             logger.error(
                 'execute_dlq_failed',
                 category='partition',
-                partition=self._partition_id,
+                partition=self._partition_label,
                 task_id=task.task_id,
                 source_offsets=task.source_offsets,
                 error=str(exc),
@@ -1967,11 +2031,11 @@ class PartitionProcessor:
             message_count = len(open_states)
         if message_count == 0:
             return
-        dlq_dropped_payloads.labels(partition=str(self._partition_id)).inc(message_count)
+        dlq_dropped_payloads.labels(partition=str(self._partition_label)).inc(message_count)
         logger.critical(
             'dlq_failure_payloads_dropped',
             category='partition',
-            partition=self._partition_id,
+            partition=self._partition_label,
             task_id=task.task_id,
             message_count=message_count,
             reason=reason,
@@ -2013,7 +2077,7 @@ class PartitionProcessor:
         )
         sent = False
         if self._dlq_send is not None:
-            sent = await self._dlq_send(record, self._partition_id)
+            sent = await self._dlq_send(record, self._partition_label)
         if sent:
             self._offset_tracker.complete(msg.offset)
             await self._note_commit_due()
@@ -2022,11 +2086,11 @@ class PartitionProcessor:
         else:
             # 'drop': the unparseable message is lost (it had no parsed
             # payload to begin with); commit past it and keep moving.
-            dlq_dropped_payloads.labels(partition=str(self._partition_id)).inc()
+            dlq_dropped_payloads.labels(partition=str(self._partition_label)).inc()
             logger.critical(
                 'dlq_failure_payloads_dropped',
                 category='partition',
-                partition=self._partition_id,
+                partition=self._partition_label,
                 offset=msg.offset,
                 reason='on_parse_error=dlq but the message was not written to the DLQ',
                 action='ALERT: unparseable message dropped (dlq.on_send_failure=drop)',
@@ -2051,12 +2115,12 @@ class PartitionProcessor:
         if window.group is not None:
             # This run has started: its own ``finally`` settles it.
             self._started_runs.add(cast(asyncio.Task, asyncio.current_task()))
-        bind_contextvars(partition=self._partition_id, window_id=window.window_id)
+        bind_contextvars(partition=self._partition_label, window_id=window.window_id)
         # This coroutine's own context: no reset needed when it ends.
         self._request_ids.bind(self._request_ids_of(task.source_offsets))
         log = logger.bind(
             category='executor',
-            partition=self._partition_id,
+            partition=self._partition_label,
             task_id=task.task_id,
             window_id=window.window_id,
         )
@@ -2081,7 +2145,7 @@ class PartitionProcessor:
         charged_output = 0
 
         try:
-            result = await self._executor_pool.execute(task, self._recorder, self._partition_id)
+            result = await self._executor_pool.execute(task, self._recorder, self._partition_label)
             charged_output = self._charge_output(result)
             self._note_task_completed(task, result)
             collect_result = await self._call_on_task_complete(task, window, result)
@@ -2228,7 +2292,7 @@ class PartitionProcessor:
         if self._recorder:
             self._recorder.record_task_completed(
                 result,
-                self._partition_id,
+                self._partition_label,
                 pool_active=self._executor_pool.active_count,
                 pool_waiting=self._executor_pool.waiting_count,
                 reported_run_seconds=reported_run_seconds(self._task_run_seconds, result),
@@ -2244,7 +2308,7 @@ class PartitionProcessor:
         bind_contextvars(hook='on_task_complete', task_id=task.task_id)
         hook_token = bind_hook_context(
             hook='on_task_complete',
-            partition=self._partition_id,
+            partition=self._partition_label,
             window_id=window.window_id,
             task_id=task.task_id,
         )
@@ -2264,7 +2328,7 @@ class PartitionProcessor:
         if self._recorder:
             self._recorder.record_task_complete(
                 task_id=task.task_id,
-                partition=self._partition_id,
+                partition=self._partition_label,
                 duration=collect_duration,
                 output_message_count=len(collect_result.kafka) if collect_result else 0,
             )
@@ -2284,7 +2348,7 @@ class PartitionProcessor:
             try:
                 outcomes = await self._on_collect(
                     collect_result,
-                    self._partition_id,
+                    self._partition_label,
                     message_context=self._message_context(task.source_offsets),
                 )
                 self._count_skipped_deliveries(task.group, outcomes)
@@ -2361,7 +2425,7 @@ class PartitionProcessor:
             self._recorder.record_task_failed(
                 task,
                 e.error,
-                self._partition_id,
+                self._partition_label,
                 pool_active=self._executor_pool.active_count,
                 pool_waiting=self._executor_pool.waiting_count,
                 duration_seconds=e.result.duration_seconds,
@@ -2386,7 +2450,7 @@ class PartitionProcessor:
                     self._handler,
                     task,
                     error,
-                    partition=self._partition_id,
+                    partition=self._partition_label,
                     window_id=window.window_id,
                 )
         finally:
@@ -2500,7 +2564,7 @@ class PartitionProcessor:
             bind_contextvars(hook='on_window_complete', window_id=window.window_id)
             hook_token = bind_hook_context(
                 hook='on_window_complete',
-                partition=self._partition_id,
+                partition=self._partition_label,
                 window_id=window.window_id,
                 offsets=tuple(m.offset for m in window.source_messages),
             )
@@ -2517,7 +2581,7 @@ class PartitionProcessor:
                 await logger.aerror(
                     'on_window_complete_failed',
                     category='handler',
-                    partition=self._partition_id,
+                    partition=self._partition_label,
                     window_id=window.window_id,
                     error=str(e),
                     exc_info=True,
@@ -2532,7 +2596,7 @@ class PartitionProcessor:
             handler_duration.labels(hook='on_window_complete').observe(wc_duration)
             if self._recorder:
                 self._recorder.record_window_complete(
-                    partition=self._partition_id,
+                    partition=self._partition_label,
                     window_id=window.window_id,
                     duration=wc_duration,
                     task_count=window.total_tasks,
@@ -2546,7 +2610,7 @@ class PartitionProcessor:
                     # message left, so a ``dlq`` outcome acts as ``skip``.
                     await self._on_collect(
                         on_complete_result,
-                        self._partition_id,
+                        self._partition_label,
                         message_context=MessageContext.window(),
                     )
                 except SinkDeliveryFailedError as e:
@@ -2557,7 +2621,7 @@ class PartitionProcessor:
                     await logger.acritical(
                         'on_window_complete_delivery_failed',
                         category='sink',
-                        partition=self._partition_id,
+                        partition=self._partition_label,
                         window_id=window.window_id,
                         error=str(e),
                         action='ALERT: window aggregate payload lost — offsets already committed',
@@ -2569,7 +2633,7 @@ class PartitionProcessor:
                     await logger.aerror(
                         'on_window_complete_sink_delivery_error',
                         category='sink',
-                        partition=self._partition_id,
+                        partition=self._partition_label,
                         window_id=window.window_id,
                         error=str(e),
                         exc_info=True,
@@ -2580,7 +2644,7 @@ class PartitionProcessor:
             # by _finalize_message_tracker as each message's tasks finished.
             # Just make sure any outstanding commit attempt goes through in
             # case the last commit was blocked.
-            offset_lag.labels(partition=str(self._partition_id)).set(self._offset_tracker.pending_count)
+            offset_lag.labels(partition=str(self._partition_label)).set(self._offset_tracker.pending_count)
             await self._note_commit_due()
 
     async def _complete_group(self, window: Window) -> None:
@@ -2618,7 +2682,7 @@ class PartitionProcessor:
                 logger.error(
                     'group_notes_invalid',
                     category='handler',
-                    partition=self._partition_id,
+                    partition=self._partition_label,
                     offset=message.offset,
                     group_index=group.index,
                     keys=invalid,
@@ -2633,7 +2697,7 @@ class PartitionProcessor:
         bind_contextvars(hook='on_group_complete', offset=offset, window_id=window.window_id)
         hook_token = bind_hook_context(
             hook='on_group_complete',
-            partition=self._partition_id,
+            partition=self._partition_label,
             window_id=window.window_id,
             offset=offset,
             offsets=(offset,),
@@ -2650,7 +2714,7 @@ class PartitionProcessor:
             logger.error(
                 'on_group_complete_failed',
                 category='handler',
-                partition=self._partition_id,
+                partition=self._partition_label,
                 offset=offset,
                 group_index=group.index,
                 error=str(e),
@@ -2664,7 +2728,7 @@ class PartitionProcessor:
         handler_duration.labels(hook='on_group_complete').observe(duration)
         if self._recorder:
             self._recorder.record_group_complete(
-                partition=self._partition_id,
+                partition=self._partition_label,
                 offset=offset,
                 window_id=window.window_id,
                 group_index=group.index,
@@ -2695,7 +2759,7 @@ class PartitionProcessor:
         try:
             outcomes = await self._on_collect(
                 collect_result,
-                self._partition_id,
+                self._partition_label,
                 message_context=MessageContext(source_messages=[tracker.source_message], states=[tracker.dlq]),
             )
             self._count_skipped_deliveries(group, outcomes)
@@ -2704,7 +2768,7 @@ class PartitionProcessor:
             logger.error(
                 'on_group_complete_delivery_failed',
                 category='sink',
-                partition=self._partition_id,
+                partition=self._partition_label,
                 offset=offset,
                 group_index=group.index,
                 error=str(e),
@@ -2715,7 +2779,7 @@ class PartitionProcessor:
             logger.error(
                 'on_group_complete_sink_delivery_failed',
                 category='handler',
-                partition=self._partition_id,
+                partition=self._partition_label,
                 offset=offset,
                 group_index=group.index,
                 error=str(e),
@@ -2752,6 +2816,10 @@ class PartitionProcessor:
             return
         tracker.completion_fired = True
         tracker.finished_at = time.monotonic()
+        if tracker.part_error is not None:
+            # A part whose stream failed: no message hook, only its report.
+            await self._finish_part(tracker, None, delivery_failed=tracker.delivery_failed)
+            return
 
         group = MessageGroup(
             source_message=tracker.source_message,
@@ -2772,7 +2840,7 @@ class PartitionProcessor:
         # there is no single window this hook belongs to.
         hook_token = bind_hook_context(
             hook='on_message_complete',
-            partition=self._partition_id,
+            partition=self._partition_label,
             offset=tracker.source_message.offset,
             offsets=(tracker.source_message.offset,),
         )
@@ -2786,7 +2854,7 @@ class PartitionProcessor:
             logger.error(
                 'on_message_complete_failed',
                 category='handler',
-                partition=self._partition_id,
+                partition=self._partition_label,
                 offset=tracker.source_message.offset,
                 error=str(e),
                 exc_info=True,
@@ -2811,7 +2879,7 @@ class PartitionProcessor:
             # outcome of their own.
             replaced = max(0, tracker.scheduled_count - tracker.succeeded_count - tracker.failed_count)
             self._recorder.record_message_complete(
-                partition=self._partition_id,
+                partition=self._partition_label,
                 offset=tracker.source_message.offset,
                 duration=mc_duration,
                 task_count=tracker.scheduled_count,
@@ -2829,7 +2897,7 @@ class PartitionProcessor:
             try:
                 await self._on_collect(
                     on_complete_result,
-                    self._partition_id,
+                    self._partition_label,
                     message_context=MessageContext(
                         source_messages=[tracker.source_message],
                         states=[tracker.dlq],
@@ -2845,7 +2913,7 @@ class PartitionProcessor:
                 logger.error(
                     'on_message_complete_delivery_failed',
                     category='sink',
-                    partition=self._partition_id,
+                    partition=self._partition_label,
                     offset=tracker.source_message.offset,
                     error=str(e),
                 )
@@ -2860,12 +2928,17 @@ class PartitionProcessor:
                 logger.error(
                     'on_message_complete_sink_delivery_failed',
                     category='handler',
-                    partition=self._partition_id,
+                    partition=self._partition_label,
                     offset=tracker.source_message.offset,
                     error=str(e),
                     offset_action='stall' if self._on_dlq_failure == 'stall' else 'commit',
                     exc_info=True,
                 )
+
+        if self._part_mode is not None:
+            # A part: its data hook, then its report, and only then its offset.
+            await self._finish_part(tracker, group, delivery_failed=delivery_failed)
+            return
 
         # The hook has run, so the kept outcomes have no reader left. A stalled
         # tracker stays registered below; dropping its outcomes too keeps a
@@ -2885,11 +2958,237 @@ class PartitionProcessor:
         # advance the commit. Per-message commit granularity — a slow task
         # in a later message does not pin offsets of already-finished ones.
         self._offset_tracker.complete(tracker.source_message.offset)
-        offset_lag.labels(partition=str(self._partition_id)).set(self._offset_tracker.pending_count)
+        offset_lag.labels(partition=str(self._partition_label)).set(self._offset_tracker.pending_count)
         await self._note_commit_due()
 
         # Release tracker memory once its offset is committable.
         self._message_trackers.pop(tracker.source_message.offset, None)
+
+    # --- parts of a split job ---------------------------------------------
+    # Everything below runs only in a processor with ``part_mode``.
+
+    def _new_dlq_state(self) -> MessageDLQState:
+        """The DLQ state of a new message; a part keeps its DLQ outcome for its result and writes no record."""
+        return MessageDLQState(capture=self._part_mode is not None)
+
+    async def _accept_part(self, message: SourceMessage, part_mode: PartMode) -> bool:
+        """Accept one message of the parts topic; true when it goes on to ``arrange``.
+
+        A message without valid split headers, or of another consumer group,
+        is logged, counted and skipped: its offset completes. An accepted
+        part gets ``message.split`` and the request id of its original
+        message; the handler's ``request_id`` hook is not asked. A part that
+        cannot be parsed ends at once as a failed part, whatever
+        ``sources.kafka.on_parse_error`` says.
+        """
+        part = parse_part_headers(message.headers)
+        if part is None or part.group != part_mode.source_group:
+            await self._skip_invalid_part(message, reason='malformed' if part is None else 'foreign_group')
+            return False
+        message.split = part
+        message.request_id = part_request_id(message.headers) or make_request_id('req')
+        self._handler.deserialize_message(message)
+        if message.parse_error is None:
+            return True
+        error = cut_error(message.parse_error or 'unknown parse error')
+        self._report_failed_part(message, self._new_dlq_state(), error, started_at=time.monotonic())
+        return False
+
+    async def _skip_invalid_part(self, message: SourceMessage, *, reason: str) -> None:
+        """Count and log a message of the parts topic that is no part of this worker's group, and complete its offset."""
+        split_results_ignored.labels(reason=reason).inc()
+        suppressed = self._invalid_part_log.admit(reason)
+        if suppressed is not None:
+            logger.warning(
+                'split_part_invalid',
+                category='split',
+                partition=self._partition_label,
+                offset=message.offset,
+                reason=reason,
+                suppressed=suppressed,
+            )
+        self._offset_tracker.complete(message.offset)
+        await self._note_commit_due()
+
+    def _fail_parts_of_window(self, messages: list[SourceMessage], error: Exception) -> None:
+        """End every part of a window whose ``arrange`` raised as a failed part; the loop goes on."""
+        logger.error(
+            'split_part_arrange_failed',
+            category='split',
+            partition=self._partition_label,
+            offsets=[message.offset for message in messages],
+            error=str(error),
+            exc_info=error,
+        )
+        text = _error_text(error)
+        for message in messages:
+            tracker = self._message_trackers.pop(message.offset)
+            self._report_failed_part(message, tracker.dlq, text, started_at=tracker.started_at)
+
+    async def _end_part_of_failed_stream(self, tracker: MessageTracker, error: Exception) -> None:
+        """Mark a part whose stream failed; it ends as failed once the groups that started have ended."""
+        tracker.part_error = _error_text(error)
+        tracker.stream_open = False
+        if self._message_is_done(tracker):
+            await self._finalize_message_tracker(tracker)
+
+    def _report_failed_part(
+        self, message: SourceMessage, state: MessageDLQState, error: str, *, started_at: float
+    ) -> None:
+        """Report a part that never reached its tasks: a parse failure, or a raise of ``arrange``."""
+        result = self._part_result(
+            message,
+            counts=(0, 0, 0),
+            state=state,
+            error=error,
+            data=None,
+            data_error=None,
+            started_at=started_at,
+            finished_at=time.monotonic(),
+        )
+        self._spawn_part_report(message, result)
+
+    def _part_result(
+        self,
+        message: SourceMessage,
+        *,
+        counts: tuple[int, int, int],
+        state: MessageDLQState,
+        error: str | None,
+        data: Any,
+        data_error: str | None,
+        started_at: float,
+        finished_at: float,
+    ) -> PartResult:
+        """The result of the part ``message``; ``started_at`` and ``finished_at`` are loop times."""
+        part_mode, part = self._part_mode, message.split
+        assert part_mode is not None and part is not None
+        finished_epoch = time.time()
+        return build_part_result(
+            index=part.index,
+            worker=part_mode.worker,
+            tracker_counts=counts,
+            state=state,
+            error=error,
+            data=data,
+            data_error=data_error,
+            started_at=finished_epoch - max(0.0, finished_at - started_at),
+            finished_at=finished_epoch,
+        )
+
+    async def _finish_part(self, tracker: MessageTracker, group: MessageGroup | None, *, delivery_failed: bool) -> None:
+        """End a part after its message hook and delivery: the data hook, then the report of its result.
+
+        The kept outcomes are given back before the report, so a report that
+        waits for the results topic holds nothing of the pending budget. A
+        part with an unconfirmed delivery stalls as any message does. After a
+        drain that timed out nothing of the part was delivered any more, so
+        no result is reported and the offset stays pending.
+        """
+        message = tracker.source_message
+        reportable = not delivery_failed and not self._deliveries_suppressed
+        data, data_error = None, None
+        if group is not None and self._calls_part_data and reportable:
+            data, data_error = await self._call_part_data(group)
+        self._release_kept_bytes(tracker)
+        tracker.results.clear()
+        tracker.errors.clear()
+        if delivery_failed:
+            await self._stall_offset(message.offset)
+            return
+        if not reportable:
+            return
+        replaced = max(0, tracker.scheduled_count - tracker.succeeded_count - tracker.failed_count)
+        result = self._part_result(
+            message,
+            counts=(tracker.succeeded_count, tracker.failed_count, replaced),
+            state=tracker.dlq,
+            error=tracker.part_error,
+            data=data,
+            data_error=data_error,
+            started_at=tracker.started_at,
+            finished_at=tracker.finished_at,
+        )
+        self._spawn_part_report(message, result)
+
+    async def _call_part_data(self, group: MessageGroup) -> tuple[Any, str | None]:
+        """Call ``part_data`` with its hook context and time it; the data, or the reason it was dropped."""
+        part_mode = self._part_mode
+        assert part_mode is not None
+        offset = group.source_message.offset
+        bind_contextvars(hook='part_data', offset=offset)
+        hook_token = bind_hook_context(
+            hook='part_data', partition=self._partition_label, offset=offset, offsets=(offset,)
+        )
+        started = time.monotonic()
+        try:
+            with pipeline_hook():
+                data = await self._handler.part_data(group)
+        except Exception as error:
+            # The part still counts as finished; its result says why it has no data.
+            logger.error(
+                'part_data_failed',
+                category='handler',
+                partition=self._partition_label,
+                offset=offset,
+                error=str(error),
+                exc_info=True,
+            )
+            return None, part_data_raised(error)
+        finally:
+            unbind_contextvars('hook', 'offset')
+            clear_hook_context(hook_token)
+            handler_duration.labels(hook='part_data').observe(time.monotonic() - started)
+        return checked_part_data(data, part_mode.max_part_data)
+
+    def _spawn_part_report(self, message: SourceMessage, result: PartResult) -> None:
+        """Report ``result`` on a task of its own, so neither the loop nor a task run waits for the results topic."""
+        report = asyncio.create_task(self._report_part(message, result))
+        self._active_tasks.add(report)
+        report.add_done_callback(self._active_tasks.discard)
+
+    async def _report_part(self, message: SourceMessage, result: PartResult) -> None:
+        """Write the result of a part, count it, and only then complete the part's offset.
+
+        A stop ends a report that waits for the results topic: the offset
+        stays pending and leaves the drain, and the part runs again on the
+        next owner of its partition. A report that can never be written
+        stalls the offset.
+        """
+        part_mode = self._part_mode
+        assert part_mode is not None
+        offset = message.offset
+        bind_contextvars(partition=self._partition_label)
+        # This task's own context: no reset needed when it ends.
+        self._request_ids.bind([message.request_id])
+        try:
+            await part_mode.report(message, result)
+        except asyncio.CancelledError:
+            self._abandoned_offsets.add(offset)
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+            # The report gave up because the worker stops; this task goes on to its end.
+            return
+        except Exception as error:
+            logger.error(
+                'split_result_write_failed',
+                category='split',
+                partition=self._partition_label,
+                offset=offset,
+                part=result.index,
+                error=str(error),
+                error_type=type(error).__name__,
+                final=True,
+                exc_info=not isinstance(error, SplitProduceError),
+            )
+            await self._stall_offset(offset)
+            return
+        split_parts_processed.labels(outcome=result.outcome).inc()
+        self._offset_tracker.complete(offset)
+        offset_lag.labels(partition=str(self._partition_label)).set(self._offset_tracker.pending_count)
+        await self._note_commit_due()
+        self._message_trackers.pop(offset, None)
 
     async def _note_commit_due(self) -> None:
         """A watermark advance happened; commit now or shortly.
@@ -2940,7 +3239,7 @@ class PartitionProcessor:
             logger.warning(
                 'commit_flush_failed',
                 category='kafka',
-                partition=self._partition_id,
+                partition=self._partition_label,
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
@@ -2975,7 +3274,7 @@ class PartitionProcessor:
                     logger.warning(
                         'commit_failed',
                         category='kafka',
-                        partition=self._partition_id,
+                        partition=self._partition_label,
                         offset=committable,
                         error=str(e),
                     )

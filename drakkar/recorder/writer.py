@@ -188,13 +188,14 @@ class EventWriter:
         """Unsubscribe from the live event stream."""
         self._fanout.unsubscribe(sub)
 
-    def record_consumed(self, msg: SourceMessage) -> None:
+    def record_consumed(self, msg: SourceMessage, partition: int | None = None) -> None:
+        """Record one ``consumed`` row; ``partition`` is the number to show when it is not the message's own."""
         self._counters['consumed'] += 1
         self._record(
             {
                 'ts': time.time(),
                 'event': EventType.CONSUMED,
-                'partition': msg.partition,
+                'partition': msg.partition if partition is None else partition,
                 'offset': msg.offset,
             }
         )

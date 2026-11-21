@@ -640,6 +640,26 @@ class SinkManager:
                     return f'sink {sink_ref(key)} belongs to the {other_stage} stage of split'
         return None
 
+    async def capture_stage_error(self, message_context: MessageContext, *, sink: str | None, error: str) -> None:
+        """Keep a wrong-stage result of a part as the DLQ outcome of each of its source messages.
+
+        The outcome has stage ``sink`` and the text ``stage_error`` gave. It
+        is set under the message's lock, as a captured sink failure sets it,
+        so the first outcome of a message is the one kept; from then on the
+        message is on the DLQ and no later delivery of it starts.
+
+        Raises:
+            ValueError: a source message is not in capture mode.
+        """
+        if not message_context.is_captured:
+            raise ValueError('capture_stage_error needs source messages in capture mode')
+        for _, state in message_context.pairs():
+            async with state.lock:
+                if state.dlq_written or state.dlq_lost:
+                    continue
+                state.captured = PartDLQ(stage='sink', sink=sink, error=cut_error(error))
+                state.dlq_written = True
+
     def _group_payloads(self, result: CollectResult) -> dict[SinkKey, list[BaseModel]]:
         """The result's payloads grouped by sink, each group in payload order."""
         groups: dict[SinkKey, list[BaseModel]] = defaultdict(list)
