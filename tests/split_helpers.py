@@ -16,7 +16,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from confluent_kafka import OFFSET_BEGINNING, OFFSET_END, OFFSET_INVALID, KafkaError, TopicPartition
+from confluent_kafka import OFFSET_BEGINNING, OFFSET_END, OFFSET_INVALID, KafkaError, KafkaException, TopicPartition
 
 START_MS = 1_700_000_000_000
 IDLE_WAIT_SECONDS = 0.005
@@ -275,6 +275,11 @@ class FakeConsumerClient(FailureSwitches):
         self.closed = False
         self._positions: dict[tuple[str, int], int] = {}
         self.error_messages: deque[FakeMessage] = deque()
+        # With ``wait_for_records`` a ``consume`` with nothing to give waits up to its timeout, as the real
+        # client does, and returns the records that arrive meanwhile, also those of a partition assigned
+        # during the call. Without it an empty ``consume`` returns after a short pause.
+        self.wait_for_records = False
+        self.consumes_waiting = 0
 
     def _start_offset(self, tp: TopicPartition) -> int:
         """An explicit offset, else the committed offset of the group, else the earliest one."""
@@ -313,6 +318,24 @@ class FakeConsumerClient(FailureSwitches):
 
     async def consume(self, num_messages: int = 1, timeout: float = -1) -> list[FakeMessage]:
         self._check_open('consume')
+        messages = self._collect(num_messages)
+        if messages or not self.wait_for_records:
+            if not messages:
+                await asyncio.sleep(min(max(timeout, 0), IDLE_WAIT_SECONDS))
+            return messages
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(timeout, 0)
+        self.consumes_waiting += 1
+        try:
+            while not messages and loop.time() < deadline:
+                await asyncio.sleep(IDLE_WAIT_SECONDS)
+                messages = self._collect(num_messages)
+        finally:
+            self.consumes_waiting -= 1
+        return messages
+
+    def _collect(self, num_messages: int) -> list[FakeMessage]:
+        """Up to ``num_messages`` records from the current positions, moving the positions past them."""
         if self.error_messages:
             return [self.error_messages.popleft()]
         messages: list[FakeMessage] = []
@@ -331,9 +354,15 @@ class FakeConsumerClient(FailureSwitches):
                 self._positions[(topic, partition)] = records[-1].offset + 1
             if len(messages) >= num_messages:
                 break
-        if not messages:
-            await asyncio.sleep(min(max(timeout, 0), IDLE_WAIT_SECONDS))
         return messages
+
+    async def seek(self, partition: TopicPartition) -> None:
+        """Move the position of an assigned partition; an unassigned one is refused, as by the real client."""
+        self._check_open('seek')
+        key = (partition.topic, partition.partition)
+        if key not in self._positions:
+            raise KafkaException(KafkaError(KafkaError._STATE, 'Erroneous state'))
+        self._positions[key] = partition.offset
 
     async def commit(
         self, message: Any = None, offsets: list[TopicPartition] | None = None, asynchronous: bool = False

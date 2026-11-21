@@ -1,6 +1,7 @@
 """The job tracker: restore, live reading, events, positions, timeouts and release."""
 
 import asyncio
+import dataclasses
 from collections.abc import Callable
 
 import pytest
@@ -20,6 +21,7 @@ from drakkar.split.records import JobRef, closed_body, log_record, open_body, re
 from drakkar.split.table import JobState
 from drakkar.split.tracker import (
     CONSUMER_ERROR_PAUSE_SECONDS,
+    LOOP_RESTART_SECONDS,
     POSITION_COMMIT_SECONDS,
     TIMEOUT_CHECK_SECONDS,
     JobTracker,
@@ -104,12 +106,12 @@ class FakeSleep:
         self.waiters.append((seconds, future))
         await future
 
-    def waiting(self, seconds: float) -> bool:
-        return any(s == seconds and not f.done() for s, f in self.waiters)
+    def waiting(self, seconds: float, count: int = 1) -> bool:
+        return sum(1 for s, f in self.waiters if s == seconds and not f.done()) >= count
 
-    async def fire(self, seconds: float) -> None:
-        """Wake every sleeper of ``seconds`` and let the woken work run."""
-        await wait_until(lambda: self.waiting(seconds))
+    async def fire(self, seconds: float, count: int = 1) -> None:
+        """Wait for ``count`` sleepers of ``seconds``, wake every one of them, and let the woken work run."""
+        await wait_until(lambda: self.waiting(seconds, count))
         woken = [(s, f) for s, f in self.waiters if s == seconds]
         self.waiters = [(s, f) for s, f in self.waiters if s != seconds]
         for _seconds, future in woken:
@@ -144,6 +146,21 @@ class CountingConsumer(FakeConsumerClient):
         self.commits.append([(tp.partition, tp.offset) for tp in offsets or []])
 
 
+class GatedConsumer(CountingConsumer):
+    """Holds every ``consume`` until the test opens the gate, so a test can act between two batches."""
+
+    def __init__(self, log: FakeLog, *, group_id: str) -> None:
+        super().__init__(log, group_id=group_id)
+        self.gate: asyncio.Event | None = None
+        self.gated = 0
+
+    async def consume(self, num_messages=1, timeout=-1):
+        if self.gate is not None and not self.gate.is_set():
+            self.gated += 1
+            await self.gate.wait()
+        return await super().consume(num_messages=num_messages, timeout=timeout)
+
+
 class Harness:
     def __init__(self, *, job_timeout: int = 0, idle_timeout: int = 0) -> None:
         self.clock = FakeClock()
@@ -153,6 +170,7 @@ class Harness:
         self.consumers: list[CountingConsumer] = []
         self.configs: list[dict] = []
         self.tracker: JobTracker | None = None
+        self.consumer_class: type[CountingConsumer] = CountingConsumer
         self.listener = Listener(lambda: self.tracker)
         self.tracker = JobTracker(
             connection=KafkaConnectionConfig(brokers='broker:9092'),
@@ -170,7 +188,7 @@ class Harness:
 
     def _factory(self, config: dict) -> CountingConsumer:
         self.configs.append(config)
-        consumer = CountingConsumer(self.log, group_id=config['group.id'])
+        consumer = self.consumer_class(self.log, group_id=config['group.id'])
         self.consumers.append(consumer)
         return consumer
 
@@ -385,13 +403,26 @@ async def test_a_restore_that_fails_twice_then_works(harness):
     ) == 1
 
 
-async def test_a_consume_error_during_a_restore_starts_the_restore_again(harness):
-    harness.writer.open(10)
-    harness.consumer.fail_next('consume', KafkaException(KafkaError(KafkaError._TRANSPORT)), times=1)
-    follow = asyncio.create_task(harness.t.follow(PARTITION, committed_source_offset=None))
-    await harness.sleep.fire(CONSUMER_ERROR_PAUSE_SECONDS)
-    table = await asyncio.wait_for(follow, timeout=2)
-    assert [job.offset for job in table.open_jobs()] == [10]
+async def test_a_consume_error_during_a_restore_starts_the_restore_again():
+    h = Harness()
+    gate = asyncio.Event()
+    h.consumer_class = GatedConsumer
+    await h.t.start()
+    try:
+        h.consumer.gate = gate
+        h.writer.open(10)
+        follow = asyncio.create_task(h.t.follow(PARTITION, committed_source_offset=None))
+        await wait_until(lambda: (TOPIC, PARTITION) in h.consumer._positions and h.consumer.gated > 0)
+        h.consumer.fail_next('consume', KafkaException(KafkaError(KafkaError._TRANSPORT)))
+        gate.set()
+        # The restore backs off for 1 s; the read loop pauses for its own error pause.
+        await h.sleep.fire(1.0)
+        await h.sleep.fire(CONSUMER_ERROR_PAUSE_SECONDS)
+        table = await asyncio.wait_for(follow, timeout=2)
+        assert [job.offset for job in table.open_jobs()] == [10]
+        assert h.sleep.calls.count(CONSUMER_ERROR_PAUSE_SECONDS) == 1
+    finally:
+        await h.t.stop()
 
 
 async def test_release_during_a_failing_restore_cancels_follow_and_leaves_no_task(harness):
@@ -660,3 +691,304 @@ async def test_a_restoring_partition_is_left_out_of_commits_and_timeout_checks()
             await follow
     finally:
         await h.t.stop()
+
+
+async def test_records_of_an_assignment_that_lands_during_a_consume_are_read():
+    h = Harness()
+    await h.t.start()
+    try:
+        h.consumer.wait_for_records = True
+        h.writer.open(10)
+        h.writer.open(11)
+        await wait_until(lambda: h.consumer.consumes_waiting > 0)
+        # The consume in flight started before the assignment; it returns records of the new one.
+        table = await h.follow()
+        assert [job.offset for job in table.open_jobs()] == [10, 11]
+        h.writer.open(12)
+        await wait_until(lambda: h.t.table(PARTITION).job(12) is not None)
+    finally:
+        await h.t.stop()
+
+
+async def test_a_failed_seek_back_is_logged_and_tried_again():
+    h = Harness()
+    await h.t.start()
+    try:
+        h.consumer.wait_for_records = True
+        h.consumer.fail_next('seek', KafkaException(KafkaError(KafkaError._TRANSPORT)))
+        h.writer.open(10)
+        await wait_until(lambda: h.consumer.consumes_waiting > 0)
+        with capture_logs() as logs:
+            table = await h.follow()
+        assert [job.offset for job in table.open_jobs()] == [10]
+        assert 'split_tracker_seek_failed' in [entry['event'] for entry in logs]
+    finally:
+        await h.t.stop()
+
+
+async def test_an_error_while_handling_a_record_is_logged_and_reading_goes_on(harness, monkeypatch):
+    await harness.follow()
+    original = harness.t._apply_live
+    calls = []
+
+    def broken_once(*args):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError('broken record')
+        original(*args)
+
+    monkeypatch.setattr(harness.t, '_apply_live', broken_once)
+    with capture_logs() as logs:
+        harness.writer.open(40)
+        harness.writer.open(41)
+        harness.writer.done(41, 1)
+        harness.writer.result(41, 0)
+        await wait_until(lambda: harness.listener.events)
+    assert harness.listener.events == [('complete', PARTITION, 41, None)]
+    failed = [entry for entry in logs if entry['event'] == 'split_tracker_record_failed']
+    assert failed[0]['log_level'] == 'error' and failed[0]['offset'] == 0
+
+
+async def test_an_error_on_the_last_restore_record_still_ends_the_restore(harness, monkeypatch):
+    harness.writer.open(10)
+
+    def broken(*args):
+        raise RuntimeError('broken record')
+
+    monkeypatch.setattr(harness.t, '_apply', broken)
+    with capture_logs():
+        table = await harness.follow()
+    assert len(table) == 0
+
+
+async def test_a_committed_position_above_the_end_reads_from_the_start(harness):
+    harness.writer.open(10)
+    harness.log.commit(RESULTS_GROUP, TOPIC, PARTITION, 100)
+    with capture_logs() as logs:
+        table = await harness.follow()
+    assert [job.offset for job in table.open_jobs()] == [10]
+    reset = [entry for entry in logs if entry['event'] == 'split_restore_position_reset']
+    assert reset[0]['committed'] == 100 and reset[0]['low'] == 0 and reset[0]['high'] == 1
+    harness.writer.open(11)
+    await wait_until(lambda: table.job(11) is not None)
+
+
+class SlowUnassignConsumer(CountingConsumer):
+    """An unassign that takes a moment, so a later assignment can overtake it unless the tracker waits."""
+
+    async def incremental_unassign(self, partitions):
+        await asyncio.sleep(0.02)
+        await super().incremental_unassign(partitions)
+
+
+async def test_a_follow_after_a_cancelled_follow_waits_for_the_pending_unassign():
+    h = Harness()
+    h.consumer_class = SlowUnassignConsumer
+    await h.t.start()
+    try:
+        gate = asyncio.Event()
+        original = h.consumer.get_watermark_offsets
+
+        async def held_watermarks(partition, timeout=None, cached=False):
+            await gate.wait()
+            return await original(partition, timeout=timeout, cached=cached)
+
+        h.writer.open(10)
+        first = asyncio.create_task(h.t.follow(PARTITION, committed_source_offset=None))
+        h.consumer.get_watermark_offsets = held_watermarks
+        await wait_until(lambda: h.t.is_restoring(PARTITION))
+        # Let the first restore assign, then cancel it while its read is still waiting.
+        h.consumer.get_watermark_offsets = original
+        gate.set()
+        await wait_until(lambda: (TOPIC, PARTITION) in h.consumer._positions)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        table = await h.follow()
+        assert [job.offset for job in table.open_jobs()] == [10]
+        await asyncio.sleep(0.05)
+        assert (TOPIC, PARTITION) in h.consumer._positions
+    finally:
+        await h.t.stop()
+
+
+class OverstatedEndConsumer(CountingConsumer):
+    """Reports, once, an end above the last record, as a log that was cut after the read would."""
+
+    def __init__(self, log: FakeLog, *, group_id: str) -> None:
+        super().__init__(log, group_id=group_id)
+        self.overstate = 5
+
+    async def get_watermark_offsets(self, partition, timeout=None, cached=False):
+        low, high = await super().get_watermark_offsets(partition, timeout=timeout, cached=cached)
+        extra, self.overstate = self.overstate, 0
+        return low, high + extra
+
+
+async def test_a_restore_ends_when_the_end_of_the_partition_falls(monkeypatch):
+    monkeypatch.setattr('drakkar.split.tracker.RESTORE_END_CHECK_SECONDS', 0)
+    h = Harness()
+    h.consumer_class = OverstatedEndConsumer
+    await h.t.start()
+    try:
+        h.writer.open(10)
+        table = await h.follow()
+        assert [job.offset for job in table.open_jobs()] == [10]
+    finally:
+        await h.t.stop()
+
+
+async def test_a_failed_end_check_is_logged_and_the_restore_waits(monkeypatch):
+    monkeypatch.setattr('drakkar.split.tracker.RESTORE_END_CHECK_SECONDS', 0)
+    h = Harness()
+    h.consumer_class = OverstatedEndConsumer
+    await h.t.start()
+    try:
+        h.writer.open(10)
+        follow = asyncio.create_task(h.t.follow(PARTITION, committed_source_offset=None))
+        await wait_until(lambda: h.consumer.overstate == 0)
+        h.consumer.fail_next('get_watermark_offsets', KafkaException(KafkaError(KafkaError._TRANSPORT)), times=3)
+        with capture_logs() as logs:
+            table = await asyncio.wait_for(follow, timeout=2)
+        assert len(table) == 1
+        assert 'split_restore_end_check_failed' in [entry['event'] for entry in logs]
+    finally:
+        await h.t.stop()
+
+
+async def test_a_read_loop_that_fails_is_logged_and_started_again(harness, monkeypatch):
+    await harness.follow()
+    original = harness.t._read_once
+    calls = []
+
+    async def broken_once():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError('broken loop')
+        await original()
+
+    monkeypatch.setattr(harness.t, '_read_once', broken_once)
+    with capture_logs() as logs:
+        await harness.sleep.fire(LOOP_RESTART_SECONDS)
+    assert [entry['loop'] for entry in logs if entry['event'] == 'split_tracker_loop_failed'] == ['read']
+    harness.writer.open(40)
+    await wait_until(lambda: harness.t.table(PARTITION).job(40) is not None)
+
+
+async def test_a_task_that_ends_on_an_error_is_logged(harness):
+    async def broken():
+        raise RuntimeError('broken task')
+
+    with capture_logs() as logs:
+        task = harness.t._spawn(broken())
+        await asyncio.wait({task})
+    assert [entry['event'] for entry in logs] == ['split_tracker_task_failed']
+
+
+async def test_two_follows_of_one_partition_at_once_leave_one_restore(harness):
+    harness.writer.open(10)
+    loops = set(harness.t._tasks)
+    first = asyncio.create_task(harness.t.follow(PARTITION, committed_source_offset=None))
+    second = asyncio.create_task(harness.t.follow(PARTITION, committed_source_offset=None))
+    third = asyncio.create_task(harness.t.follow(PARTITION, committed_source_offset=None))
+    results = await asyncio.wait_for(asyncio.gather(first, second, third, return_exceptions=True), timeout=2)
+    tables = [result for result in results if not isinstance(result, BaseException)]
+    assert len(tables) == 1 and [job.offset for job in tables[0].open_jobs()] == [10]
+    assert sum(isinstance(result, asyncio.CancelledError) for result in results) == 2
+    await settle()
+    assert {task for task in harness.t._tasks if not task.done()} <= loops | set(harness.t._unassigning.values())
+
+
+class ErrorRow:
+    """A row of ``committed`` that carries an error, as the real client gives for a failed lookup."""
+
+    def __init__(self, error: KafkaError) -> None:
+        self.offset = -1001
+        self.error = error
+
+
+async def test_a_committed_row_with_an_error_is_a_failed_restore(harness):
+    original = harness.consumer.committed
+    calls = []
+
+    async def committed(partitions, timeout=None):
+        calls.append(1)
+        if len(calls) == 1:
+            return [ErrorRow(KafkaError(KafkaError._TIMED_OUT))]
+        return await original(partitions, timeout=timeout)
+
+    harness.consumer.committed = committed
+    harness.writer.open(10)
+    harness.writer.open(11)
+    harness.log.commit(RESULTS_GROUP, TOPIC, PARTITION, 1)
+    with capture_logs() as logs:
+        follow = asyncio.create_task(harness.t.follow(PARTITION, committed_source_offset=None))
+        await harness.sleep.fire(1.0)
+        table = await asyncio.wait_for(follow, timeout=2)
+    # The second attempt read the committed position; a row with an error was not taken as "none".
+    assert [job.offset for job in table.open_jobs()] == [11]
+    assert [entry['event'] for entry in logs].count('split_restore_failed') == 1
+
+
+class SlowCommitConsumer(CountingConsumer):
+    async def commit(self, message=None, offsets=None, asynchronous=False):
+        await asyncio.sleep(0.02)
+        await super().commit(message=message, offsets=offsets, asynchronous=asynchronous)
+
+
+async def test_position_commits_do_not_overlap():
+    h = Harness()
+    h.consumer_class = SlowCommitConsumer
+    await h.t.start()
+    try:
+        h.log.commit(RESULTS_GROUP, TOPIC, PARTITION, 0)
+        await h.follow()
+        h.log.append(TOPIC, PARTITION, key=b'x', value=b'not a record', headers=[])
+        await settle()
+        await asyncio.gather(h.t._commit_positions([PARTITION]), h.t._commit_positions([PARTITION]))
+        assert h.consumer.commits == [[(PARTITION, 1)]]
+    finally:
+        await h.t.stop()
+
+
+def snapshot(table) -> list[dict]:
+    jobs = [table.job(offset) for offset in range(0, 100) if table.job(offset) is not None]
+    return [dataclasses.asdict(job) for job in jobs]
+
+
+async def test_a_restart_restores_the_same_jobs_as_live_reading_built():
+    first = Harness()
+    await first.t.start()
+    w = first.writer
+    await first.follow()
+    w.open(10)  # retired below
+    w.closed(10)
+    w.open(20)
+    w.result(20, 0)
+    w.done(20, 3)
+    w.result(20, 0)  # a duplicate
+    w.open(30)
+    w.closed(30)  # closed, not retired
+    w.open(40, attempt_id=ATTEMPT_1)
+    w.result(40, 1)
+    w.open(40, attempt_id=ATTEMPT_2, attempt=2)
+    w.result(40, 0, attempt_id=ATTEMPT_1)  # an old attempt
+    w.result(40, 0, attempt_id=ATTEMPT_2)
+    last = w.done(40, 2, attempt_id=ATTEMPT_2)
+    await wait_until(lambda: first.t.table(PARTITION).job(40) is not None and first.t.table(PARTITION).job(40).parts)
+    first.t.note_source_commit(PARTITION, 15)
+    await wait_until(lambda: first.log.committed(RESULTS_GROUP, TOPIC, PARTITION) == 2)
+    live = snapshot(first.t.table(PARTITION))
+    await first.t.release(PARTITION)
+    await first.t.stop()
+    assert last == 13 and [job['offset'] for job in live] == [20, 30, 40]
+
+    second = Harness()
+    second.clock = first.clock
+    second.log = first.log
+    await second.t.start()
+    try:
+        restored = await second.follow(committed_source_offset=15)
+        assert snapshot(restored) == live
+    finally:
+        await second.t.stop()

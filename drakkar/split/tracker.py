@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, cast
 
 import structlog
-from confluent_kafka import TopicPartition
+from confluent_kafka import KafkaException, TopicPartition
 from confluent_kafka.aio import AIOConsumer
 
 from drakkar.config.connections import KafkaConnectionConfig
@@ -42,9 +42,12 @@ TIMEOUT_CHECK_SECONDS = 5
 BATCH_SIZE = 500
 POLL_TIMEOUT_SECONDS = 1.0
 QUERY_TIMEOUT_SECONDS = 5.0
-CONSUMER_ERROR_PAUSE_SECONDS = 1.0
+CONSUMER_ERROR_PAUSE_SECONDS = 0.5
+LOOP_RESTART_SECONDS = 3.0
 RESTORE_BACKOFF_FIRST_SECONDS = 1.0
 RESTORE_BACKOFF_MAX_SECONDS = 30.0
+# How often a restore that gets no record asks the broker for the end of its partition again.
+RESTORE_END_CHECK_SECONDS = 1.0
 # Kafka gives a record without a known time the timestamp -1.
 NO_TIMESTAMP = -1
 
@@ -75,11 +78,16 @@ class _Followed:
     started_at: float
     restoring: bool = True
     assigned: bool = False
-    # Batches of the read loop that started before the assignment may carry records of an older one.
+    assign_complete: bool = False
+    # A batch of the read loop that started before the assignment may carry records of an older
+    # assignment; its records are dropped, and the partition is moved back to ``next_offset``.
     first_batch: int = 0
+    reposition: bool = False
     next_offset: int = 0
     restore_end: int = 0
     records: int = 0
+    last_end_check: float = 0.0
+    end_check_task: asyncio.Task[None] | None = None
     restore_done: asyncio.Future[None] | None = None
     restore_task: asyncio.Task[JobTable] | None = None
     last_committed_position: int | None = None
@@ -136,9 +144,11 @@ class JobTracker:
         self._sleep = sleep
         self._consumer: Any = None
         self._followed: dict[int, _Followed] = {}
+        self._unassigning: dict[int, asyncio.Task[None]] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
         self._batch = 0
         self._commit_pending: set[int] = set()
+        self._commit_lock = asyncio.Lock()
         self._started = False
         self._stopped = False
         self._rate_limited = RateLimitedLog(time.monotonic)
@@ -151,9 +161,11 @@ class JobTracker:
             return
         self._consumer = self._consumer_factory(self._config)
         self._started = True
-        self._spawn(self._read_loop())
-        self._spawn(self._periodic(POSITION_COMMIT_SECONDS, self._commit_changed_positions))
-        self._spawn(self._periodic(TIMEOUT_CHECK_SECONDS, self._check_timeouts_async))
+        self._spawn(self._supervised('read', self._read_loop))
+        self._spawn(self._supervised('commit', lambda: self._periodic(POSITION_COMMIT_SECONDS, self._commit_changed)))
+        self._spawn(
+            self._supervised('timeout', lambda: self._periodic(TIMEOUT_CHECK_SECONDS, lambda: self._check_timeouts()))
+        )
 
     async def stop(self) -> None:
         """Stop every loop, end pending ``follow`` calls with a cancellation, and close the consumer."""
@@ -192,18 +204,21 @@ class JobTracker:
         """Assign results partition ``partition``, restore its job table, and return the table once it is ready.
 
         ``committed_source_offset`` is the committed offset of the source partition; jobs below it retire
-        at the end of the restore. A failed restore is tried again with a backoff of 1 to 30 seconds.
+        at the end of the restore. A failed restore is tried again with a backoff of 1 to 30 seconds. A
+        ``follow`` of a partition that is followed already replaces the earlier one, whose call then
+        raises ``asyncio.CancelledError``.
 
         Raises:
             asyncio.CancelledError: ``release(partition)`` or ``stop()`` was called first.
             RuntimeError: the tracker was not started.
         """
+        if not self._started and not self._stopped:
+            raise RuntimeError('the job tracker is not started')
+        # A release awaits, so another follow of the partition can start meanwhile; replace it too.
+        while partition in self._followed and not self._stopped:
+            await self.release(partition)
         if self._stopped:
             raise asyncio.CancelledError
-        if not self._started:
-            raise RuntimeError('the job tracker is not started')
-        if partition in self._followed:
-            await self.release(partition)
         state = _Followed(
             partition=partition,
             table=self._new_table(partition),
@@ -219,7 +234,7 @@ class JobTracker:
             # The caller gave up on the restore: the partition is dropped, as by a release.
             if self._followed.get(partition) is state:
                 self._forget(state)
-                self._spawn(self._unassign(state))
+                self._start_unassign(state)
             raise
 
     async def release(self, partition: int) -> None:
@@ -230,8 +245,7 @@ class JobTracker:
         self._forget(state)
         task = state.restore_task
         if task is not None and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            await asyncio.wait({task})
         await self._unassign(state)
 
     def note_source_commit(self, partition: int, offset: int) -> None:
@@ -268,9 +282,8 @@ class JobTracker:
         tp = TopicPartition(self._topic, state.partition)
         rows = await self._consumer.committed([tp], timeout=QUERY_TIMEOUT_SECONDS)
         low, high = await self._consumer.get_watermark_offsets(tp, timeout=QUERY_TIMEOUT_SECONDS)
-        committed = rows[0].offset if rows and rows[0].offset >= 0 else None
-        # A committed position below the low watermark points at records that expired.
-        position = low if committed is None else max(committed, low)
+        committed = self._committed_offset(rows)
+        position = self._start_position(state.partition, committed, low, high)
         state.last_committed_position = committed
         state.next_offset = position
         state.restore_end = high
@@ -284,22 +297,61 @@ class JobTracker:
             end=high,
             attempt=attempt,
         )
+        await self._wait_for_unassign(state.partition)
         state.first_batch = self._batch
         # Marked first, so a release or a retry unassigns also an assignment that a cancellation cut short.
         state.assigned = True
         await self._consumer.incremental_assign([TopicPartition(self._topic, state.partition, position)])
+        state.assign_complete = True
+        if state.reposition:
+            await self._seek_back(state)
         if position >= high:
             self._finish_restore(state)
         await state.restore_done
+
+    @staticmethod
+    def _committed_offset(rows: list[TopicPartition]) -> int | None:
+        """The committed offset of the one row ``committed`` gave; None when the group has none.
+
+        Raises:
+            KafkaException: the row carries an error, so the committed offset is not known.
+        """
+        row = rows[0] if rows else None
+        if row is None:
+            return None
+        if row.error is not None:
+            raise KafkaException(row.error)
+        return row.offset if row.offset >= 0 else None
+
+    def _start_position(self, partition: int, committed: int | None, low: int, high: int) -> int:
+        """Where a restore reads from: the committed position, kept inside the records the log holds."""
+        if committed is None:
+            return low
+        if committed > high:
+            # The topic was created again or cut: offsets above the end would skip every new record.
+            logger.warning(
+                'split_restore_position_reset',
+                category='split',
+                partition=partition,
+                committed=committed,
+                low=low,
+                high=high,
+            )
+            return low
+        # A committed position below the low watermark points at records that expired.
+        return max(committed, low)
 
     async def _reset_for_retry(self, state: _Followed) -> None:
         """Unassign a partition whose restore failed and start its table again from nothing."""
         await self._unassign(state)
         state.table = self._new_table(state.partition)
         state.restore_done = None
+        state.reposition = False
 
     def _finish_restore(self, state: _Followed) -> None:
         """End the restore: retire committed jobs, go live, and report the jobs that are complete."""
+        if not state.restoring:
+            return
         if state.committed_source is not None:
             state.table.retire_through(state.committed_source)
         state.restoring = False
@@ -329,72 +381,142 @@ class JobTracker:
             if state.restoring and done is not None and not done.done():
                 done.set_exception(exc)
 
-    def _log_restore_failure(self, partition: int, exc: BaseException, attempt: int) -> None:
-        suppressed = self._rate_limited.admit(f'restore:{partition}')
-        if suppressed is not None:
-            logger.warning(
-                'split_restore_failed',
-                category='split',
-                partition=partition,
-                error=describe_error(exc),
-                attempt=attempt,
-                suppressed=suppressed,
+    def _start_end_checks(self, seen: set[int]) -> None:
+        """Ask the broker for the end again for each restore that got no record in the last batch."""
+        now = time.monotonic()
+        for state in self._followed.values():
+            waiting = state.restoring and state.assign_complete and state.restore_done is not None
+            idle = state.partition not in seen and now - state.last_end_check >= RESTORE_END_CHECK_SECONDS
+            running = state.end_check_task is not None and not state.end_check_task.done()
+            if waiting and idle and not running:
+                state.last_end_check = now
+                state.end_check_task = self._spawn(self._check_restore_end(state))
+
+    async def _check_restore_end(self, state: _Followed) -> None:
+        """End a restore whose next offset reached the end of the partition as it is now.
+
+        The end read at the assignment can fall (the log was cut); then no record will ever reach it.
+        """
+        try:
+            _low, high = await self._consumer.get_watermark_offsets(
+                TopicPartition(self._topic, state.partition), timeout=QUERY_TIMEOUT_SECONDS
             )
+        except Exception as exc:
+            self._log_limited(
+                'warning',
+                f'end:{state.partition}',
+                'split_restore_end_check_failed',
+                partition=state.partition,
+                error=exc,
+            )
+            return
+        if self._followed.get(state.partition) is not state or not state.restoring:
+            return
+        state.restore_end = min(state.restore_end, high)
+        if state.next_offset >= state.restore_end:
+            self._finish_restore(state)
+
+    def _log_restore_failure(self, partition: int, exc: BaseException, attempt: int) -> None:
+        self._log_limited(
+            'warning', f'restore:{partition}', 'split_restore_failed', partition=partition, error=exc, attempt=attempt
+        )
 
     # --- the read loop ---
 
     async def _read_loop(self) -> None:
-        """Read the followed partitions and apply every record to its table; never ends on an error."""
+        """Read the followed partitions and apply every record to its table, batch after batch."""
         while True:
-            batch = self._batch
-            self._batch += 1
-            try:
-                messages = await self._consumer.consume(num_messages=BATCH_SIZE, timeout=POLL_TIMEOUT_SECONDS)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self._fail_restores(exc)
-                self._log_consumer_error(describe_error(exc))
-                await self._sleep(CONSUMER_ERROR_PAUSE_SECONDS)
-                continue
-            had_error = False
-            for message in messages:
-                if message.error():
-                    had_error = True
-                    self._log_consumer_error(str(message.error()))
-                    continue
-                self._handle_message(message, batch)
-            if had_error:
-                await self._sleep(CONSUMER_ERROR_PAUSE_SECONDS)
-            else:
-                await asyncio.sleep(0)
+            await self._read_once()
 
-    def _log_consumer_error(self, error: str) -> None:
-        suppressed = self._rate_limited.admit('consume')
-        if suppressed is not None:
-            logger.warning('split_tracker_consume_failed', category='split', error=error, suppressed=suppressed)
+    async def _read_once(self) -> None:
+        """One batch: consume, apply, move back what a batch across an assignment dropped, check idle restores."""
+        batch = self._batch
+        self._batch += 1
+        try:
+            messages = await self._consumer.consume(num_messages=BATCH_SIZE, timeout=POLL_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._fail_restores(exc)
+            self._log_limited('warning', 'consume', 'split_tracker_consume_failed', error=exc)
+            await self._sleep(CONSUMER_ERROR_PAUSE_SECONDS)
+            return
+        had_error = False
+        seen: set[int] = set()
+        for message in messages:
+            if message.error():
+                had_error = True
+                self._log_limited('warning', 'consume', 'split_tracker_consume_failed', error=message.error())
+                continue
+            seen.add(message.partition())
+            self._handle_message_safely(message, batch)
+        for state in list(self._followed.values()):
+            if state.reposition and state.assign_complete:
+                await self._seek_back(state)
+        self._start_end_checks(seen)
+        if had_error:
+            await self._sleep(CONSUMER_ERROR_PAUSE_SECONDS)
+        else:
+            await asyncio.sleep(0)
+
+    def _handle_message_safely(self, message: Any, batch: int) -> None:
+        """Handle one record; an unexpected error is logged and the next record is handled."""
+        try:
+            self._handle_message(message, batch)
+        except Exception as exc:
+            self._log_limited(
+                'error',
+                'record',
+                'split_tracker_record_failed',
+                partition=message.partition(),
+                offset=message.offset(),
+                error=exc,
+            )
 
     def _handle_message(self, message: Any, batch: int) -> None:
         """Apply one consumed record to the table of its partition, if the partition is still followed."""
         state = self._followed.get(message.partition())
-        if state is None or not state.assigned or batch < state.first_batch or message.topic() != self._topic:
+        if state is None or not state.assigned or message.topic() != self._topic:
             return
         offset = message.offset()
         if offset < state.next_offset:
             return
-        entry = parse_log_record(message.headers(), message.value())
+        if batch < state.first_batch:
+            # The record may belong to the new assignment, and the consumer has moved past it.
+            state.reposition = True
+            return
         state.next_offset = offset + 1
+        try:
+            self._apply_record(state, offset, message)
+        finally:
+            if state.restoring and state.next_offset >= state.restore_end:
+                self._finish_restore(state)
+
+    def _apply_record(self, state: _Followed, offset: int, message: Any) -> None:
+        entry = parse_log_record(message.headers(), message.value())
         if state.restoring:
             state.records += 1
             if entry is not None:
                 self._apply(state, entry, offset, message)
-            if state.next_offset >= state.restore_end:
-                self._finish_restore(state)
             return
         if entry is None:
             split_results_ignored.labels(reason=IgnoreReason.MALFORMED.value).inc()
             return
         self._apply_live(state, entry, offset, message)
+
+    async def _seek_back(self, state: _Followed) -> None:
+        """Move the partition back to ``next_offset``; records read again below it are skipped."""
+        if self._followed.get(state.partition) is not state or not state.assigned:
+            return
+        state.reposition = False
+        target = state.next_offset
+        try:
+            await self._consumer.seek(TopicPartition(self._topic, state.partition, target))
+        except Exception as exc:
+            state.reposition = True
+            self._log_limited(
+                'warning', f'seek:{state.partition}', 'split_tracker_seek_failed', partition=state.partition, error=exc
+            )
 
     def _apply(self, state: _Followed, entry: LogEntry, offset: int, message: Any) -> Applied:
         now_ms = int(self._clock() * MS_PER_SECOND)
@@ -439,15 +561,7 @@ class JobTracker:
         try:
             getattr(self._events, name)(*args)
         except Exception as exc:
-            suppressed = self._rate_limited.admit(f'listener:{name}')
-            if suppressed is not None:
-                logger.error(
-                    'split_tracker_listener_failed',
-                    category='split',
-                    listener=name,
-                    error=describe_error(exc),
-                    suppressed=suppressed,
-                )
+            self._log_limited('error', f'listener:{name}', 'split_tracker_listener_failed', listener=name, error=exc)
 
     # --- positions ---
 
@@ -465,47 +579,40 @@ class JobTracker:
         partitions, self._commit_pending = self._commit_pending, set()
         await self._commit_positions([p for p in partitions if p in self._followed])
 
-    async def _commit_changed_positions(self) -> None:
+    async def _commit_changed(self) -> None:
         await self._commit_positions(list(self._followed))
 
     async def _commit_positions(self, partitions: list[int]) -> None:
         """Commit the position of each live partition whose position differs from its last commit."""
-        planned: list[tuple[_Followed, int]] = []
-        for partition in sorted(partitions):
-            state = self._followed.get(partition)
-            if state is None or state.restoring:
-                continue
-            position = state.table.position(state.next_offset)
-            if position != state.last_committed_position:
-                planned.append((state, position))
-        if not planned:
-            return
-        offsets = [TopicPartition(self._topic, state.partition, position) for state, position in planned]
-        try:
-            await self._consumer.commit(offsets=offsets, asynchronous=False)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            suppressed = self._rate_limited.admit('commit')
-            if suppressed is not None:
-                logger.warning(
-                    'split_position_commit_failed',
-                    category='split',
-                    partitions=[state.partition for state, _ in planned],
-                    error=describe_error(exc),
-                    suppressed=suppressed,
+        async with self._commit_lock:
+            planned: list[tuple[_Followed, int]] = []
+            for partition in sorted(partitions):
+                state = self._followed.get(partition)
+                if state is None or state.restoring:
+                    continue
+                position = state.table.position(state.next_offset)
+                if position != state.last_committed_position:
+                    planned.append((state, position))
+            if not planned:
+                return
+            offsets = [TopicPartition(self._topic, state.partition, position) for state, position in planned]
+            try:
+                await self._consumer.commit(offsets=offsets, asynchronous=False)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                partitions_failed = [state.partition for state, _ in planned]
+                self._log_limited(
+                    'warning', 'commit', 'split_position_commit_failed', partitions=partitions_failed, error=exc
                 )
-            return
-        for state, position in planned:
-            if self._followed.get(state.partition) is state:
-                state.last_committed_position = position
+                return
+            for state, position in planned:
+                if self._followed.get(state.partition) is state:
+                    state.last_committed_position = position
 
     # --- timeouts ---
 
-    async def _check_timeouts_async(self) -> None:
-        self._check_timeouts()
-
-    def _check_timeouts(self) -> None:
+    async def _check_timeouts(self) -> None:
         """Send ``job_timed_out`` once per job, attempt and kind; set the job gauges from the live tables."""
         now_ms = int(self._clock() * MS_PER_SECOND)
         open_count = 0
@@ -537,6 +644,17 @@ class JobTracker:
 
     # --- helpers ---
 
+    async def _supervised(self, name: str, run: Callable[[], Awaitable[None]]) -> None:
+        """Run a loop of the tracker; when it ends on an error, log it and start it again after a pause."""
+        while True:
+            try:
+                await run()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error('split_tracker_loop_failed', category='split', loop=name, error=describe_error(exc))
+            await self._sleep(LOOP_RESTART_SECONDS)
+
     async def _periodic(self, seconds: float, work: Callable[[], Awaitable[None]]) -> None:
         """Run ``work`` every ``seconds``; an error is logged and the loop goes on."""
         while True:
@@ -548,21 +666,54 @@ class JobTracker:
             except Exception as exc:
                 logger.error('split_tracker_periodic_failed', category='split', error=describe_error(exc))
 
+    def _log_limited(self, level: str, key: str, event: str, *, error: object, **fields: Any) -> None:
+        """Log a line that can repeat, at most once per key and interval; ``error`` is an exception or a text."""
+        suppressed = self._rate_limited.admit(key)
+        if suppressed is None:
+            return
+        text = describe_error(error) if isinstance(error, BaseException) else str(error)
+        getattr(logger, level)(event, category='split', error=text, suppressed=suppressed, **fields)
+
     def _new_table(self, partition: int) -> JobTable:
         return JobTable(partition=partition, group=self._source_group)
 
     def _forget(self, state: _Followed) -> None:
-        """Drop all memory of a followed partition at once, so no later record of it sends an event."""
+        """Drop all memory of a followed partition at once, so no later record of it sends an event.
+
+        Its restore is cancelled, so no restore task stays waiting for a read loop that ignores it.
+        """
         if self._followed.get(state.partition) is state:
             del self._followed[state.partition]
         self._commit_pending.discard(state.partition)
+        for task in (state.restore_task, state.end_check_task):
+            if task is not None and not task.done() and task is not asyncio.current_task():
+                task.cancel()
         self._update_restoring_gauge()
+
+    def _start_unassign(self, state: _Followed) -> None:
+        """Unassign in a task of its own; the next ``follow`` of the partition waits for it."""
+        if not state.assigned:
+            return
+        task = self._spawn(self._unassign(state))
+        self._unassigning[state.partition] = task
+        task.add_done_callback(lambda done: self._drop_unassign(state.partition, done))
+
+    def _drop_unassign(self, partition: int, task: asyncio.Task[Any]) -> None:
+        if self._unassigning.get(partition) is task:
+            del self._unassigning[partition]
+
+    async def _wait_for_unassign(self, partition: int) -> None:
+        """Wait for an unassign of ``partition`` that still runs, so it cannot undo the next assignment."""
+        pending = self._unassigning.get(partition)
+        if pending is not None and not pending.done():
+            await asyncio.wait({pending})
 
     async def _unassign(self, state: _Followed) -> None:
         """Take the partition off the consumer; a failure is logged."""
         if not state.assigned:
             return
         state.assigned = False
+        state.assign_complete = False
         try:
             await self._consumer.incremental_unassign([TopicPartition(self._topic, state.partition)])
         except Exception as exc:
@@ -577,8 +728,16 @@ class JobTracker:
         split_restoring_partitions.set(sum(1 for state in self._followed.values() if state.restoring))
 
     def _spawn(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
-        """Start a task the tracker owns; ``stop`` cancels it."""
+        """Start a task the tracker owns; ``stop`` cancels it, and an error that ends it is logged."""
         task = asyncio.get_running_loop().create_task(coro)
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._task_done)
         return task
+
+    def _task_done(self, task: asyncio.Task[Any]) -> None:
+        self._tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error('split_tracker_task_failed', category='split', task=task.get_name(), error=describe_error(exc))
