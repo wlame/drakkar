@@ -95,11 +95,11 @@ async def test_a_job_whose_own_message_fails_to_parse_is_not_orphaned(policy):
 
     await worker.start(source_message(500, value=NOT_JSON), source_message(501))
     await wait_until(lambda: 501 in handler.split_calls)
-    await worker.caught_up()
+    # The stop waits for the tasks of the owner, so a closed record of an orphan would be written by now.
+    await worker.stop()
 
     assert 'orphaned' not in closed_outcomes(world)
     assert orphans_counted() == counted
-    await worker.stop()
 
 
 async def test_a_message_that_was_queued_before_the_owner_existed_is_not_orphaned():
@@ -131,10 +131,9 @@ async def test_a_message_that_a_stop_dropped_from_the_queue_is_not_orphaned_by_a
     # The source gave 500, and the message never reached ``begin``.
     owner.note_delivered([500])
     await owner.begin(source_message(502))
-    await worker.caught_up()
+    await worker.stop()
 
     assert 'orphaned' not in closed_outcomes(world)
-    await worker.stop()
 
 
 async def test_a_message_the_source_passed_is_still_orphaned_after_a_window_that_died():
