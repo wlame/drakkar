@@ -36,6 +36,8 @@ RETRY_FIRST_WAIT_SECONDS = 1.0
 RETRY_MAX_WAIT_SECONDS = 30.0
 # How often a wait or a write in flight asks whether the worker stops.
 STOP_CHECK_SECONDS = 0.1
+# How long a write in flight may still wait for its delivery report once a stop is signalled.
+STOP_GRACE_SECONDS = 0.5
 STOPPED_MESSAGE = 'the worker stops before the part result is acknowledged'
 
 ReportPart = Callable[[SourceMessage, PartResult], Awaitable[None]]
@@ -176,7 +178,12 @@ def _retrieve_outcome(future: asyncio.Future[None]) -> None:
 
 
 class ResultWriter:
-    """Writes the ``result`` record of a finished part and tries again until the record is acknowledged."""
+    """Writes the ``result`` record of a finished part and tries again until the record is acknowledged.
+
+    A stop of the worker (or of the part's partition) ends the retries, never
+    the first attempt: a part that finishes while its partition drains is
+    still reported, so it does not run again for nothing.
+    """
 
     def __init__(self, producer: SplitProducer, *, results_topic: str, stopping: Callable[[], bool]) -> None:
         self._producer = producer
@@ -188,7 +195,9 @@ class ResultWriter:
         """Publish the result of the part ``message`` to the results partition of its source partition.
 
         A failure that a retry can fix is counted, logged and tried again
-        after 1, 2, 4 ... 30 seconds, for as long as it takes.
+        after 1, 2, 4 ... 30 seconds, for as long as it takes. Once a stop is
+        signalled no wait and no further attempt follows, and an attempt in
+        flight gets ``STOP_GRACE_SECONDS`` to end.
 
         Raises:
             SplitProduceError: the record can never be delivered (``final`` is true).
@@ -200,7 +209,6 @@ class ResultWriter:
         record = log_record(_result_ref(part), 'result', result_body(result))
         wait = RETRY_FIRST_WAIT_SECONDS
         while True:
-            self._leave_if_stopping()
             try:
                 await self._attempt(record)
                 return
@@ -211,19 +219,21 @@ class ResultWriter:
             await self._wait(wait)
             wait = min(wait * 2, RETRY_MAX_WAIT_SECONDS)
 
-    def _leave_if_stopping(self) -> None:
-        if self._stopping():
-            raise asyncio.CancelledError(STOPPED_MESSAGE)
-
     async def _attempt(self, record: WireRecord) -> None:
-        """One write: wait for the delivery report, but not past a stop."""
+        """One write: wait for the delivery report, and after a stop only for ``STOP_GRACE_SECONDS`` more."""
         future = await self._producer.enqueue(self._results_topic, record)
+        stop_seen_at: float | None = None
         while True:
             done, _ = await asyncio.wait({future}, timeout=STOP_CHECK_SECONDS)
             if done:
                 future.result()
                 return
-            if self._stopping():
+            if not self._stopping():
+                continue
+            now = time.monotonic()
+            if stop_seen_at is None:
+                stop_seen_at = now
+            elif now - stop_seen_at >= STOP_GRACE_SECONDS:
                 # The record stays in the client queue and may still be written: a second result
                 # of the same part, after the part ran again, is ignored by the owner.
                 future.add_done_callback(_retrieve_outcome)
@@ -233,7 +243,8 @@ class ResultWriter:
         """Sleep ``seconds`` in short steps; a stop ends the wait at once."""
         deadline = time.monotonic() + seconds
         while True:
-            self._leave_if_stopping()
+            if self._stopping():
+                raise asyncio.CancelledError(STOPPED_MESSAGE)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return

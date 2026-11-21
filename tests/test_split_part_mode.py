@@ -761,6 +761,76 @@ async def test_a_stop_while_the_report_waits_in_its_backoff_ends_the_drain_with_
     assert not [line for line in logs if line['event'] == 'zombie_tasks_cancelled']
 
 
+class RecordingProducer:
+    """A producer that confirms each record at once, or never."""
+
+    def __init__(self, *, confirms: bool = True) -> None:
+        self.confirms = confirms
+        self.records: list[Any] = []
+
+    async def enqueue(self, topic: str, record: Any) -> asyncio.Future[None]:
+        self.records.append(record)
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        if self.confirms:
+            future.set_result(None)
+        return future
+
+
+def draining_pipeline(producer: RecordingProducer, gate: asyncio.Event) -> PartPipeline:
+    """A pipeline whose one task waits for ``gate``, with a real writer that reads the processor's stop flag."""
+    holder: dict[str, PartitionProcessor] = {}
+    writer = ResultWriter(
+        producer,  # ty: ignore[invalid-argument-type]
+        results_topic=RESULTS_TOPIC,
+        stopping=lambda: holder['processor'].is_stopping,
+    )
+    pipeline = PartPipeline(one_task_handler(), ScriptedPool(gates={'t-a': gate}), report=writer.write)
+    holder['processor'] = pipeline.processor
+    return pipeline
+
+
+async def test_a_part_that_finishes_while_its_partition_drains_is_still_reported():
+    gate = asyncio.Event()
+    producer = RecordingProducer()
+    pipeline = draining_pipeline(producer, gate)
+    processor = pipeline.processor
+
+    pipeline.start()
+    await wait_for(lambda: processor.inflight_count == 1)
+    processor.signal_stop()
+    drain = asyncio.create_task(processor.drain())
+    gate.set()
+    await asyncio.wait_for(drain, timeout=2.0)
+    await processor.stop()
+
+    # The stop cut no first attempt: the result was written and the offset committed.
+    assert len(producer.records) == 1
+    assert pipeline.pending() == 0
+    assert pipeline.commits == [(PARTS_PARTITION, 1)]
+
+
+async def test_a_write_with_no_delivery_report_holds_a_drain_only_for_the_stop_grace(monkeypatch):
+    monkeypatch.setattr(partmode, 'STOP_CHECK_SECONDS', 0.005)
+    monkeypatch.setattr(partmode, 'STOP_GRACE_SECONDS', 0.05)
+    gate = asyncio.Event()
+    producer = RecordingProducer(confirms=False)
+    pipeline = draining_pipeline(producer, gate)
+    processor = pipeline.processor
+
+    pipeline.start()
+    await wait_for(lambda: processor.inflight_count == 1)
+    processor.signal_stop()
+    drain = asyncio.create_task(processor.drain())
+    gate.set()
+    await asyncio.wait_for(drain, timeout=2.0)
+    await processor.stop()
+
+    assert len(producer.records) == 1
+    assert pipeline.pending() == 1
+    assert pipeline.commits == []
+    assert pipeline.stalls == []
+
+
 async def test_a_report_that_can_never_be_written_stalls_the_offset():
     pipeline = PartPipeline(one_task_handler())
     pipeline.reports.error = SplitProduceError('Broker: Unknown topic or partition', final=True)
@@ -859,6 +929,7 @@ def fast_retries(monkeypatch) -> None:
     monkeypatch.setattr(partmode, 'RETRY_FIRST_WAIT_SECONDS', 0.01)
     monkeypatch.setattr(partmode, 'RETRY_MAX_WAIT_SECONDS', 0.02)
     monkeypatch.setattr(partmode, 'STOP_CHECK_SECONDS', 0.005)
+    monkeypatch.setattr(partmode, 'STOP_GRACE_SECONDS', 0.02)
 
 
 @pytest.fixture
@@ -943,12 +1014,23 @@ async def test_the_writer_raises_a_final_error_at_once(producer, client, log):
     assert log.records(RESULTS_TOPIC, SOURCE_PARTITION) == []
 
 
-async def test_the_writer_makes_no_attempt_once_the_worker_stops(producer, log):
+async def test_a_write_that_starts_while_the_worker_stops_still_makes_its_attempt(producer, log):
     writer = ResultWriter(producer, results_topic=RESULTS_TOPIC, stopping=lambda: True)
 
-    with pytest.raises(asyncio.CancelledError):
-        await writer.write(part_with_split(), ok_result())
+    await asyncio.wait_for(writer.write(part_with_split(), ok_result()), 2)
 
+    assert len(log.records(RESULTS_TOPIC, SOURCE_PARTITION)) == 1
+
+
+async def test_a_failed_attempt_is_not_tried_again_once_the_worker_stops(producer, client, log):
+    writer = ResultWriter(producer, results_topic=RESULTS_TOPIC, stopping=lambda: True)
+    client.fail_next_deliveries(KafkaError(KafkaError._MSG_TIMED_OUT))
+
+    # No backoff wait comes first: the write ends well inside the first wait of one second.
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(writer.write(part_with_split(), ok_result()), 0.5)
+
+    assert client.produced == 1
     assert log.records(RESULTS_TOPIC, SOURCE_PARTITION) == []
 
 
