@@ -3146,6 +3146,16 @@ class PartitionProcessor:
         report = asyncio.create_task(self._report_part(message, result))
         self._active_tasks.add(report)
         report.add_done_callback(self._active_tasks.discard)
+        report.add_done_callback(functools.partial(self._note_cancelled_report, message.offset))
+
+    def _note_cancelled_report(self, offset: int, report: asyncio.Task) -> None:
+        """Take the offset of a cancelled report out of the drain, also when the report never started.
+
+        The offset stays pending: the result may not be written, so the part
+        runs again on the next owner of its partition.
+        """
+        if report.cancelled() and offset not in self._stalled_offsets:
+            self._abandoned_offsets.add(offset)
 
     async def _report_part(self, message: SourceMessage, result: PartResult) -> None:
         """Write the result of a part, count it, and only then complete the part's offset.
@@ -3164,11 +3174,12 @@ class PartitionProcessor:
         try:
             await part_mode.report(message, result)
         except asyncio.CancelledError:
-            self._abandoned_offsets.add(offset)
             current = asyncio.current_task()
             if current is not None and current.cancelling():
+                # This task is cancelled: its done callback takes the offset out of the drain.
                 raise
             # The report gave up because the worker stops; this task goes on to its end.
+            self._abandoned_offsets.add(offset)
             return
         except Exception as error:
             logger.error(

@@ -698,9 +698,25 @@ async def test_what_the_processor_shows_uses_the_shown_partition_number():
 
 
 async def test_a_processor_without_part_mode_treats_a_part_as_an_ordinary_message():
-    reports = Reports()
-    handler = one_task_handler()
-    processor = PartitionProcessor(partition_id=0, handler=handler, executor_pool=ScriptedPool(), window_size=10)
+    hook_calls: list[int] = []
+    contexts: list[MessageContext | None] = []
+
+    class Handler(FanOutHandler):
+        def request_id(self, msg):
+            hook_calls.append(msg.offset)
+            return 'from-the-hook'
+
+    async def on_collect(result, partition_id, message_context=None):
+        contexts.append(message_context)
+        return {}
+
+    processor = PartitionProcessor(
+        partition_id=0,
+        handler=Handler(['t-a'], {'t-a': postgres_result()}),
+        executor_pool=ScriptedPool(),
+        window_size=10,
+        on_collect=on_collect,
+    )
     message = part_message()
 
     processor.enqueue(message)
@@ -708,9 +724,30 @@ async def test_a_processor_without_part_mode_treats_a_part_as_an_ordinary_messag
     await wait_for(lambda: processor.queue_size == 0 and not processor.offset_tracker.has_pending())
     await processor.stop()
 
-    assert reports.calls == []
+    # The split headers mean nothing here: the hook names the request and no DLQ outcome is captured.
     assert message.split is None
+    assert (hook_calls, message.request_id) == ([0], 'from-the-hook')
+    [context] = contexts
+    assert context is not None and not context.is_captured
     assert processor.partition_label == processor.partition_id == 0
+
+
+async def test_a_raise_of_arrange_without_part_mode_still_restarts_the_partition_loop():
+    class Handler(BaseDrakkarHandler):
+        async def arrange(self, messages, pending):
+            raise RuntimeError('cannot arrange')
+
+    processor = PartitionProcessor(partition_id=0, handler=Handler(), executor_pool=ScriptedPool(), window_size=10)
+
+    with capture_logs() as logs:
+        processor.enqueue(part_message(offset=0))
+        processor.start()
+        await wait_for(lambda: any(line['event'] == 'partition_processor_restarting' for line in logs))
+        await processor.stop(timeout=0.2)
+
+    # The offset of the crashed window stays pending, as before.
+    assert processor.offset_tracker.pending_count == 1
+    assert not [line for line in logs if line['event'] == 'split_part_arrange_failed']
 
 
 # --- the report: a stop, a final error, an unconfirmed delivery ---
@@ -880,6 +917,23 @@ async def test_a_report_cut_by_the_drain_timeout_leaves_the_offset_pending():
     assert cancelled == 1
     assert pipeline.pending() == 1
     assert pipeline.stalls == []
+
+
+async def test_a_report_cancelled_before_it_starts_leaves_the_drain():
+    pipeline = PartPipeline(one_task_handler())
+    processor = pipeline.processor
+    message = part_with_split()
+    processor.offset_tracker.register(message.offset)
+
+    processor._spawn_part_report(message, ok_result())
+    [report] = processor._active_tasks
+    report.cancel()
+    await asyncio.gather(report, return_exceptions=True)
+
+    # The report never ran, so nothing was written: the offset stays pending and no drain waits for it.
+    assert pipeline.reports.calls == []
+    assert pipeline.pending() == 1
+    assert not processor._has_drainable_pending()
 
 
 async def test_a_part_that_ends_after_the_drain_timed_out_is_not_reported():
