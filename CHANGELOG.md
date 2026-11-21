@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The split metrics (`drakkar_split_*`) and their entries, and the entries of the `split` keys, in the agent registry
 - The split job table (`drakkar.split.table`): it reads the records of the results log in order, counts the part results of each job, knows the current attempt, and gives the timed-out jobs and the offset a restart reads from. Nothing uses it yet.
 - The split producer, the start check of the two split topics and the reader of the part results of one job (`drakkar.split.producer`, `topics` and `reader`). A topic retention that cannot be read gives a warning text, not an error. Nothing uses them yet.
+- The split job tracker (`drakkar.split.tracker`): one consumer without group membership follows the results log of each owned source partition. It restores the job table after an assignment, then reads live, commits its positions, and reports jobs that are complete, timed out or opened again by another worker. Nothing uses it yet.
 
 ## [3.4.0] - 2026-11-20
 
