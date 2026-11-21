@@ -1017,8 +1017,9 @@ The split producer and the reader:
 number of the part). A task of a local message has `split_part=local`. The
 Trace page finds all the tasks of one job with the label search
 `split_job=<partition>:<offset>`.
-Only a worker with `split.enabled: true` stamps these labels; a worker with the
-feature off stamps neither.
+Only a worker that runs split (`split.enabled: true` and a handler that
+defines `split`) stamps these labels. A task built from several source
+messages takes the labels of the first one.
 
 **PromQL examples.**
 

@@ -157,3 +157,20 @@ def test_card_features_name_the_split_topics_only_with_a_runtime():
     app._split = SimpleNamespace(parts_topic='p', results_topic='r')  # ty: ignore[invalid-assignment]
 
     assert app._lifecycle._card_features()['split'] == {'parts_topic': 'p', 'results_topic': 'r'}
+
+
+def test_task_of_several_messages_takes_the_labels_of_the_first():
+    pipeline = PartPipeline(one_task_handler())
+    proc = pipeline.processor
+    proc._owner = object()  # ty: ignore[invalid-assignment]
+    first = SourceMessage(topic='requests', partition=2, offset=40, value=b'{}', timestamp=0)
+    second = SourceMessage(topic='requests', partition=2, offset=41, value=b'{}', timestamp=0)
+    proc._message_trackers[first.offset] = _tracker_of(first)
+    proc._message_trackers[second.offset] = _tracker_of(second)
+    task = _task()
+    task.source_offsets = [first.offset, second.offset]
+
+    proc._stamp_request_ids([task])
+
+    assert task.labels[SPLIT_JOB_LABEL] == '2:40'
+    assert task.labels[SPLIT_PART_LABEL] == SPLIT_PART_LOCAL
