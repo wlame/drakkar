@@ -1298,3 +1298,26 @@ async def test_a_timeout_that_comes_with_the_last_acknowledgement_of_a_split_sti
     assert [job.timed_out for job in handler.timeouts] == ['job']
     assert world.closed()[0]['outcome'] == 'timeout'
     await worker.stop()
+
+
+async def test_a_failed_split_that_waits_for_its_closed_record_holds_no_reservation():
+    world = World()
+    handler = SplittingHandler({500: [RuntimeError('boom')]}, answer=None)
+    budget = PendingBudget(max_tasks=100, max_bytes=1_000_000)
+    budget.shape.note_window(1, 2, 10)
+    worker = OwnerWorker(world, handler, budget=budget)
+    worker.processor._windows_seen = partition_module.WARM_UP_WINDOWS
+    # The closed record of the failed split gets no delivery report for a while.
+    worker.client.hold_deliveries = True
+    await worker.start(source_message(500), source_message(501))
+    await wait_until(lambda: worker.client.produced == 1)
+    await asyncio.sleep(0.02)
+
+    assert (budget.free_tasks, budget.free_bytes) == (100, 1_000_000)
+    assert handler.jobs == []
+    worker.client.release_deliveries()
+    # The local message behind it runs on a reservation of its own.
+    await wait_until(lambda: worker.committed == 502)
+    assert [job.source_message.offset for job in handler.jobs] == [501]
+    assert (budget.free_tasks, budget.free_bytes) == (100, 1_000_000)
+    await worker.stop()

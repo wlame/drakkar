@@ -1429,12 +1429,14 @@ class PartitionProcessor:
         return self._deliveries_suppressed
 
     def release_window_reservation(self) -> None:
-        """Give back what the window being accepted reserved: one of its messages became a job.
+        """Give back what the window being accepted reserved: one of its messages is no local message.
 
         A job has no task on this worker, and its split can take minutes; a
-        reservation held that long would keep every other partition loop
-        waiting for room. A stream handler reserves nothing before its first
-        pull, so there is nothing to give back.
+        failed split and an orphaned job wait for their records to be
+        written. A reservation held that long would keep every other
+        partition loop waiting for room. The local messages of the window
+        reserve again before ``arrange``. A stream handler reserves nothing
+        before its first pull, so there is nothing to give back.
         """
         if self._stream_mode or self._window_reservation_released:
             return

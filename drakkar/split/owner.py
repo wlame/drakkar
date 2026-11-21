@@ -107,7 +107,7 @@ class OwnerHost(Protocol):
         ...
 
     def release_window_reservation(self) -> None:
-        """Give back what the window reserved in the pending budget: a job has no task on this worker."""
+        """Give back what the window reserved in the pending budget: the message has no task on this worker."""
         ...
 
     def hold_job_offset(self, offset: int) -> None:
@@ -458,6 +458,8 @@ class SplitOwner:
             job = self._table.job(orphan)
             if job is None or job.closed is not None:
                 continue
+            # The write below can wait for the results topic; the window must not hold its room meanwhile.
+            self._host.release_window_reservation()
             split_jobs.labels(outcome='orphaned').inc()
             logger.warning(
                 'split_job_orphaned',
@@ -480,6 +482,7 @@ class SplitOwner:
         """End a job whose split did not finish in ``split.max_attempts`` attempts: one DLQ record, then ``closed``."""
         owned = _OwnedJob(message=message, ref=self._ref_of(job), opened_at=job.opened_at_ms / MS_PER_SECOND)
         error = f'split did not finish in {spent} attempts'
+        self._host.release_window_reservation()
         logger.error(
             'split_failed',
             category='split',
@@ -883,6 +886,8 @@ class SplitOwner:
     async def _fail_split(self, split: _Split, restored: JobState | None, failure: _SplitFailed) -> BeginOutcome:
         """End a job whose split failed: close the generator, one DLQ record with stage ``split``, then ``closed``."""
         owned = split.owned
+        # The writes below can wait for a topic; the window must not hold its room meanwhile.
+        self._host.release_window_reservation()
         await self._close_stream(split)
         self._drop_in_flight(split)
         self._jobs.pop(owned.message.offset, None)
