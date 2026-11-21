@@ -91,7 +91,7 @@ def test_job_id_shows_partition_offset_attempt():
 
 
 class Summary(BaseModel):
-    matches: int
+    items_done: int
 
 
 def test_result_round_trips_through_its_body():
@@ -102,14 +102,14 @@ def test_result_round_trips_through_its_body():
         tasks_succeeded=2,
         deliveries={'kafka/out': SinkCounts(delivered=1)},
         dlq=PartDLQ(stage='execute', error='x', task_id='t'),
-        data=Summary(matches=3),
+        data=Summary(items_done=3),
         duration_seconds=0.5,
         finished_at=10.0,
     )
     body = json.loads(json.dumps(result_body(result)))
     assert body['part'] == 4 and 'index' not in body
     restored = part_result_from_body(body)
-    assert restored == result.model_copy(update={'data': {'matches': 3}})
+    assert restored == result.model_copy(update={'data': {'items_done': 3}})
 
 
 def test_result_without_data_has_null_data():
