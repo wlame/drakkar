@@ -32,9 +32,12 @@ from drakkar.metrics import (
     recorder_postgres_dropped_rows,
     runtime_stalls,
     sink_dlq_messages,
+    split_result_write_failures,
 )
 from drakkar.recorder.queries import read_memory
 from drakkar.sources.parts import PartsSource
+from drakkar.split.table import MS_PER_SECOND
+from drakkar.split.view import job_deadline
 from drakkar.uiserver.databases_status import recorder_block
 from drakkar.uiserver.server import dispatch_bounded
 
@@ -45,7 +48,9 @@ if TYPE_CHECKING:
 
     from drakkar.app import DrakkarApp
     from drakkar.config import DrakkarConfig
+    from drakkar.config.split import SplitConfig
     from drakkar.detach import DetachState
+    from drakkar.split.runtime import SplitRuntime
 
 STATE_ENDPOINT = '/api/v1/agent/state'
 MAX_RECENT_FAILURES = 20
@@ -59,7 +64,7 @@ PAUSED_BY_DEATH = 'death'
 
 # The parts read on the main loop; the others are read where the request runs.
 # A loop part is ``None`` when the main loop did not answer in time.
-LOOP_PARTS = frozenset({'budget', 'partitions', 'sinks', 'recent_failures'})
+LOOP_PARTS = frozenset({'budget', 'partitions', 'sinks', 'split', 'recent_failures'})
 
 # The bound of the compact JSON text of the ``args`` of one failure.
 ARGS_JSON_BYTES = 2048
@@ -272,6 +277,78 @@ def detach_part(state: DetachState) -> dict[str, Any]:
     }
 
 
+# --- split --------------------------------------------------------------
+
+# A job is near its timeout when less than this share of its full timeout, or
+# less than this many seconds, is left (whichever is larger).
+NEAR_TIMEOUT_SHARE = 0.1
+NEAR_TIMEOUT_MIN_SECONDS = 300.0
+
+
+def _near_timeout_threshold(timeout_seconds: float) -> float:
+    return max(NEAR_TIMEOUT_SHARE * timeout_seconds, NEAR_TIMEOUT_MIN_SECONDS)
+
+
+def split_part(
+    runtime: SplitRuntime | None,
+    settings: SplitConfig | None,
+    *,
+    now_ms: int,
+    now_s: float,
+    result_write_failures: int,
+) -> dict[str, Any]:
+    """The ``split`` part; must run on the main loop, which owns the job tables.
+
+    With split off it is ``enabled`` false with zeros and an empty list.
+    ``nearest_timeout_seconds_left`` and ``nearest_timeout_seconds`` describe
+    the one open job that is closest to its near-timeout threshold (the job
+    with the smallest time left minus its threshold): the time left until it
+    times out, and the full timeout that applies to it. Both are ``null``
+    when no open job has a timeout. ``seconds_left`` can be negative for a job
+    that is already past its deadline.
+    """
+    part: dict[str, Any] = {
+        'enabled': runtime is not None and settings is not None,
+        'open_jobs': 0,
+        'oldest_job_age_seconds': 0,
+        'nearest_timeout_seconds_left': None,
+        'nearest_timeout_seconds': None,
+        'restoring_partitions': [],
+        'result_write_failures_total': result_write_failures if runtime is not None else 0,
+    }
+    if runtime is None or settings is None:
+        return part
+    oldest_age_ms = 0
+    nearest: tuple[float, float, float] | None = None  # (margin, seconds left, timeout)
+    for followed in runtime.tracker.followed():
+        if followed.restoring:
+            part['restoring_partitions'].append(
+                {
+                    'partition': followed.partition,
+                    'seconds': json_number(round(max(now_s - followed.state_since, 0.0), 3)),
+                }
+            )
+        if followed.table is None:
+            continue
+        for job in followed.table.open_jobs():
+            part['open_jobs'] += 1
+            oldest_age_ms = max(oldest_age_ms, now_ms - job.opened_at_ms)
+            deadline = job_deadline(job, job_timeout=settings.job_timeout, idle_timeout=settings.idle_timeout)
+            if deadline is None:
+                continue
+            due_ms, kind = deadline
+            timeout = settings.job_timeout if kind == 'job' else settings.idle_timeout
+            left = (due_ms - now_ms) / MS_PER_SECOND
+            margin = left - _near_timeout_threshold(timeout)
+            if nearest is None or margin < nearest[0]:
+                nearest = (margin, left, timeout)
+    part['oldest_job_age_seconds'] = json_number(round(max(oldest_age_ms, 0) / MS_PER_SECOND, 3))
+    if nearest is not None:
+        part['nearest_timeout_seconds_left'] = json_number(round(nearest[1], 3))
+        part['nearest_timeout_seconds'] = nearest[2]
+    return part
+
+
 # --- recent failures ----------------------------------------------------
 
 
@@ -412,6 +489,15 @@ async def _loop_parts(app: DrakkarApp, parts: frozenset[str], include_payloads: 
         answer['partitions'] = rows
     if 'sinks' in parts:
         answer['sinks'] = sinks_part(app.sink_manager, now=time.time())
+    if 'split' in parts:
+        runtime = app._split
+        answer['split'] = split_part(
+            runtime,
+            app._config.split if runtime is not None else None,
+            now_ms=int(time.time() * MS_PER_SECOND),
+            now_s=time.monotonic(),
+            result_write_failures=int(split_result_write_failures._value.get()),
+        )
     if 'recent_failures' in parts:
         answer['recent_failures'] = await read_recent_failures(app._recorder, include_payloads=include_payloads)
     return answer

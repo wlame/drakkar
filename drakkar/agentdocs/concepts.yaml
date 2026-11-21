@@ -391,6 +391,26 @@
     - route:POST /api/v1/debug/detach
     - route:POST /api/v1/debug/attach
 
+- key: split
+  summary: With split on, one large source message becomes parts that every worker of the consumer group runs, and the owner of the source partition aggregates the part results before the source offset commits.
+  body: |-
+    A handler's `split(message)` turns one source message into parts. The parts go through an internal parts topic to every worker of the group; each worker runs them as tasks. The results go to an internal results log. The worker that owns the source partition follows the log with a job tracker, calls `aggregate(job)` when every part has a result, delivers the aggregate sinks, and writes a `closed` record. Only then does the source offset commit.
+
+    The state of a job is the uncommitted source offset plus the results log, so any owner rebuilds it after a restart. While a partition rebuilds its jobs it is `restoring`, and the offset of that partition does not commit. A job ends by timeout (`split.job_timeout`, or `split.idle_timeout` after the split finished); the source message then goes to the DLQ.
+
+    The state part `split` and `GET /api/v1/debug/split` show the open jobs, their age and time left, and the restoring partitions.
+  principles:
+    - A job that is close to its timeout needs parts to finish; look at the workers that run parts before the timeout.
+  related:
+    - concept:dlq
+    - metric:drakkar_split_jobs_open
+    - metric:drakkar_split_oldest_job_age_seconds
+    - config:split.enabled
+    - config:split.job_timeout
+    - config:split.idle_timeout
+    - rule:split-job-near-timeout
+    - rule:split-partition-restoring
+
 - key: cache-exchange
   summary: The cache exchange lets each worker pull the cluster and global cache rows that its peers wrote, over HTTP.
   body: |-

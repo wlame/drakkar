@@ -78,6 +78,8 @@ REQUIRED_RULES = {
     'cluster-tasks-mismatch',
     'agent-unauthenticated',
     'worker-detached',
+    'split-job-near-timeout',
+    'split-partition-restoring',
 }
 RULE_SEVERITIES = {
     'worker-stalled': 'critical',
@@ -94,6 +96,8 @@ RULE_SEVERITIES = {
     'cluster-tasks-mismatch': 'warning',
     'agent-unauthenticated': 'info',
     'worker-detached': 'info',
+    'split-job-near-timeout': 'warning',
+    'split-partition-restoring': 'warning',
 }
 
 

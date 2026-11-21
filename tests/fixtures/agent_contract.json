@@ -51,6 +51,7 @@
       "recorder",
       "autodiscover",
       "detach",
+      "split",
       "recent_failures"
     ]
   },
@@ -120,38 +121,39 @@
         "recorder",
         "autodiscover",
         "detach",
+        "split",
         "recent_failures"
       ]
     },
     {
       "route": "state",
       "parts": "rules,concepts",
-      "error": "unknown part 'rules'; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks"
+      "error": "unknown part 'rules'; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks, split"
     },
     {
       "route": "state",
       "parts": "rules,rules",
-      "error": "unknown part 'rules'; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks"
+      "error": "unknown part 'rules'; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks, split"
     },
     {
       "route": "state",
       "parts": "",
-      "error": "unknown part ''; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks"
+      "error": "unknown part ''; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks, split"
     },
     {
       "route": "state",
       "parts": "concepts,",
-      "error": "unknown part 'concepts'; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks"
+      "error": "unknown part 'concepts'; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks, split"
     },
     {
       "route": "state",
       "parts": "nope,also",
-      "error": "unknown part 'nope'; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks"
+      "error": "unknown part 'nope'; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks, split"
     },
     {
       "route": "state",
       "parts": "Concepts",
-      "error": "unknown part 'Concepts'; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks"
+      "error": "unknown part 'Concepts'; known: autodiscover, budget, detach, health, partitions, recent_failures, recorder, sinks, split"
     },
     {
       "route": "state",
@@ -2840,6 +2842,401 @@
                 }
               }
             ]
+          }
+        ]
+      },
+        {
+        "name": "split job near its timeout by the ten percent share",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "split": {
+                  "enabled": true,
+                  "open_jobs": 1,
+                  "oldest_job_age_seconds": 10,
+                  "nearest_timeout_seconds_left": 3000,
+                  "nearest_timeout_seconds": 86400,
+                  "restoring_partitions": [],
+                  "result_write_failures_total": 0
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "split-job-near-timeout",
+                "severity": "warning",
+                "evidence": {
+                  "seconds_left": 3000,
+                  "timeout_seconds": 86400
+                }
+              }
+            ]
+          },
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "split": {
+                  "enabled": true,
+                  "open_jobs": 1,
+                  "oldest_job_age_seconds": 10,
+                  "nearest_timeout_seconds_left": 8000,
+                  "nearest_timeout_seconds": 86400,
+                  "restoring_partitions": [],
+                  "result_write_failures_total": 0
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "split-job-near-timeout",
+                "severity": "warning",
+                "evidence": {
+                  "seconds_left": 8000,
+                  "timeout_seconds": 86400
+                }
+              }
+            ]
+          },
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "split": {
+                  "enabled": true,
+                  "open_jobs": 1,
+                  "oldest_job_age_seconds": 10,
+                  "nearest_timeout_seconds_left": 8640,
+                  "nearest_timeout_seconds": 86400,
+                  "restoring_partitions": [],
+                  "result_write_failures_total": 0
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          }
+        ]
+      },
+      {
+        "name": "split job near its timeout by the 300 second floor",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "split": {
+                  "enabled": true,
+                  "open_jobs": 1,
+                  "oldest_job_age_seconds": 10,
+                  "nearest_timeout_seconds_left": 299.5,
+                  "nearest_timeout_seconds": 600,
+                  "restoring_partitions": [],
+                  "result_write_failures_total": 0
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "split-job-near-timeout",
+                "severity": "warning",
+                "evidence": {
+                  "seconds_left": 299.5,
+                  "timeout_seconds": 600
+                }
+              }
+            ]
+          },
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "split": {
+                  "enabled": true,
+                  "open_jobs": 1,
+                  "oldest_job_age_seconds": 10,
+                  "nearest_timeout_seconds_left": 300,
+                  "nearest_timeout_seconds": 600,
+                  "restoring_partitions": [],
+                  "result_write_failures_total": 0
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "split": {
+                  "enabled": true,
+                  "open_jobs": 1,
+                  "oldest_job_age_seconds": 10,
+                  "nearest_timeout_seconds_left": -5,
+                  "nearest_timeout_seconds": 600,
+                  "restoring_partitions": [],
+                  "result_write_failures_total": 0
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "split-job-near-timeout",
+                "severity": "warning",
+                "evidence": {
+                  "seconds_left": -5,
+                  "timeout_seconds": 600
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "split with no timeout or with split off finds nothing near a timeout",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "split": {
+                  "enabled": true,
+                  "open_jobs": 1,
+                  "oldest_job_age_seconds": 10,
+                  "nearest_timeout_seconds_left": null,
+                  "nearest_timeout_seconds": null,
+                  "restoring_partitions": [],
+                  "result_write_failures_total": 0
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "split": {
+                  "enabled": false,
+                  "open_jobs": 0,
+                  "oldest_job_age_seconds": 10,
+                  "nearest_timeout_seconds_left": null,
+                  "nearest_timeout_seconds": null,
+                  "restoring_partitions": [],
+                  "result_write_failures_total": 0
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "split": null
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          }
+        ]
+      },
+      {
+        "name": "split partition restoring for more than 120 seconds",
+        "steps": [
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "split": {
+                  "enabled": true,
+                  "open_jobs": 1,
+                  "oldest_job_age_seconds": 10,
+                  "nearest_timeout_seconds_left": null,
+                  "nearest_timeout_seconds": null,
+                  "restoring_partitions": [
+                    {
+                      "partition": 1,
+                      "seconds": 120
+                    },
+                    {
+                      "partition": 2,
+                      "seconds": 120.5
+                    },
+                    {
+                      "partition": 3,
+                      "seconds": 600
+                    }
+                  ],
+                  "result_write_failures_total": 0
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": [
+              {
+                "rule": "split-partition-restoring",
+                "severity": "warning",
+                "evidence": {
+                  "partitions": [
+                    {
+                      "partition": 2,
+                      "seconds": 120.5
+                    },
+                    {
+                      "partition": 3,
+                      "seconds": 600
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "split": {
+                  "enabled": true,
+                  "open_jobs": 1,
+                  "oldest_job_age_seconds": 10,
+                  "nearest_timeout_seconds_left": null,
+                  "nearest_timeout_seconds": null,
+                  "restoring_partitions": [
+                    {
+                      "partition": 1,
+                      "seconds": 120
+                    }
+                  ],
+                  "result_write_failures_total": 0
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
+          },
+          {
+            "now": 0,
+            "input": {
+              "state": {
+                "split": {
+                  "enabled": true,
+                  "open_jobs": 1,
+                  "oldest_job_age_seconds": 10,
+                  "nearest_timeout_seconds_left": null,
+                  "nearest_timeout_seconds": null,
+                  "restoring_partitions": [],
+                  "result_write_failures_total": 0
+                }
+              },
+              "metrics": {
+                "drakkar_recorder_dropped_events_total": 0,
+                "drakkar_recorder_postgres_dropped_rows_total": 0,
+                "drakkar_sink_dlq_messages_total": 0
+              },
+              "settings": {
+                "warn_lag_ms": 100,
+                "agent_token_set": true
+              }
+            },
+            "findings": []
           }
         ]
       }

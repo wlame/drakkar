@@ -45,6 +45,9 @@ RULE_METRICS = (DROPPED_EVENTS_METRIC, DROPPED_POSTGRES_ROWS_METRIC, DLQ_MESSAGE
 STALLED_STATE = 'stalled'
 DETACHED_STATE = 'detached'
 DEBUG_PAUSE = 'debug'
+RESTORING_SECONDS_LIMIT = 120
+NEAR_TIMEOUT_SHARE = 0.1
+NEAR_TIMEOUT_MIN_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -303,6 +306,36 @@ def worker_detached(rule_input: RuleInput, baselines: Baselines) -> dict[str, An
     return {'origin': detach.get('origin'), 'reason': detach.get('reason'), 'until': detach.get('until')}
 
 
+def split_job_near_timeout(rule_input: RuleInput, baselines: Baselines) -> dict[str, Any] | None:
+    """The nearest open split job has less time left than 10 % of its timeout or 300 seconds."""
+    split = _part(rule_input, 'split')
+    left = split.get('nearest_timeout_seconds_left')
+    timeout = split.get('nearest_timeout_seconds')
+    if not isinstance(left, int | float) or not isinstance(timeout, int | float):
+        return None
+    if left >= max(NEAR_TIMEOUT_SHARE * timeout, NEAR_TIMEOUT_MIN_SECONDS):
+        return None
+    return {'seconds_left': left, 'timeout_seconds': timeout}
+
+
+def split_partition_restoring(rule_input: RuleInput, baselines: Baselines) -> dict[str, Any] | None:
+    """A split partition has been restoring for more than 120 seconds."""
+    rows = _part(rule_input, 'split').get('restoring_partitions')
+    if not isinstance(rows, list):
+        return None
+    slow = [
+        {'partition': row['partition'], 'seconds': row['seconds']}
+        for row in rows
+        if isinstance(row, Mapping)
+        and isinstance(row.get('partition'), int)
+        and isinstance(row.get('seconds'), int | float)
+        and row['seconds'] > RESTORING_SECONDS_LIMIT
+    ]
+    if not slow:
+        return None
+    return {'partitions': slow}
+
+
 # The implementations by rule key, in the order of rules.yaml; a test keeps
 # the two lists equal.
 FRAMEWORK_RULES: dict[str, Rule] = {
@@ -320,6 +353,8 @@ FRAMEWORK_RULES: dict[str, Rule] = {
     'cluster-tasks-mismatch': cluster_tasks_mismatch,
     'agent-unauthenticated': agent_unauthenticated,
     'worker-detached': worker_detached,
+    'split-job-near-timeout': split_job_near_timeout,
+    'split-partition-restoring': split_partition_restoring,
 }
 
 

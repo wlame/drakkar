@@ -140,3 +140,22 @@
     - detach.origin
     - detach.reason
     - detach.until
+
+- key: split-job-near-timeout
+  summary: An open split job has less time left than 10 percent of its timeout, or less than 300 seconds.
+  severity: warning
+  title: A split job is close to its timeout
+  explain: concept:split
+  suggestion: Read seconds_left and timeout_seconds, then look at the job on the split page (GET /api/v1/debug/split) to see how many parts are missing; check that the workers of the consumer group run parts and are not detached or stalled. A job that times out is closed and its source message goes to the DLQ.
+  inputs:
+    - split.nearest_timeout_seconds_left
+    - split.nearest_timeout_seconds
+
+- key: split-partition-restoring
+  summary: This worker has been rebuilding the split jobs of a source partition from the results log for more than 120 seconds.
+  severity: warning
+  title: A split partition is slow to restore
+  explain: concept:split
+  suggestion: Read partitions for the source partitions and the seconds of each; a long results log or a slow broker makes a restore long, and the offset of a partition that restores is not committed. Check the broker and the lag of the results topic before restarting the worker.
+  inputs:
+    - split.restoring_partitions

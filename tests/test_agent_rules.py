@@ -159,3 +159,37 @@ def test_the_lag_baseline_ignores_a_growing_lag_within_60_seconds():
     assert lag_finding(1, now=0) == []
     assert lag_finding(1000, now=59.9) == []
     assert lag_finding(2, now=60) == ['lag-growing']
+
+
+@pytest.mark.parametrize(
+    ('left', 'timeout', 'fires'),
+    [(8639, 86400, True), (8640, 86400, False), (299, 600, True), (300, 600, False), (-1, 600, True)],
+)
+def test_split_job_near_timeout_threshold_is_the_larger_of_ten_percent_and_300_seconds(left, timeout, fires):
+    from drakkar.agent.rules import split_job_near_timeout
+
+    state = {'split': {'nearest_timeout_seconds_left': left, 'nearest_timeout_seconds': timeout}}
+    rule_input = RuleInput(state=state, metrics={}, settings=RuleSettings(100, True), now=0)
+
+    found = split_job_near_timeout(rule_input, Baselines())
+
+    assert (found is not None) is fires
+
+
+def test_split_job_near_timeout_is_silent_with_no_timeout():
+    from drakkar.agent.rules import split_job_near_timeout
+
+    state = {'split': {'nearest_timeout_seconds_left': None, 'nearest_timeout_seconds': None}}
+
+    assert split_job_near_timeout(RuleInput(state, {}, RuleSettings(100, True), 0), Baselines()) is None
+
+
+@pytest.mark.parametrize(('seconds', 'fires'), [(120, False), (120.5, True)])
+def test_split_partition_restoring_fires_only_over_120_seconds(seconds, fires):
+    from drakkar.agent.rules import split_partition_restoring
+
+    state = {'split': {'restoring_partitions': [{'partition': 4, 'seconds': seconds}]}}
+
+    found = split_partition_restoring(RuleInput(state, {}, RuleSettings(100, True), 0), Baselines())
+
+    assert found == ({'partitions': [{'partition': 4, 'seconds': seconds}]} if fires else None)

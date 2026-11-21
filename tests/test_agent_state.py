@@ -687,6 +687,7 @@ def _state_app(config: DrakkarConfig, **fields: Any) -> Any:
     app.worker_identity = SimpleNamespace(cluster='main')
     app.cluster_tasks_hash = cluster_tasks_hash(())
     app.detach = SimpleNamespace(state=ATTACHED_STATE)
+    app._split = None
     for name, value in fields.items():
         setattr(app, name, value)
     return app
@@ -742,6 +743,7 @@ async def test_a_main_loop_that_does_not_answer_gives_null_loop_parts(monkeypatc
         'budget',
         'partitions',
         'sinks',
+        'split',
         'recent_failures',
     ]
     assert state['health']['state'] == 'off'
@@ -793,3 +795,101 @@ async def test_read_state_reads_the_live_objects():
     assert state['partitions'][0]['paused_by'] == ['debug']
     assert state['sinks'][0]['breaker_open'] is True
     assert state['health']['uptime_seconds'] >= 30
+
+
+# --- split ---
+
+NOW_MS = 1_800_000_000_000
+
+
+def _split_job(*, opened_ago_s: float, parts: int | None = None, progress_ago_s: float | None = None) -> Any:
+    progress = NOW_MS - int((progress_ago_s if progress_ago_s is not None else opened_ago_s) * 1000)
+    return SimpleNamespace(
+        closed=None,
+        is_complete=False,
+        opened_at_ms=NOW_MS - int(opened_ago_s * 1000),
+        last_progress_ms=progress,
+        parts=parts,
+    )
+
+
+def _followed(partition: int, jobs: list[Any] | None, *, restoring: bool = False, since: float = 0.0) -> Any:
+    table = None if jobs is None else SimpleNamespace(open_jobs=lambda: jobs)
+    return SimpleNamespace(partition=partition, restoring=restoring, state_since=since, table=table)
+
+
+def _split_runtime(*followed: Any) -> Any:
+    return SimpleNamespace(tracker=SimpleNamespace(followed=lambda: list(followed)))
+
+
+def _split_part(runtime: Any, *, job_timeout: int = 86400, idle_timeout: int = 0, now_s: float = 1000.0) -> Any:
+    from drakkar.agent.state import split_part
+
+    settings = SimpleNamespace(job_timeout=job_timeout, idle_timeout=idle_timeout)
+    return split_part(runtime, settings, now_ms=NOW_MS, now_s=now_s, result_write_failures=3)
+
+
+def test_split_part_shape_on_and_off():
+    from drakkar.agent.state import split_part
+
+    off = split_part(None, None, now_ms=NOW_MS, now_s=0.0, result_write_failures=9)
+    on = _split_part(
+        _split_runtime(_followed(1, [_split_job(opened_ago_s=100)]), _followed(2, None, restoring=True, since=900.0))
+    )
+
+    assert off == {
+        'enabled': False,
+        'open_jobs': 0,
+        'oldest_job_age_seconds': 0,
+        'nearest_timeout_seconds_left': None,
+        'nearest_timeout_seconds': None,
+        'restoring_partitions': [],
+        'result_write_failures_total': 0,
+    }
+    assert on == {
+        'enabled': True,
+        'open_jobs': 1,
+        'oldest_job_age_seconds': 100,
+        'nearest_timeout_seconds_left': 86300,
+        'nearest_timeout_seconds': 86400,
+        'restoring_partitions': [{'partition': 2, 'seconds': 100}],
+        'result_write_failures_total': 3,
+    }
+
+
+def test_split_part_picks_the_job_closest_to_its_threshold():
+    # Job A: 1000 s left of 86400 (threshold 8640, margin -7640).
+    # Job B: 400 s left of 600 (threshold 300, margin 100): A is nearer.
+    runtime = _split_runtime(_followed(1, [_split_job(opened_ago_s=200), _split_job(opened_ago_s=85400)]))
+
+    part = _split_part(runtime, job_timeout=86400)
+
+    assert part['nearest_timeout_seconds_left'] == 1000
+    assert part['nearest_timeout_seconds'] == 86400
+
+
+def test_split_part_uses_the_idle_timeout_after_the_split_finished():
+    runtime = _split_runtime(_followed(1, [_split_job(opened_ago_s=500, parts=4, progress_ago_s=50)]))
+
+    part = _split_part(runtime, job_timeout=0, idle_timeout=600)
+
+    assert part['nearest_timeout_seconds_left'] == 550
+    assert part['nearest_timeout_seconds'] == 600
+
+
+def test_split_part_has_no_timeout_when_none_applies():
+    runtime = _split_runtime(_followed(1, [_split_job(opened_ago_s=500)]))
+
+    part = _split_part(runtime, job_timeout=0, idle_timeout=600)
+
+    assert part['open_jobs'] == 1
+    assert part['nearest_timeout_seconds_left'] is None
+    assert part['nearest_timeout_seconds'] is None
+
+
+async def test_read_state_reads_the_split_part_on_the_main_loop():
+    app = _state_app(_config(), _split=None)
+
+    state = await read_state(app, ['split'], include_payloads=False)
+
+    assert state['split']['enabled'] is False

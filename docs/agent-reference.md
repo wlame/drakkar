@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `82e4516cfd1f09d7`.
+Registry version: `52949b870e339cbd`.
 
 ## Concepts
 
@@ -318,6 +318,21 @@ While detached, the worker reads no Kafka message and has no `drakkar_consumer_l
 - Every worker of one group should use the same max_detached and min_attached.
 
 **Related:** `concept:autodiscover`, `config:sources.kafka.detach.enabled`, `config:sources.kafka.detach.max_detached`, `config:sources.kafka.detach.min_attached`, `config:sources.kafka.detach.default_duration`, `config:sources.kafka.detach.max_duration`, `config:sources.kafka.detach.cooldown`, `config:sources.kafka.detach.lease`, `config:ui.detach_enabled`, `metric:drakkar_detached`, `metric:drakkar_detach_requests_total`, `metric:drakkar_attach_total`, `event:worker_detached`, `event:worker_attached`, `rule:worker-detached`, `recipe:worker-detached`, `route:GET /api/v1/debug/detach`, `route:POST /api/v1/debug/detach`, `route:POST /api/v1/debug/attach`
+
+### `concept:split`
+
+With split on, one large source message becomes parts that every worker of the consumer group runs, and the owner of the source partition aggregates the part results before the source offset commits.
+
+A handler's `split(message)` turns one source message into parts. The parts go through an internal parts topic to every worker of the group; each worker runs them as tasks. The results go to an internal results log. The worker that owns the source partition follows the log with a job tracker, calls `aggregate(job)` when every part has a result, delivers the aggregate sinks, and writes a `closed` record. Only then does the source offset commit.
+
+The state of a job is the uncommitted source offset plus the results log, so any owner rebuilds it after a restart. While a partition rebuilds its jobs it is `restoring`, and the offset of that partition does not commit. A job ends by timeout (`split.job_timeout`, or `split.idle_timeout` after the split finished); the source message then goes to the DLQ.
+
+The state part `split` and `GET /api/v1/debug/split` show the open jobs, their age and time left, and the restoring partitions.
+
+**Principles:**
+- A job that is close to its timeout needs parts to finish; look at the workers that run parts before the timeout.
+
+**Related:** `concept:dlq`, `metric:drakkar_split_jobs_open`, `metric:drakkar_split_oldest_job_age_seconds`, `config:split.enabled`, `config:split.job_timeout`, `config:split.idle_timeout`, `rule:split-job-near-timeout`, `rule:split-partition-restoring`
 
 ### `concept:cache-exchange`
 
@@ -4269,3 +4284,34 @@ This worker left its consumer group for a bounded time; its partitions are consu
 - `detach.origin`
 - `detach.reason`
 - `detach.until`
+
+### `rule:split-job-near-timeout`
+
+An open split job has less time left than 10 percent of its timeout, or less than 300 seconds.
+
+**Severity:** warning
+
+**Title:** A split job is close to its timeout
+
+**Explain:** `concept:split`
+
+**Suggestion:** Read seconds_left and timeout_seconds, then look at the job on the split page (GET /api/v1/debug/split) to see how many parts are missing; check that the workers of the consumer group run parts and are not detached or stalled. A job that times out is closed and its source message goes to the DLQ.
+
+**Inputs:**
+- `split.nearest_timeout_seconds_left`
+- `split.nearest_timeout_seconds`
+
+### `rule:split-partition-restoring`
+
+This worker has been rebuilding the split jobs of a source partition from the results log for more than 120 seconds.
+
+**Severity:** warning
+
+**Title:** A split partition is slow to restore
+
+**Explain:** `concept:split`
+
+**Suggestion:** Read partitions for the source partitions and the seconds of each; a long results log or a slow broker makes a restore long, and the offset of a partition that restores is not committed. Check the broker and the lag of the results topic before restarting the worker.
+
+**Inputs:**
+- `split.restoring_partitions`
