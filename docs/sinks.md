@@ -772,9 +772,11 @@ each failed source message:
   not publish a part, or spent its attempts (stage `split`); or whose
   `aggregate()` or `on_job_timeout()` raised, or answered `JobAction.DLQ`
   with no part that ended in a `dlq` outcome (stage `aggregate`, also for
-  the default answer of a timeout). When the job has a part with a `dlq`
-  outcome, the record takes the stage and the facts of that part (`execute`
-  or `sink`). A part itself never writes a DLQ record.
+  the default answer of a timeout). The failed part with the lowest number
+  decides: when it has a `dlq` outcome, the record takes the stage and the
+  facts of that outcome (`execute` or `sink`); otherwise the stage is
+  `aggregate` and the error is `part <n> failed: <error>`. A part itself
+  never writes a DLQ record.
 
 A record is written once per message: after it, [the message is
 done](#on_failure-dlq-the-message-is-done).

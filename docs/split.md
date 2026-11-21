@@ -341,7 +341,7 @@ hook answered.
 |---|---|
 | `split.enabled` is true and the handler does not override `split()` | the start fails |
 | the handler overrides `part_data()`, `aggregate()` or `on_job_timeout()`, or sets `part_data_model`, without `split()` | the start fails |
-| `split()` is not an async generator function | the start fails |
+| `split()` is not an async generator function (whatever `split.enabled` says) | the start fails |
 | the handler overrides `split()` and `split.enabled` is false | the worker starts, never calls `split()`, and logs `split_disabled` once |
 
 ## `SplitJob` and `PartResult` {#splitjob-and-partresult}
@@ -465,8 +465,8 @@ original message is written, with the original key, value and headers:
 
 | Case | `dk-stage` and `dk-error` |
 |---|---|
-| A part has a `dlq` outcome | `dk-stage`, `dk-sink`, `dk-task-id`, `dk-error` and `dk-attempts` come from the `dlq` outcome of the part with the lowest number that has one. The record looks as it does for an ordinary message. |
-| A part failed with no `dlq` outcome | `dk-stage` `aggregate`, `dk-error` `part <n> failed: <error of that part>`, for the failed part with the lowest number. |
+| The failed part with the lowest number has a `dlq` outcome | `dk-stage`, `dk-sink`, `dk-task-id`, `dk-error` and `dk-attempts` come from that outcome. The record looks as it does for an ordinary message. |
+| The failed part with the lowest number has no `dlq` outcome | `dk-stage` `aggregate`, `dk-error` `part <n> failed: <error of that part>`. A `dlq` outcome of a later part is not used. |
 | No part failed | `dk-stage` `aggregate`, `dk-error` `aggregate chose the DLQ: <failed> of <parts> parts failed`. |
 
 `dk-delivered-sinks` names the part sinks that delivered a result of the
@@ -490,7 +490,7 @@ sinks, and their results are ignored.
 |---|---|---|
 | `split.job_timeout` | `24h` | The time since the first `open` record of the job. `0` is no limit. |
 | `split.idle_timeout` | `0` | The time since the last new result of the job, or since `split-done`. It applies only after `split-done` of the current attempt: before it, the lack of results says nothing about a lost part. `0` is off. |
-| `split.max_attempts` | `3` | How many attempts of one job may end without `split-done` and without `split-cancelled`: the worker died during the split. |
+| `split.max_attempts` | `3` | How many attempts of one job may die during their split (no `split-done` and no `split-cancelled`) before the job goes to the DLQ. |
 
 - The job tracker checks the open jobs every 5 seconds.
 - The clock is the Kafka timestamp of the records, so a new owner continues
@@ -514,9 +514,16 @@ must be longer than `job_timeout`.
 `split-cancelled`, and that attempt is not counted. So a rolling restart
 cannot send a healthy request to the DLQ. When the `split-cancelled` write
 does not get through before the worker stops (it waits at most 2 seconds),
-the attempt counts. When `max_attempts` attempts died, the next owner
-writes a DLQ record with stage `split` and closes the job as
+the attempt counts. An attempt of another worker that a newer attempt
+replaced, or that showed no end for 300 seconds, counts too. An attempt that
+finished its split never counts. When `max_attempts` attempts died, the next
+owner writes a DLQ record with stage `split` and closes the job as
 `attempts_spent`.
+
+With the default `3`, a job survives two owners that die during its split;
+the third such death sends the message to the DLQ. With `1`, one restart of
+the owner during a split (a crash, or a stop whose `split-cancelled` did not
+get through) sends the message to the DLQ.
 
 ## Configuration {#configuration}
 
@@ -596,7 +603,7 @@ At start, with the feature on, the worker reads the topic metadata:
 - A retention shorter than `split.job_timeout` logs the warning
   `split_topic_retention_short`. A retention that cannot be read (the
   worker may not describe topic configs) logs the same warning and never
-  fails the start.
+  fails the start. With `job_timeout: 0` the retention is not checked.
 
 **Retention.** Set the retention of both topics longer than the longest
 job, and longer than `split.job_timeout`. A part that expires before a
@@ -604,9 +611,12 @@ worker reads it is lost, and its job ends by the timeout. A results record
 that expires is lost too; when the records of a job are gone, a new owner
 splits the message again as a new job.
 
-**Partitions of the results topic** follow the source topic. When you add
-partitions to the source topic, add the same number to the results topic
-before the workers start again.
+**Partitions of the results topic** follow the source topic. Add partitions
+to the results topic first, then the same number to the source topic.
+Running workers take new source partitions without a restart. A message of
+a source partition that has no results partition fails its split: it goes
+to the DLQ, and the offset of that partition stalls. A worker that starts
+between the two changes fails its start check, because the counts differ.
 
 Example commands for a source topic with 12 partitions and up to 24
 workers:
@@ -639,6 +649,10 @@ A worker with the feature on uses three consumer group ids:
 The worker also needs Write on the parts topic and the results topic, and
 Describe on both. DescribeConfigs on both topics lets it check the
 retention; without it the worker logs a warning and starts.
+
+A topic that the worker may not describe is missing from the topic list it
+reads, so the start fails with `split: the topic '<topic>' does not exist`.
+Missing rights look like a missing topic.
 
 Two fleets with different source groups get different default topic names.
 Every record also carries the source group, and a worker skips and counts
@@ -710,7 +724,7 @@ is current:
 | Case | What happens |
 |---|---|
 | A worker dies while it runs a part | Kafka gives the part to another worker. It runs again. A second result for one part is ignored. |
-| A part crashes every worker that reads it | Its partition of the parts topic stops by the usual dead-partition rule, and `/readyz` shows it. The job ends by its timeout. |
+| A part makes the partition loop fail twice | That partition of the parts topic is dead (`/readyz` shows `1000000 + n`), and the job ends by its timeout. A part that makes the worker process exit goes to the next worker after each crash. |
 | A part expired before a worker read it | The job ends by its timeout. |
 | The result of a part cannot be written | It is tried again after 1, 2, 4 ... 30 seconds. The offset of the part stays pending meanwhile. A partition takes no new part once a few finished parts wait for their write (twice `executor.window_size`, at least 16). After a restart those parts run again. A topic or partition that does not exist stalls the offset and logs an error. |
 | A part finishes while its worker stops or loses the partition | It still makes one attempt to write its result. |

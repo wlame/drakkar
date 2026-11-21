@@ -61,15 +61,18 @@ class SplitConfig(ConfigModel):
     idle_timeout: WholeSeconds = Field(
         default=0,
         description=(
-            'The longest time a job may go without a new part result, from 1m to 30d, and below job_timeout when '
-            'both are set. 0 means no limit.'
+            'The longest time a job may go without a new part result, counted only after the split has finished, '
+            'from 1m to 30d, and below job_timeout when both are set. 0 means no limit.'
         ),
     )
     max_attempts: int = Field(
         default=3,
         ge=1,
         le=10,
-        description='How many times a job may be split, from 1 to 10. The attempts include the first one.',
+        description=(
+            'How many attempts of one job may die during their split (no split-done and no split-cancelled) '
+            'before the job goes to the DLQ, from 1 to 10.'
+        ),
     )
     max_part_data: ByteSize = Field(
         default=65536,

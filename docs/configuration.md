@@ -663,7 +663,7 @@ A root section, after `sources` and before `executor`. It lets a handler cut a l
 | `split.aggregate_sinks` | `list[str]` | `[]` | Sinks of the aggregate stage, each `<type>/<name>` of a configured sink. Every other sink is a part sink. |
 | `split.job_timeout` | duration | `24h` | The longest run of a job: `0` (no limit) or `1m` to `30d`. |
 | `split.idle_timeout` | duration | `0` | The longest time without a new part result, counted only after the split has finished: `0` (no limit) or `1m` to `30d`, and below `job_timeout` when both are set. |
-| `split.max_attempts` | `int` | `3` | How many attempts of one job may end without finishing their split (the worker died), 1 to 10. An attempt that a stop or a revoke cancelled is not counted. |
+| `split.max_attempts` | `int` | `3` | How many attempts of one job may die during their split (no `split-done` and no `split-cancelled`) before the job goes to the DLQ, 1 to 10. An attempt that a stop or a revoke cancelled is not counted. |
 | `split.max_part_data` | size | `64KiB` | The largest data of one part, `1KiB` to `512KiB`. |
 
 The load fails when: `split.enabled` is on and the Kafka source is off; `split.connection` is not defined under `connections.kafka` (checked only with the feature on); an `aggregate_sinks` entry is not a configured sink; both timeouts are `0`; `idle_timeout` is not below `job_timeout`; the source topic, the parts topic, the results topic and the DLQ topic are not four different topics; or, with the feature on, a sink depends on a sink of the other stage. The checks run again after `on_startup`; a change of `split.enabled` there is ignored and logged. The config summary has the token `split=on` or `split=off` after `sources=[...]`.

@@ -534,7 +534,7 @@ when the records of the job are gone (handled as a raise of the hook). See
 |---|---|
 | `split.enabled` is true and the handler does not override `split()` | startup fails |
 | the handler overrides `part_data()`, `aggregate()` or `on_job_timeout()`, or sets `part_data_model`, without `split()` | startup fails |
-| `split()` is not an async generator function | startup fails |
+| `split()` is not an async generator function (whatever `split.enabled` says) | startup fails |
 | the handler overrides `split()` and `split.enabled` is false | the worker starts, never calls `split()`, and logs `split_disabled` once |
 
 ### on_task_complete

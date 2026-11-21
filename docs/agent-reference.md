@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `69b5374d5a421cf8`.
+Registry version: `2ce6ae629a5b0184`.
 
 ## Concepts
 
@@ -597,7 +597,7 @@ The longest time a job may run, from 1m to 30d; 0 means no limit.
 
 ### `config:split.idle_timeout`
 
-The longest time a job may go without a new part result, from 1m to 30d; 0 means no limit.
+The longest time a job may go without a new part result, counted only after the split has finished, from 1m to 30d; 0 means no limit.
 
 **Advice:** Set it above the longest time one part needs; it must be below job_timeout when both are set.
 
@@ -605,7 +605,7 @@ The longest time a job may go without a new part result, from 1m to 30d; 0 means
 
 ### `config:split.max_attempts`
 
-How many times a job may be split, from 1 to 10, the first attempt included.
+How many attempts of one job may die during their split (no split-done and no split-cancelled) before the job goes to the DLQ, from 1 to 10.
 
 **Advice:** Keep it low; each new attempt publishes the parts again.
 

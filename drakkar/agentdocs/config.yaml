@@ -101,13 +101,13 @@
     - metric:drakkar_split_oldest_job_age_seconds
 
 - key: split.idle_timeout
-  summary: The longest time a job may go without a new part result, from 1m to 30d; 0 means no limit.
+  summary: The longest time a job may go without a new part result, counted only after the split has finished, from 1m to 30d; 0 means no limit.
   advice: Set it above the longest time one part needs; it must be below job_timeout when both are set.
   related:
     - config:split.job_timeout
 
 - key: split.max_attempts
-  summary: How many times a job may be split, from 1 to 10, the first attempt included.
+  summary: How many attempts of one job may die during their split (no split-done and no split-cancelled) before the job goes to the DLQ, from 1 to 10.
   advice: Keep it low; each new attempt publishes the parts again.
   related:
     - metric:drakkar_split_jobs_total

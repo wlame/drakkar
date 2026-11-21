@@ -135,8 +135,8 @@ split:
   results_group: ''                # '' = <consumer group>_split_results. env: DK_SPLIT__RESULTS_GROUP
   aggregate_sinks: []              # sinks of the aggregate stage, each <type>/<name>. env: DK_SPLIT__AGGREGATE_SINKS
   job_timeout: 24h                 # longest run of a job; 0 or 1m to 30d. env: DK_SPLIT__JOB_TIMEOUT
-  idle_timeout: 0                  # longest time without a part result; 0 or 1m to 30d, below job_timeout. env: DK_SPLIT__IDLE_TIMEOUT
-  max_attempts: 3                  # times a job may be split, 1 to 10. env: DK_SPLIT__MAX_ATTEMPTS
+  idle_timeout: 0                  # longest time without a part result after the split finished; 0 or 1m to 30d, below job_timeout. env: DK_SPLIT__IDLE_TIMEOUT
+  max_attempts: 3                  # attempts that may die during their split before the DLQ, 1 to 10. env: DK_SPLIT__MAX_ATTEMPTS
   max_part_data: 64KiB             # largest data of one part, 1KiB to 512KiB. env: DK_SPLIT__MAX_PART_DATA
 ```
 

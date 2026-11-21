@@ -31,7 +31,9 @@ Nothing changes for a worker that does not turn the new features on.
    `split`, `part_data`, `aggregate` and `on_job_timeout` and the class
    attribute `part_data_model`. A handler class that already defines its own
    `part_data`, `aggregate`, `on_job_timeout` or `part_data_model` without
-   `split` now fails the start: rename yours. The
+   `split` now fails the start, and a method named `split` that is not an
+   async generator fails the start even with `split.enabled: false`: rename
+   yours. The
    DLQ record has two new values of `dk-stage`, `split` and `aggregate`;
    check consumers of the DLQ topic that read that header. Before you set
    `split.enabled: true`, create the parts topic and the results topic (the
