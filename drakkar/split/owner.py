@@ -161,10 +161,11 @@ class _Split:
 
     owned: _OwnedJob
     ref: JobRef
-    stream: AsyncIterator[Any]
     context: contextvars.Context
     interrupt: asyncio.Future[InterruptReason]
     started_at: float
+    # The iterator of the generator; None until ``split`` was called.
+    stream: AsyncIterator[Any] | None = None
     pull: asyncio.Task | None = None
     left_scope: PipelineHookScope | None = None
     in_flight: dict[asyncio.Future[None], WireRecord] = field(default_factory=dict)
@@ -325,9 +326,6 @@ class SplitOwner:
         offset whose message did not arrive is closed as orphaned.
         """
         offset = message.offset
-        if self._stopping:
-            self._host.hold_job_offset(offset)
-            return BeginOutcome.JOB
         await self._close_orphans_below(offset)
         self._restored_waiting.discard(offset)
         early = self._early_timeouts.pop(offset, None)
@@ -538,7 +536,6 @@ class SplitOwner:
         split = _Split(
             owned=owned,
             ref=ref,
-            stream=_NO_STREAM,
             context=contextvars.copy_context(),
             interrupt=asyncio.get_running_loop().create_future(),
             started_at=time.monotonic(),
@@ -546,15 +543,16 @@ class SplitOwner:
         self._current = split
         try:
             try:
-                split.stream = self._open_stream(split)
-                first = await self._pull(split)
+                stream = self._open_stream(split)
+                split.stream = stream
+                first = await self._pull(split, stream)
                 if first is STREAM_END:
                     return BeginOutcome.LOCAL
                 # A job has no task on this worker: the window gives back what it reserved.
                 self._host.release_window_reservation()
                 self._jobs[message.offset] = owned
                 owned.splitting = True
-                await self._publish_job(split, first, restored)
+                await self._publish_job(split, stream, first, restored)
             except _SplitFailed as failure:
                 return await self._fail_split(split, restored, failure)
             except _SplitInterrupted as interrupted:
@@ -611,7 +609,7 @@ class SplitOwner:
         reset_request_id(request_id_tokens)
         clear_hook_context(hook_token)
 
-    async def _pull(self, split: _Split) -> Any:
+    async def _pull(self, split: _Split, stream: AsyncIterator[Any]) -> Any:
         """The next item of the generator, or ``STREAM_END``; each pull is timed and runs in the pipeline hook scope.
 
         The pull runs as a task, so a stop can cancel it and the generator
@@ -624,7 +622,7 @@ class SplitOwner:
         context = split.context
         tokens = context.run(self._bind_pull, split.owned.message)
         started = time.monotonic()
-        pull = asyncio.create_task(next_stream_item(split.stream), context=context)
+        pull = asyncio.create_task(next_stream_item(stream), context=context)
         # A pull left behind by a stop must not log an unread exception.
         pull.add_done_callback(retrieve_task_outcome)
         split.pull = pull
@@ -661,7 +659,9 @@ class SplitOwner:
         if not split.interrupt.done():
             split.interrupt.set_result(reason)
 
-    async def _publish_job(self, split: _Split, first: Any, restored: JobState | None) -> None:
+    async def _publish_job(
+        self, split: _Split, stream: AsyncIterator[Any], first: Any, restored: JobState | None
+    ) -> None:
         """Write ``open``, publish every part the generator yields, then write ``split-done``.
 
         Raises:
@@ -695,7 +695,7 @@ class SplitOwner:
         item = first
         while item is not STREAM_END:
             await self._send_part(split, item)
-            item = await self._pull(split)
+            item = await self._pull(split, stream)
         await self._settle_parts(split)
         await self._deliver_record(split, settings.results_topic, log_record(ref, 'split-done', {'parts': split.parts}))
         logger.info(
@@ -841,7 +841,7 @@ class SplitOwner:
 
     async def _close_stream(self, split: _Split) -> None:
         """Cancel the pull in progress, then close the generator, within the stream-close time; never raises."""
-        if split.stream is _NO_STREAM:
+        if split.stream is None:
             return
         pull, split.pull = split.pull, None
         failure = await close_stream(
@@ -857,12 +857,26 @@ class SplitOwner:
             )
 
     def _finish_split(self, split: _Split) -> BeginOutcome:
-        """The parts are published: the job waits for its results, or ends at once when they are all there."""
+        """The parts are published: the job waits for its results, or ends at once when they are all there.
+
+        A timeout or another owner's attempt that came after the last wait
+        of the split is acted on here: the tracker tells each of them once.
+        """
         owned = split.owned
         offset = owned.message.offset
         self._host.hold_job_offset(offset)
+        reason = split.interrupt.result() if split.interrupt.done() else None
+        if reason == 'superseded':
+            self._jobs.pop(offset, None)
+            self._note_superseded(owned)
+            return BeginOutcome.JOB
         job = self._table.job(offset)
-        if job is not None and job.closed is None and self._is_current(owned, job) and job.is_complete:
+        if job is None or job.closed is not None or not self._is_current(owned, job):
+            # The tracker has not read the records of this attempt yet; its events follow.
+            return BeginOutcome.JOB
+        if reason in ('job', 'idle'):
+            self._start_end(owned, job, reason)
+        elif job.is_complete:
             self._start_end(owned, job, '')
         return BeginOutcome.JOB
 
@@ -1330,16 +1344,3 @@ class SplitOwner:
                 final=False,
                 suppressed=suppressed,
             )
-
-
-class _NoStream:
-    """The stream of a split whose generator was not opened yet."""
-
-    def __aiter__(self) -> _NoStream:
-        return self
-
-    async def __anext__(self) -> Any:
-        raise StopAsyncIteration
-
-
-_NO_STREAM: AsyncIterator[Any] = _NoStream()

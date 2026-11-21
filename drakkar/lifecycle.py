@@ -1577,8 +1577,9 @@ class AppLifecycle:
             detach = app.detach
             steps.append(StopStep('detach_slot_release_failed', 'kafka', lambda: detach.release_at_stop(time_left())))
 
-        # The split producer closes once the sources have stopped: every part
-        # has reported its result or given up, and what the producer still
+        # The split feature stops once the sources have stopped: every part
+        # has reported its result or given up, and no owner ends a job any
+        # more. The job tracker stops first, then what the producer still
         # holds gets a few seconds to be delivered.
         if app._split is not None:
             split = app._split

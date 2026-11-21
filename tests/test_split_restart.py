@@ -10,14 +10,18 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from confluent_kafka import OFFSET_INVALID, KafkaError, KafkaException, TopicPartition
 from structlog.testing import capture_logs
 
 from drakkar import partition as partition_module
+from drakkar.consumer import KafkaConsumer
 from drakkar.metrics import split_jobs
 from drakkar.models import SourceMessage
 from drakkar.split.models import PartResult, SplitJob, SplitResultsUnavailable
+from drakkar.split.partmode import no_report
 from drakkar.split.records import JobRef, log_record, open_body, result_body
 from drakkar.split.tracker import TIMEOUT_CHECK_SECONDS
 from tests.conftest import wait_for
@@ -686,3 +690,75 @@ async def test_a_worker_with_the_feature_off_starts_its_processors_at_once_and_n
     assert handler.split_calls == [] and handler.jobs == []
     source.consumer.pause.assert_not_awaited()
     await source.on_revoke([1])
+
+
+async def test_faults_of_the_source_consumer_around_a_restore_are_logged_and_the_processor_still_starts():
+    app = split_app(SplittingHandler())
+    runtime = await wired(app)
+    source = app.kafka_source
+    assert source is not None
+    source.consumer.pause.side_effect = RuntimeError('pause refused')
+    source.consumer.committed_offset.side_effect = RuntimeError('query refused')
+    source.consumer.resume.side_effect = RuntimeError('resume refused')
+
+    with capture_logs() as logs:
+        source.on_assign([1])
+        await wait_for(lambda: source._restore_tasks == {}, interval=0.001)
+
+    # The committed offset is unknown, so nothing retires at the restore; the processor runs.
+    assert source.processors[1]._task is not None and source.restoring_partitions == set()
+    assert [(line['event'], line['log_level']) for line in logs if line.get('category') == 'split'][:4] == [
+        ('split_restore_pause_failed', 'error'),
+        ('split_committed_offset_unknown', 'warning'),
+        ('split_restore_started', 'info'),
+        ('split_restore_finished', 'info'),
+    ]
+    [resume_failed] = events(logs, 'split_restore_resume_failed')
+    assert (resume_failed['log_level'], resume_failed['partition']) == ('error', 1)
+
+    async def broken_release(partition: int) -> None:
+        raise RuntimeError('unassign refused')
+
+    runtime.release = broken_release  # ty: ignore[invalid-assignment]
+    with capture_logs() as logs:
+        await source.on_revoke([1])
+    [release_failed] = events(logs, 'split_release_failed')
+    assert (release_failed['log_level'], release_failed['partition']) == ('warning', 1)
+    await runtime.stop(deadline=0.0)
+
+
+async def test_a_commit_of_the_parts_source_is_not_told_to_the_job_tracker():
+    app = split_app(SplittingHandler())
+    runtime = await wired(app)
+    source, parts = app.kafka_source, app.parts_source
+    assert source is not None and parts is not None
+    noted: list[tuple[int, int]] = []
+    runtime.note_source_commit = lambda partition, offset: noted.append((partition, offset))  # ty: ignore[invalid-assignment]
+
+    await parts._handle_commit(1, 10)
+    await source._handle_commit(2, 20)
+
+    assert noted == [(2, 20)]
+    await runtime.stop(deadline=0.0)
+
+
+async def test_the_consumer_gives_the_committed_offset_of_one_partition(monkeypatch):
+    client = MagicMock()
+    committed = [TopicPartition('orders', 4, 17)]
+    client.committed = AsyncMock(side_effect=lambda tps, timeout=None: committed)
+    monkeypatch.setattr('drakkar.consumer.AIOConsumer', lambda *args, **kwargs: client)
+    config = owner_config()
+    consumer = KafkaConsumer(
+        config.declared_connection('sources.kafka.connection', 'kafka', 'main'), config.sources.kafka
+    )
+
+    assert await consumer.committed_offset(4) == 17
+    committed[0] = TopicPartition('orders', 4, OFFSET_INVALID)
+    assert await consumer.committed_offset(4) is None
+    client.committed.side_effect = KafkaException(KafkaError(KafkaError._TRANSPORT))
+    assert await consumer.committed_offset(4) is None
+
+
+async def test_the_report_of_a_processor_of_local_messages_refuses_to_be_called():
+    with pytest.raises(RuntimeError, match='not reported to a topic'):
+        await no_report(source_message(), PartResult(index=0, worker='w', outcome='ok'))

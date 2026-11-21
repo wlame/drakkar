@@ -123,7 +123,8 @@ class SplitRuntime:
             clock=clock,
             sleep=sleep,
         )
-        self._tracker_started = False
+        # The start of the job tracker, made by the first ``follow``; None until then.
+        self._tracker_start: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         """Start the producer and check the two topics.
@@ -164,9 +165,10 @@ class SplitRuntime:
         Raises:
             asyncio.CancelledError: the partition was released, or the worker stops.
         """
-        if not self._tracker_started:
-            self._tracker_started = True
-            await self.tracker.start()
+        if self._tracker_start is None:
+            # One start for every caller: partitions assigned together follow at the same time.
+            self._tracker_start = asyncio.ensure_future(self.tracker.start())
+        await asyncio.shield(self._tracker_start)
         return await self.tracker.follow(partition, committed_source_offset=committed_source_offset)
 
     def owner_for(
@@ -217,12 +219,12 @@ class SplitRuntime:
     async def release(self, partition: int) -> None:
         """Forget the owner of a source partition this worker lost, and stop following its results partition."""
         self._owners.pop(partition, None)
-        if self._tracker_started:
+        if self._tracker_start is not None:
             await self.tracker.release(partition)
 
     def note_source_commit(self, partition: int, offset: int) -> None:
         """The source consumer committed ``offset`` (the next offset to read) for ``partition``: jobs below it retire."""
-        if self._tracker_started:
+        if self._tracker_start is not None:
             self.tracker.note_source_commit(partition, offset)
 
     async def stop(self, deadline: float) -> None:
@@ -233,7 +235,7 @@ class SplitRuntime:
         """
         self._owners.clear()
         try:
-            if self._tracker_started:
+            if self._tracker_start is not None:
                 await self.tracker.stop()
         finally:
             time_left = deadline - time.monotonic()

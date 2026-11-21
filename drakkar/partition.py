@@ -1300,15 +1300,15 @@ class PartitionProcessor:
         # window while their offsets are already watermark-tracked.
         # Policy ('skip' keeps the message in the window with payload=None):
         arrange_started_at = time.monotonic()
+        self._window_reservation_released = False
         messages = await self._accept_messages(messages)
-        if self._window_reservation_released:
-            self._window_reservation_released = False
-            if messages and not await self._reserve_local_messages(len(messages)):
-                # A stop came before the local messages of the window got
-                # room again: they are never arranged, their offsets stay
-                # pending and leave the drain.
-                self._abandoned_offsets.update(msg.offset for msg in messages)
-                return
+        released = self._window_reservation_released
+        if released and messages and not await self._reserve_local_messages(len(messages)):
+            # A stop came before the local messages of the window got room
+            # again: they are never arranged, their offsets stay pending and
+            # leave the drain.
+            self._abandoned_offsets.update(msg.offset for msg in messages)
+            return
         if not messages:
             await self._note_commit_due()
             return
