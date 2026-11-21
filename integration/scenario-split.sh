@@ -27,7 +27,7 @@
 # check does not make the next ones fail. Each check prints one line
 # `CHECK <n> <name>: PASS|FAIL: ...` with what it measured:
 #   1. large request (60 items, 12 parts): at least two workers ran parts of
-#      it (drakkar_split_parts_processed_total before and after); one summary
+#      it (the worker_id of its item records on split-items); one summary
 #      with 12 parts, 12 received, 60 items; the committed offset of its
 #      partition stayed at or below the request while the parts ran, and was
 #      never seen past it before the owner logged split_job_closed; then the
@@ -89,6 +89,7 @@ SPLIT_SERVICES=(split-worker-1 split-worker-2 split-worker-3)
 SOURCE_TOPIC=split-requests
 SOURCE_GROUP=drakkar-split
 PARTS_TOPIC=split-requests_drakkar-split_split_parts
+ITEMS_TOPIC=split-items
 SUMMARIES_TOPIC=split-summaries
 DLQ_TOPIC=split-requests_dlq
 LARGE_ITEMS=60
@@ -529,11 +530,7 @@ has_busy_worker_other_than() {
 # ---------------------------------------------------------------------------
 
 check_large_request() {
-    local service before="" after delta ran_parts=0 ran_list="" held=0 committed closed summary
-    for service in "${SPLIT_SERVICES[@]}"; do
-        before="${before} $(metric_sum "$(metrics_port "$service")" drakkar_split_parts_processed_total)"
-    done
-    read -r -a before_values <<<"$before"
+    local ran_parts ran_list held=0 committed closed summary
     start_large_job 1 4000 || return
     wait_split_done || return
     # Read the committed offset first and the owner's log after it: a
@@ -562,20 +559,18 @@ check_large_request() {
         || { cfail "the committed offset was never seen at or below the request while its parts ran"; return; }
     summary=$(summaries_of "$RID" | check_summaries 1 1 "$LARGE_PARTS" "$LARGE_ITEMS") \
         || { cfail "the summaries of ${RID}: ${summary}"; return; }
-    local i=0
-    for service in "${SPLIT_SERVICES[@]}"; do
-        after=$(metric_sum "$(metrics_port "$service")" drakkar_split_parts_processed_total)
-        delta=$(python3 -c 'import sys; print(int(float(sys.argv[2]) - float(sys.argv[1])))' "${before_values[$i]}" "$after")
-        if [ "$delta" -gt 0 ]; then
-            ran_parts=$((ran_parts + 1))
-        fi
-        ran_list="${ran_list} ${service}=${delta}"
-        i=$((i + 1))
-    done
+    # The item records of this request name the worker that ran each item;
+    # a metric of the workers would also count parts of other jobs.
+    ran_list=$(records_of "$ITEMS_TOPIC" "$RID" | python3 -c '
+import collections, json, sys
+counts = collections.Counter(json.loads(json.loads(line)["value"])["worker_id"] for line in sys.stdin if line.strip())
+print(" ".join(f"{worker}={n}" for worker, n in sorted(counts.items())))
+')
+    ran_parts=$(wc -w <<<"$ran_list" | tr -d ' ')
     [ "$ran_parts" -ge 2 ] \
-        || { cfail "only ${ran_parts} worker(s) ran parts of ${RID} (parts processed:${ran_list})"; return; }
+        || { cfail "only ${ran_parts} worker(s) ran items of ${RID} (item records per worker: ${ran_list})"; return; }
     wait_lag_zero || return
-    check_pass "${summary}; parts processed:${ran_list}; owner ${OWNER}; offset held in ${held} samples, committed after split_job_closed; $(seconds_between "$PRODUCED_AT" "$CLOSED_AT")s from produce to commit"
+    check_pass "${summary}; item records per worker: ${ran_list}; owner ${OWNER}; offset held in ${held} samples, committed after split_job_closed; $(seconds_between "$PRODUCED_AT" "$CLOSED_AT")s from produce to commit"
 }
 
 check_small_request() {
