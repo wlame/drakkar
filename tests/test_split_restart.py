@@ -930,8 +930,12 @@ async def superseded_owner(world: World, handler: SplittingHandler, **config: An
     await worker.caught_up()
     world.put_open(500, SECOND, attempt=2, instance=NEW_INSTANCE)
     await wait_until(lambda: handler.closed_splits == 1)
-    await worker.caught_up()
     assert worker.owner is not None and 500 in worker.owner._jobs
+    # The handler's split is closed before the owner's task of that split ends; until it ends the job
+    # is busy, and the rules of a holder ignore every event of it.
+    held = worker.owner._jobs[500]
+    await wait_until(lambda: not held.busy)
+    await worker.caught_up()
     return worker
 
 
