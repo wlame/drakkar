@@ -134,25 +134,26 @@ async def test_enqueue_before_start_is_refused():
         await SplitProducer(KafkaConnectionConfig()).enqueue(TOPIC, record())
 
 
-async def test_five_thousand_records_keep_their_order_and_the_loop_stays_free(producer, log):
-    ticks = 0
-    stop = False
+async def test_five_thousand_records_keep_their_order_and_the_loop_stays_free(producer, client, log):
+    # The delivery reports are held back, as a slow broker holds them: enqueueing does not wait for them.
+    client.hold_deliveries = True
+    turned = asyncio.Event()
 
-    async def ticker() -> None:
-        nonlocal ticks
-        while not stop:
-            ticks += 1
-            await asyncio.sleep(0.001)
+    async def take_turns() -> None:
+        # Ends only when the event loop gives turns while every record waits for its report.
+        for _ in range(3):
+            await asyncio.sleep(0)
+        turned.set()
 
-    ticking = asyncio.create_task(ticker())
-    futures = []
-    for index in range(5000):
-        futures.append(await producer.enqueue(TOPIC, record(index)))
+    futures = [await producer.enqueue(TOPIC, record(index)) for index in range(5000)]
+    turning = asyncio.create_task(take_turns())
+    await asyncio.wait_for(turned.wait(), 5)
+    assert not any(future.done() for future in futures)
+
+    client.release_deliveries()
     await asyncio.wait_for(asyncio.gather(*futures), 20)
-    stop = True
-    await ticking
+    await turning
     assert [int(r.value) for r in log.records(TOPIC, 0)] == list(range(5000))
-    assert ticks > 10
 
 
 async def test_close_flushes_what_is_queued_and_ends_the_thread(log):
