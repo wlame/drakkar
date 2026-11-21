@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from drakkar.request_ids import RequestIdResolver
     from drakkar.sinks.dlq import DLQSink
     from drakkar.sinks.manager import CollectCallback, SinkManager
+    from drakkar.split.runtime import SplitRuntime
 
 
 @dataclass
@@ -45,6 +46,8 @@ class SourceContext:
     pending_budget: PendingBudget | None = None
     # Gives each message its request id; None builds one from the handler.
     request_ids: RequestIdResolver | None = None
+    # The split feature of the worker; None when it is off. The parts source needs it.
+    split: SplitRuntime | None = None
 
 
 class Source(Protocol):

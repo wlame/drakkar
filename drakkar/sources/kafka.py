@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
@@ -69,6 +69,46 @@ def _remaining(deadline: float) -> float:
     return max(deadline - time.monotonic(), MIN_TEARDOWN_STEP_SECONDS)
 
 
+class SourceGauges:
+    """The worker-level metrics a Kafka source writes about its topic; none of them has a partition label."""
+
+    def assigned(self, count: int) -> None:
+        """The number of partitions assigned to this worker."""
+        assigned_partitions.set(count)
+
+    def backpressure(self, active: bool) -> None:
+        """Whether the fetch is paused by backpressure."""
+        backpressure_active.set(1 if active else 0)
+
+    def queued(self, total: int) -> None:
+        """Messages in the partition queues plus tasks in flight."""
+        total_queued.set(total)
+
+    def idle(self, seconds: float) -> None:
+        """Time with nothing to consume and nothing queued."""
+        consumer_idle.inc(seconds)
+
+    def idle_waste(self, slot_seconds: float) -> None:
+        """Executor slots that were free while messages waited."""
+        executor_idle_waste.inc(slot_seconds)
+
+
+class GroupSource(Protocol):
+    """What the detach controller needs of the consumer group membership it leaves and joins."""
+
+    @property
+    def is_ready(self) -> bool: ...
+
+    @property
+    def is_group_member(self) -> bool: ...
+
+    def _poll_waits_end(self) -> bool: ...
+
+    async def leave_group(self) -> LeaveOutcome: ...
+
+    async def join_group(self) -> bool: ...
+
+
 class KafkaSource:
     """The Kafka consumer as an input source.
 
@@ -84,6 +124,12 @@ class KafkaSource:
     """
 
     name = 'kafka'
+    # Added to a partition number wherever this source shows it: a metric
+    # label, a log field, a recorder row, its snapshot. Calls to the Kafka
+    # client and the keys of ``processors`` keep the real number. A source of
+    # another topic sets a base, so its partitions are told apart.
+    partition_label_base = 0
+    _gauges = SourceGauges()
 
     def __init__(self, consume_pause: ConsumePauseController) -> None:
         # Operator-driven debug pause. It shares ``consumer.pause``/``resume``
@@ -136,6 +182,11 @@ class KafkaSource:
         assert self._ctx is not None
         return self._ctx
 
+    def _shown(self, partition_id: int) -> int:
+        """The number this source shows for one of its partitions."""
+        base = self.partition_label_base
+        return partition_id + base if base else partition_id
+
     async def start(self) -> None:
         """Align the fleet, construct the consumer, and subscribe."""
         ctx = self._context()
@@ -169,14 +220,27 @@ class KafkaSource:
                 hint='executor.window_size has no effect: a stream handler takes one message at a time',
             )
 
+        await self._subscribe()
+
+    def _consumer_settings(self) -> dict[str, Any]:
+        """The connection and the topic, group and poll settings of this source's consumer."""
+        config = self._context().config
+        return {
+            'connection': config.declared_connection(
+                'sources.kafka.connection', 'kafka', config.sources.kafka.connection
+            ),
+            'source': config.sources.kafka,
+        }
+
+    async def _subscribe(self) -> None:
+        """Construct the consumer, subscribe it, and start the refresh of the lag gauge."""
         self.consumer = KafkaConsumer(
-            connection=config.declared_connection('sources.kafka.connection', 'kafka', config.sources.kafka.connection),
-            source=config.sources.kafka,
+            **self._consumer_settings(),
             on_assign=self.on_assign,
             on_revoke=self.on_revoke,
         )
         await self.consumer.subscribe()
-        self._lag_refresh_task = asyncio.create_task(self._refresh_lag_forever(), name='kafka:lag-refresh')
+        self._lag_refresh_task = asyncio.create_task(self._refresh_lag_forever(), name=f'{self.name}:lag-refresh')
 
     async def _refresh_lag_forever(self) -> None:
         """Refresh the broker-lag gauge every ``LAG_REFRESH_INTERVAL_SECONDS`` until cancelled."""
@@ -202,7 +266,7 @@ class KafkaSource:
         for pid, value in lag.items():
             # A revoke during the read removed the label; do not bring it back.
             if pid in self.processors:
-                consumer_lag.labels(partition=str(pid)).set(value)
+                consumer_lag.labels(partition=str(self._shown(pid))).set(value)
 
     def _lag_refresh_allowed(self) -> bool:
         """Whether the lag refresh may send a broker read now: no revoke drain and no stop in progress."""
@@ -210,7 +274,7 @@ class KafkaSource:
 
     def _log_lag_query_failure(self, partition_id: int, exc: Exception) -> None:
         """Log one failed watermark query of the refresh, under the refresh's one-line-per-60-s limit."""
-        self._log_lag_refresh_failure(exc, partition=partition_id)
+        self._log_lag_refresh_failure(exc, partition=self._shown(partition_id))
 
     def _log_lag_refresh_failure(self, exc: Exception, **context: int) -> None:
         """Log a failure of the lag refresh at most once per 60 s; the gauge keeps its last values."""
@@ -248,14 +312,14 @@ class KafkaSource:
             if partition_ids:
                 await consumer.resume(partition_ids)
                 self.paused = False
-                backpressure_active.set(0)
+                self._gauges.backpressure(False)
 
         if not self.paused and queued >= high_watermark:
             partition_ids = list(self.processors.keys())
             if partition_ids:
                 await consumer.pause(partition_ids)
                 self.paused = True
-                backpressure_active.set(1)
+                self._gauges.backpressure(True)
 
     def _route_messages(self, messages: list[SourceMessage]) -> None:
         """Hand each polled message to the loop of its partition; drop and count one with no loop."""
@@ -269,11 +333,11 @@ class KafkaSource:
                 # acknowledging the revoke. The new partition owner
                 # redelivers from the last committed offset, so
                 # dropping here is safe — but it must be visible.
-                messages_unassigned_dropped.labels(partition=str(msg.partition)).inc()
+                messages_unassigned_dropped.labels(partition=str(self._shown(msg.partition))).inc()
                 logger.warning(
                     'message_for_unassigned_partition_dropped',
                     category='kafka',
-                    partition=msg.partition,
+                    partition=self._shown(msg.partition),
                     offset=msg.offset,
                 )
 
@@ -316,7 +380,7 @@ class KafkaSource:
             last_tick = now
 
             total = self.total_queued()
-            total_queued.set(total)
+            self._gauges.queued(total)
             await self._pause_dead_partitions(consumer)
             queued = self.queued_messages()
 
@@ -326,7 +390,7 @@ class KafkaSource:
             if waiting > 0:
                 idle_slots = max_executors - ctx.executor_pool.active_count
                 if idle_slots > 0:
-                    executor_idle_waste.inc(idle_slots * dt)
+                    self._gauges.idle_waste(idle_slots * dt)
 
             await self._apply_backpressure(consumer, queued, low_watermark, high_watermark)
 
@@ -347,7 +411,7 @@ class KafkaSource:
                         'messages_polled_at_stop_dropped',
                         category='kafka',
                         count=len(messages),
-                        partitions=sorted({msg.partition for msg in messages}),
+                        partitions=sorted({self._shown(msg.partition) for msg in messages}),
                     )
                 break
             self._route_messages(messages)
@@ -365,7 +429,7 @@ class KafkaSource:
                 # Measures time with genuinely nothing to do (consumer lag is zero).
                 # Time out of the group is not idle: the worker chose to take no work.
                 if total == 0 and not self.paused and self._group_member:
-                    consumer_idle.inc(dt)
+                    self._gauges.idle(dt)
                 await asyncio.sleep(POLL_IDLE_SLEEP)
 
     @property
@@ -570,7 +634,7 @@ class KafkaSource:
                         await log.awarning(
                             'final_commit_failed',
                             category='kafka',
-                            partition=processor.partition_id,
+                            partition=self._shown(processor.partition_id),
                             error=str(e),
                             exc_info=True,
                         )
@@ -592,7 +656,7 @@ class KafkaSource:
                 await log.awarning(
                     'processor_stop_failed',
                     category='lifecycle',
-                    partition=processor.partition_id,
+                    partition=self._shown(processor.partition_id),
                     error=str(exc),
                     exc_info=True,
                 )
@@ -649,7 +713,7 @@ class KafkaSource:
     def snapshot(self) -> dict[str, Any]:
         """Source state for worker_state rows and the UI."""
         return {
-            'assigned_partitions': sorted(self.processors),
+            'assigned_partitions': sorted(self._shown(pid) for pid in self.processors),
             'partition_count': len(self.processors),
             'paused': self.paused,
             'total_queued': self.total_queued(),
@@ -658,35 +722,17 @@ class KafkaSource:
     def on_assign(self, partition_ids: list[int]) -> None:
         """Handle new partition assignments."""
         ctx = self._context()
-        config = ctx.config
         if ctx.recorder:
-            ctx.recorder.record_assigned(partition_ids)
+            ctx.recorder.record_assigned([self._shown(pid) for pid in partition_ids])
         newly_added: list[int] = []
         for pid in partition_ids:
             if pid not in self.processors:
-                processor = PartitionProcessor(
-                    partition_id=pid,
-                    handler=ctx.handler,
-                    executor_pool=ctx.executor_pool,
-                    window_size=config.executor.window_size,
-                    max_retries=config.executor.max_retries,
-                    on_collect=ctx.on_collect,
-                    on_commit=self._handle_commit,
-                    recorder=ctx.recorder,
-                    on_parse_error=config.sources.kafka.on_parse_error,
-                    dlq_send=ctx.sink_manager.send_parse_dlq if ctx.dlq_sink else None,
-                    on_dlq_failure=config.dlq.on_send_failure,
-                    on_stall=self.pause_stalled_partition,
-                    execute_dlq=ctx.sink_manager.send_execute_dlq,
-                    executor_on_failure=config.executor.on_failure,
-                    budget=ctx.pending_budget,
-                    request_ids=ctx.request_ids,
-                )
+                processor = PartitionProcessor(**self._processor_settings(pid))
                 self.processors[pid] = processor
                 processor.start()
                 newly_added.append(pid)
 
-        assigned_partitions.set(len(self.processors))
+        self._gauges.assigned(len(self.processors))
 
         # If backpressure or an operator debug pause is active, the
         # previously-assigned partitions are already paused. Newly-assigned
@@ -703,6 +749,35 @@ class KafkaSource:
             pt = asyncio.ensure_future(self._safe_call(_pause_newly_assigned()))
             self.background_tasks.add(pt)
             pt.add_done_callback(self.background_tasks.discard)
+
+        self._notify_handler_of_assign(partition_ids)
+
+    def _processor_settings(self, partition_id: int) -> dict[str, Any]:
+        """The arguments of the processor of one assigned partition."""
+        ctx = self._context()
+        config = ctx.config
+        return {
+            'partition_id': partition_id,
+            'handler': ctx.handler,
+            'executor_pool': ctx.executor_pool,
+            'window_size': config.executor.window_size,
+            'max_retries': config.executor.max_retries,
+            'on_collect': ctx.on_collect,
+            'on_commit': self._handle_commit,
+            'recorder': ctx.recorder,
+            'on_parse_error': config.sources.kafka.on_parse_error,
+            'dlq_send': ctx.sink_manager.send_parse_dlq if ctx.dlq_sink else None,
+            'on_dlq_failure': config.dlq.on_send_failure,
+            'on_stall': self.pause_stalled_partition,
+            'execute_dlq': ctx.sink_manager.send_execute_dlq,
+            'executor_on_failure': config.executor.on_failure,
+            'budget': ctx.pending_budget,
+            'request_ids': ctx.request_ids,
+        }
+
+    def _notify_handler_of_assign(self, partition_ids: list[int]) -> None:
+        """Call the handler's ``on_assign`` hook on a background task."""
+        ctx = self._context()
 
         async def _on_assign_with_ctx() -> None:
             bind_contextvars(hook='on_assign', partitions=partition_ids)
@@ -752,7 +827,7 @@ class KafkaSource:
         """
         ctx = self._context()
         if ctx.recorder:
-            ctx.recorder.record_revoked(partition_ids)
+            ctx.recorder.record_revoked([self._shown(pid) for pid in partition_ids])
         to_stop: list[PartitionProcessor] = []
         for pid in partition_ids:
             # A revoked partition is no longer ours — clear any stall-pause
@@ -761,16 +836,16 @@ class KafkaSource:
             self.dead_partitions_paused.discard(pid)
             processor = self.processors.pop(pid, None)
             with contextlib.suppress(KeyError):
-                consumer_lag.remove(str(pid))
+                consumer_lag.remove(str(self._shown(pid)))
             if processor:
                 to_stop.append(processor)
 
-        assigned_partitions.set(len(self.processors))
+        self._gauges.assigned(len(self.processors))
         if not self.processors and self.paused:
             # Nothing is left to pause, so the next assignment (after a join,
             # say) must not start under an old backpressure pause.
             self.paused = False
-            backpressure_active.set(0)
+            self._gauges.backpressure(False)
 
         if to_stop:
             self._revokes_in_progress += 1
@@ -778,6 +853,12 @@ class KafkaSource:
                 await asyncio.gather(*(self._stop_processor(p) for p in to_stop))
             finally:
                 self._revokes_in_progress -= 1
+
+        self._notify_handler_of_revoke(partition_ids)
+
+    def _notify_handler_of_revoke(self, partition_ids: list[int]) -> None:
+        """Call the handler's ``on_revoke`` hook on a background task."""
+        ctx = self._context()
 
         async def _on_revoke_with_ctx() -> None:
             bind_contextvars(hook='on_revoke', partitions=partition_ids)
@@ -824,14 +905,14 @@ class KafkaSource:
         ctx = self._context()
         self.stalled_partitions.add(partition_id)
         if ctx.recorder:
-            ctx.recorder.record_partition_stalled(partition_id)
+            ctx.recorder.record_partition_stalled(self._shown(partition_id))
         if self.consumer is not None:
             try:
                 await self.consumer.pause([partition_id])
                 logger.error(
                     'partition_paused_on_stall',
                     category='lifecycle',
-                    partition=partition_id,
+                    partition=self._shown(partition_id),
                     hint='delivery (incl. DLQ) unconfirmed and dlq.on_send_failure=stall; '
                     'partition paused — fix the downstream and restart the worker to resume',
                 )
@@ -839,7 +920,7 @@ class KafkaSource:
                 logger.error(
                     'partition_stall_pause_failed',
                     category='lifecycle',
-                    partition=partition_id,
+                    partition=self._shown(partition_id),
                     error=str(e),
                     exc_info=True,
                 )
@@ -859,7 +940,7 @@ class KafkaSource:
             logger.error(
                 'partition_paused_on_death',
                 category='lifecycle',
-                partitions=newly_dead,
+                partitions=[self._shown(pid) for pid in newly_dead],
                 hint='the partition loop died; the partition stays paused until restart or revoke',
             )
         except Exception as e:
@@ -869,7 +950,7 @@ class KafkaSource:
             logger.error(
                 'partition_death_pause_failed',
                 category='lifecycle',
-                partitions=newly_dead,
+                partitions=[self._shown(pid) for pid in newly_dead],
                 error=str(e),
                 exc_info=True,
             )
@@ -905,7 +986,7 @@ class KafkaSource:
                 logger.warning(
                     'stop_processor_drain_timeout',
                     category='lifecycle',
-                    partition=processor.partition_id,
+                    partition=self._shown(processor.partition_id),
                     inflight=processor.inflight_count,
                     queue_size=processor.queue_size,
                     cancelled_tasks=cancelled,
@@ -927,7 +1008,7 @@ class KafkaSource:
                         logger.warning(
                             'stop_processor_commit_failed',
                             category='kafka',
-                            partition=processor.partition_id,
+                            partition=self._shown(processor.partition_id),
                             error=str(e),
                         )
             await processor.stop(timeout=_remaining(deadline))
@@ -939,7 +1020,7 @@ class KafkaSource:
             logger.error(
                 'stop_processor_failed',
                 category='lifecycle',
-                partition=processor.partition_id,
+                partition=self._shown(processor.partition_id),
                 error=str(e),
                 error_type=type(e).__name__,
                 exc_info=True,
@@ -950,7 +1031,7 @@ class KafkaSource:
                 logger.error(
                     'stop_processor_force_stop_failed',
                     category='lifecycle',
-                    partition=processor.partition_id,
+                    partition=self._shown(processor.partition_id),
                     error=str(stop_exc),
                     exc_info=True,
                 )
@@ -992,7 +1073,7 @@ class KafkaSource:
 
     def dead_partitions(self) -> list[int]:
         """Partitions whose processing loop gave up; ``/readyz`` fails while any exist."""
-        return sorted(pid for pid, p in self.processors.items() if p.is_dead)
+        return sorted(self._shown(pid) for pid, p in self.processors.items() if p.is_dead)
 
     def uncommitted_offsets(self) -> int:
         """Pending (uncommitted) offsets across every assigned partition."""
@@ -1004,4 +1085,4 @@ class KafkaSource:
             await self.consumer.commit({partition_id: offset})
         recorder = self._context().recorder
         if recorder:
-            recorder.record_committed(partition_id, offset)
+            recorder.record_committed(self._shown(partition_id), offset)

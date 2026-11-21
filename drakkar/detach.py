@@ -48,7 +48,8 @@ from drakkar.detach_slots import DETACH_FEATURE, DetachSlot, SlotAcquire, slot_s
 from drakkar.metrics import attach_total, detach_requests, detached
 from drakkar.periodic import SYSTEM_CLOCK, Clock
 from drakkar.providers.resilience import ResilientCaller
-from drakkar.sources.kafka import LEAVE_MARGIN_SECONDS, KafkaSource, LeaveOutcome
+from drakkar.sources.kafka import LEAVE_MARGIN_SECONDS, GroupSource, LeaveOutcome
+from drakkar.sources.parts import SourcePair
 from drakkar.timefmt import format_rfc3339_micro
 
 if TYPE_CHECKING:
@@ -246,6 +247,8 @@ class DetachController:
     def __init__(self, app: DrakkarApp, *, clock: Clock = SYSTEM_CLOCK) -> None:
         self._app = app
         self._clock = clock
+        # The parts source of a worker that splits messages; a detach leaves its group too.
+        self._parts_source: GroupSource | None = None
         self._state = ATTACHED_STATE
         self._lock = asyncio.Lock()
         # The slot held from a won acquire until its release.
@@ -819,7 +822,7 @@ class DetachController:
     def _retry_period_runs(self, period: int) -> bool:
         return self._state.state == STATE_ATTACHING and period == self._attaching_period and not self._is_stopping()
 
-    async def _join_attempt(self, source: KafkaSource) -> bool:
+    async def _join_attempt(self, source: GroupSource) -> bool:
         """One join bounded by ``executor.drain_timeout`` plus the leave margin; a failure is logged."""
         bound = self._app.config.executor.drain_timeout + LEAVE_MARGIN_SECONDS
         try:
@@ -831,7 +834,7 @@ class DetachController:
             await logger.awarning('detach_join_failed', category='kafka', error='the join did not complete')
         return joined
 
-    async def _join_once(self, source: KafkaSource, bound: float) -> bool:
+    async def _join_once(self, source: GroupSource, bound: float) -> bool:
         """One join, bounded by ``bound`` seconds of the clock; False when it passes its bound."""
         join = asyncio.create_task(source.join_group(), name='drakkar-detach-join')
         limit = asyncio.create_task(self._clock.sleep(bound), name='drakkar-detach-join-bound')
@@ -941,8 +944,16 @@ class DetachController:
         kafka = self._app.config.sources.kafka
         return kafka.enabled and kafka.detach.enabled and self._source() is not None
 
-    def _source(self) -> KafkaSource | None:
-        return self._app.kafka_source
+    def follow_parts(self, parts: GroupSource) -> None:
+        """Make a detach leave, and an attach join, the consumer group of the parts source with the source group."""
+        self._parts_source = parts
+
+    def _source(self) -> GroupSource | None:
+        """The membership a detach leaves: the source group, with the parts group when the worker reads parts."""
+        source = self._app.kafka_source
+        if source is None or self._parts_source is None:
+            return source
+        return SourcePair(source, self._parts_source)
 
     def _is_stopping(self) -> bool:
         """Whether the worker stops: a stop began, or the source will not poll any more."""

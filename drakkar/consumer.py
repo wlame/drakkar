@@ -93,11 +93,16 @@ class KafkaConsumer:
         source: KafkaSourceConfig,
         on_assign: OnAssignCallback | None = None,
         on_revoke: OnRevokeCallback | None = None,
+        partition_label_base: int = 0,
     ) -> None:
         self._connection = connection
         self._source = source
         self._on_assign_cb = on_assign
         self._on_revoke_cb = on_revoke
+        # Added to a partition number in every log field and metric label of
+        # this consumer; calls to the client and to the callbacks keep the
+        # real number. 0 for the consumer of the source topic.
+        self._partition_label_base = partition_label_base
 
         # Framework-owned keys first, then the typed security block, then the
         # raw client_config escape hatch. ``merge_client_config`` defines that
@@ -141,6 +146,11 @@ class KafkaConsumer:
         """The consumer group this consumer joins."""
         return self._source.consumer_group
 
+    def _shown(self, partition_ids: Sequence[int]) -> list[int]:
+        """The numbers that log lines show for these partitions."""
+        base = self._partition_label_base
+        return [partition_id + base for partition_id in partition_ids] if base else list(partition_ids)
+
     async def subscribe(self) -> None:
         """Subscribe to the source topic with rebalance callbacks."""
         await self._consumer.subscribe(
@@ -160,7 +170,7 @@ class KafkaConsumer:
         logger.info(
             'partitions_assigned',
             category='kafka',
-            partitions=partition_ids,
+            partitions=self._shown(partition_ids),
             count=len(partition_ids),
         )
         # A commit remembered from an earlier assignment is stale once another
@@ -179,7 +189,7 @@ class KafkaConsumer:
         logger.info(
             'partitions_revoked',
             category='kafka',
-            partitions=partition_ids,
+            partitions=self._shown(partition_ids),
             count=len(partition_ids),
         )
         if self._on_revoke_cb:
@@ -223,21 +233,23 @@ class KafkaConsumer:
         ]
         await self._consumer.commit(offsets=topic_partitions, asynchronous=False)
         self._offsets_committed_here.update(offsets)
+        base = self._partition_label_base
         for partition_id in offsets:
-            offsets_committed.labels(partition=str(partition_id)).inc()
-        logger.debug('offsets_committed', category='kafka', offsets=offsets)
+            offsets_committed.labels(partition=str(partition_id + base)).inc()
+        shown = {partition_id + base: offset for partition_id, offset in offsets.items()} if base else offsets
+        logger.debug('offsets_committed', category='kafka', offsets=shown)
 
     async def pause(self, partition_ids: list[int]) -> None:
         """Pause consuming from specific partitions (backpressure)."""
         tps = [TopicPartition(self._source.topic, pid) for pid in partition_ids]
         await self._consumer.pause(tps)
-        logger.debug('partitions_paused', category='kafka', partitions=partition_ids)
+        logger.debug('partitions_paused', category='kafka', partitions=self._shown(partition_ids))
 
     async def resume(self, partition_ids: list[int]) -> None:
         """Resume consuming from previously paused partitions."""
         tps = [TopicPartition(self._source.topic, pid) for pid in partition_ids]
         await self._consumer.resume(tps)
-        logger.debug('partitions_resumed', category='kafka', partitions=partition_ids)
+        logger.debug('partitions_resumed', category='kafka', partitions=self._shown(partition_ids))
 
     async def get_total_lag(self, partition_ids: list[int]) -> int:
         """Get total consumer lag across all partitions.
@@ -369,7 +381,8 @@ class KafkaConsumer:
         committed: dict[int, int] = {}
         for row in rows:
             if row.error is not None:
-                _report_lag_query_failure(op='committed', error=row.error, partition=row.partition)
+                shown = row.partition + self._partition_label_base
+                _report_lag_query_failure(op='committed', error=row.error, partition=shown)
             elif row.offset >= 0:
                 committed[row.partition] = row.offset
         return committed
@@ -384,7 +397,8 @@ class KafkaConsumer:
             tp = TopicPartition(self._source.topic, partition_id)
             low, high = await self._consumer.get_watermark_offsets(tp, timeout=LAG_QUERY_TIMEOUT_SECONDS)
         except Exception as e:
-            _report_lag_query_failure(op='watermark', error=e, partition=partition_id)
+            shown = partition_id + self._partition_label_base
+            _report_lag_query_failure(op='watermark', error=e, partition=shown)
             return None
         return low, high
 

@@ -65,7 +65,9 @@ from drakkar.sinks.redis import RedisSink
 from drakkar.sources.base import Source
 from drakkar.sources.http import HttpSource
 from drakkar.sources.kafka import KafkaSource
+from drakkar.sources.parts import PartsSource
 from drakkar.sources.registry import build_sources
+from drakkar.split.runtime import SplitRuntime
 from drakkar.timeline_events import referenced_link_bases
 from drakkar.uipages import UIPage, build_pages, pages_referenced_bases
 
@@ -135,6 +137,10 @@ SETTINGS_CONSUMED_BEFORE_ON_STARTUP: tuple[ConsumedSetting, ...] = (
     ),
     ConsumedSetting(
         'sources.http.enabled',
+        'handler validation and source construction happen in DrakkarApp.__init__',
+    ),
+    ConsumedSetting(
+        'split.enabled',
         'handler validation and source construction happen in DrakkarApp.__init__',
     ),
     ConsumedSetting(
@@ -398,6 +404,9 @@ class DrakkarApp:
         # ``Any`` to keep drakkar.offload out of the import graph at app
         # construction time, mirroring ``_runtime_health``.
         self._offload_pool: Any = None
+        # The split feature of this worker; the lifecycle builds it when the
+        # worker reads the parts topic, and stops it after the sources.
+        self._split: SplitRuntime | None = None
 
         self._running = False
         # The exit code of the first request_stop call, or None when nothing
@@ -449,6 +458,12 @@ class DrakkarApp:
         # the card reads its state at each publish.
         self._detach = DetachController(self)
         self._lifecycle._is_detached = lambda: self._detach.is_detached
+        # A worker that reads the parts topic leaves and joins that group with
+        # the source group, and an operator's pause holds both consumers.
+        parts = self.parts_source
+        if parts is not None:
+            self._detach.follow_parts(parts)
+            self._consume_pause.follow_parts(parts)
 
     @property
     def config(self) -> DrakkarConfig:
@@ -489,8 +504,13 @@ class DrakkarApp:
 
     @property
     def kafka_source(self) -> KafkaSource | None:
-        """The Kafka input source, or None when ``sources.kafka`` is disabled."""
-        return next((s for s in self.sources if isinstance(s, KafkaSource)), None)
+        """The source of the source topic, or None when ``sources.kafka`` is disabled; never the parts source."""
+        return next((s for s in self.sources if isinstance(s, KafkaSource) and not isinstance(s, PartsSource)), None)
+
+    @property
+    def parts_source(self) -> PartsSource | None:
+        """The source of the parts topic, or None when the worker does not split messages."""
+        return next((s for s in self.sources if isinstance(s, PartsSource)), None)
 
     @property
     def http_source(self) -> HttpSource | None:

@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
 
@@ -51,6 +51,18 @@ if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
 
 logger = structlog.get_logger()
+
+
+class FollowingSource(Protocol):
+    """A source of another topic whose fetch an operator's pause holds together with the source topic."""
+
+    async def pause_for_operator(self) -> list[int]:
+        """Pause the fetch; return the numbers the source shows for the paused partitions."""
+        ...
+
+    async def resume_after_operator(self) -> None:
+        """Resume the fetch, unless the source's own backpressure holds it."""
+        ...
 
 
 class ConsumerNotReadyError(Exception):
@@ -66,6 +78,12 @@ class ConsumePauseController:
         self._resume_at_ms: int | None = None
         self._requested_seconds: int | None = None
         self._timer: asyncio.Task | None = None
+        # Sources of other topics that are paused and resumed with the source topic.
+        self._following: list[FollowingSource] = []
+
+    def follow_parts(self, source: FollowingSource) -> None:
+        """Make every pause and resume also act on ``source``."""
+        self._following.append(source)
 
     @property
     def active(self) -> bool:
@@ -105,6 +123,8 @@ class ConsumePauseController:
         partition_ids = self._pausable_partitions()
         if partition_ids:
             await app._consumer.pause(partition_ids)
+        for source in self._following:
+            partition_ids = partition_ids + await source.pause_for_operator()
         consume_pause_active.set(1)
         logger.warning(
             'consume_pause_started',
@@ -139,6 +159,8 @@ class ConsumePauseController:
             partition_ids = self._pausable_partitions()
             if partition_ids:
                 await app._consumer.resume(partition_ids)
+        for source in self._following:
+            await source.resume_after_operator()
         logger.warning('consume_pause_ended', category='kafka')
         return self.state()
 

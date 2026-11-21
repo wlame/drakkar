@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
+from drakkar.sources.parts import PartsSource
+
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
 
@@ -63,6 +65,11 @@ def create_health_router(drakkar_app: DrakkarApp) -> APIRouter:
         for pid, processor in sorted(drakkar_app.processors.items()):
             if processor.is_dead:
                 reasons.append(f'partition_{pid}_processor_died')
+        # The same for a partition of the parts topic, under the number the
+        # worker shows for it.
+        parts = drakkar_app.parts_source
+        if isinstance(parts, PartsSource):
+            reasons.extend(f'partition_{pid}_processor_died' for pid in parts.dead_partitions())
         if reasons:
             return JSONResponse({'status': 'not_ready', 'reasons': reasons}, status_code=503)
         return JSONResponse({'status': 'ready'})

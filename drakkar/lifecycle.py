@@ -74,6 +74,7 @@ from drakkar.detach_group import kafka_card_feature
 from drakkar.executor import ExecutorPool
 from drakkar.fleet.providers import BUILTIN_PROVIDERS
 from drakkar.fleet.service import FleetRegistry, PeerView
+from drakkar.handler import handler_splits
 from drakkar.hostinfo import effective_cpu_count
 from drakkar.kafka_security import describe_mixed_security
 from drakkar.logging import close_logging
@@ -103,6 +104,7 @@ from drakkar.recorder.postgres import RecorderPostgresSettings
 from drakkar.schedule import ARCHIVE_TASK_NAME, DEFAULT_CLUSTER
 from drakkar.sinks.manager import SinkNotConfiguredError
 from drakkar.sources.base import Source, SourceContext
+from drakkar.split.runtime import SplitRuntime
 from drakkar.timeline_events import TimelineEventEmitter
 from drakkar.watchdog import WatchdogFile
 
@@ -371,6 +373,7 @@ class AppLifecycle:
             self._wire_offload_pool()
             await self._start_cache()
             await self._connect_sinks()
+            await self._start_split()
             await self._warn_ignored_source_config()
             self._bind_sources()
             await self._run_on_ready_and_periodics()
@@ -1244,6 +1247,38 @@ class AppLifecycle:
         watch_periodic_loop(task, ARCHIVE_TASK_NAME)
         app._periodic_tasks.append(task)
 
+    async def _start_split(self) -> None:
+        """Build and start the split feature of a worker that reads the parts topic.
+
+        Runs after the sinks connect and before the sources are bound: the
+        parts source takes the runtime from its context. The feature is on
+        when the parts source was built, which ``DrakkarApp.__init__`` decides
+        from ``split.enabled`` and the handler. A handler that splits on a
+        worker with the feature off says so once.
+
+        Raises:
+            ConfigurationError: a split topic does not exist, or the results topic has
+                another partition count than the source topic.
+        """
+        app = self._app
+        if app.parts_source is None:
+            if handler_splits(app._handler):
+                await logger.bind(worker_id=app._worker_id).ainfo(
+                    'split_disabled',
+                    category='split',
+                    hint='the handler defines split() but split.enabled is false: split() is never called',
+                )
+            return
+        app._sink_manager.set_split_stages(app._config.split_aggregate_sinks)
+        # Kept before the start, so the shutdown after a failed start closes its producer.
+        app._split = self._build_split_runtime()
+        await app._split.start()
+
+    def _build_split_runtime(self) -> SplitRuntime:
+        """The split runtime of this worker, from the config in effect after ``on_startup``."""
+        app = self._app
+        return SplitRuntime(app._config, worker=app._worker_id, instance=app._instance)
+
     async def _warn_ignored_source_config(self) -> None:
         """A disabled source block with invalid values is ignored, not fatal — say so once.
 
@@ -1293,6 +1328,7 @@ class AppLifecycle:
             is_worker_ready=lambda: app.is_ready,
             pending_budget=app._pending_budget,
             request_ids=app._request_ids,
+            split=app._split,
         )
         for source in app.sources:
             source.bind(ctx)
@@ -1433,8 +1469,8 @@ class AppLifecycle:
         #
         # Uncommitted offsets exist only with a Kafka source; a worker
         # without one reports 0 rather than leaving the gauge stale.
-        kafka = app.kafka_source
-        uncommitted_offsets_at_stop.set(kafka.uncommitted_offsets() if kafka is not None else 0)
+        kafka_sources = [source for source in (app.kafka_source, app.parts_source) if source is not None]
+        uncommitted_offsets_at_stop.set(sum(source.uncommitted_offsets() for source in kafka_sources))
 
         # In-flight executor tasks: read the pool's running ``active_count``,
         # which is the same accessor used by ``ExecutorPool`` to drive the
@@ -1540,6 +1576,13 @@ class AppLifecycle:
         if app._cluster_election is not None:
             detach = app.detach
             steps.append(StopStep('detach_slot_release_failed', 'kafka', lambda: detach.release_at_stop(time_left())))
+
+        # The split producer closes once the sources have stopped: every part
+        # has reported its result or given up, and what the producer still
+        # holds gets a few seconds to be delivered.
+        if app._split is not None:
+            split = app._split
+            steps.append(StopStep('split_stop_failed', 'split', lambda: split.stop(deadline), clear='_split'))
 
         # Shut the offload pool down first among the observability-
         # adjacent subsystems: hooks have finished draining by now, so
