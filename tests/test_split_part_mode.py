@@ -8,6 +8,7 @@ scripted.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,6 +17,8 @@ from pydantic import BaseModel
 from structlog.contextvars import get_contextvars
 from structlog.testing import capture_logs
 
+from drakkar import partition as partition_module
+from drakkar.budget import PendingBudget
 from drakkar.config.connections import KafkaConnectionConfig
 from drakkar.config.sinks import DEFAULT_SINK_POLICY
 from drakkar.executor import ExecutorPool
@@ -23,6 +26,7 @@ from drakkar.handler import BaseDrakkarHandler
 from drakkar.metrics import (
     delivery_stalled_offsets,
     messages_consumed,
+    queued_messages_dropped_at_stop,
     split_parts_processed,
     split_result_write_failures,
     split_results_ignored,
@@ -151,8 +155,9 @@ class PartPipeline:
         handler: BaseDrakkarHandler,
         pool: ExecutorPool | None = None,
         *sinks: CountingSink,
-        report: Any = None,
+        producer: Any = None,
         max_part_data: int = 65536,
+        window_size: int = 10,
         **processor_kwargs: Any,
     ) -> None:
         self.reports = Reports()
@@ -184,18 +189,27 @@ class PartPipeline:
         async def on_stall(partition_id: int) -> None:
             self.stalls.append(partition_id)
 
+        # With a producer the report is the real writer, which reads the stop of this processor.
+        self.stopped = asyncio.Event()
+        report: Any = self.reports
+        if producer is not None:
+            writer = ResultWriter(
+                producer, results_topic=RESULTS_TOPIC, stopped=self.stopped, partition=SHOWN_PARTITION
+            )
+            report = writer.write
         part_mode = PartMode(
             worker=WORKER,
             max_part_data=max_part_data,
             part_data_model=None,
-            report=report if report is not None else self.reports,
+            report=report,
             source_group=GROUP,
+            stopped=self.stopped,
         )
         self.processor = PartitionProcessor(
             partition_id=PARTS_PARTITION,
             handler=handler,
             executor_pool=pool if pool is not None else ScriptedPool(),
-            window_size=10,
+            window_size=window_size,
             max_retries=3,
             on_collect=part_collect(self.manager, on_collect),
             on_commit=on_commit,
@@ -300,6 +314,60 @@ async def test_a_task_sent_to_the_dlq_fails_the_part_and_writes_no_record():
     assert pipeline.dlq.sent == []
     assert pipeline.recorder.of('message_dlq') == []
     assert split_parts_processed.labels(outcome='failed')._value.get() == before + 1
+
+
+@pytest.mark.parametrize('dlq_first', [True, False])
+async def test_one_task_of_two_sent_to_the_dlq_ends_the_part_for_the_other_task_too(dlq_first):
+    ok_gate, bad_gate = asyncio.Event(), asyncio.Event()
+
+    class Handler(FanOutHandler):
+        async def on_error(self, task, error):
+            return ErrorAction.DLQ
+
+        async def on_message_complete(self, group):
+            return postgres_result()
+
+    sink = CountingSink('main', 'postgres')
+    pool = ScriptedPool(failing={'t-bad'}, gates={'t-ok': ok_gate, 't-bad': bad_gate})
+    pipeline = PartPipeline(Handler(['t-ok', 't-bad'], {'t-ok': postgres_result()}), pool, sink)
+    pipeline.reports.gate = asyncio.Event()
+    processor = pipeline.processor
+
+    pipeline.start()
+    await wait_for(lambda: processor.inflight_count == 2)
+    first, second = (bad_gate, ok_gate) if dlq_first else (ok_gate, bad_gate)
+    first.set()
+    await wait_for(lambda: processor.inflight_count == 1)
+    # One task has ended: nothing is reported while the other one runs.
+    assert pipeline.reports.calls == []
+    second.set()
+    await wait_for(lambda: len(pipeline.reports.calls) == 1)
+    # The report is in flight: the offset has not completed.
+    assert pipeline.pending() == 1
+    assert pipeline.commits == []
+    pipeline.reports.gate.set()
+    await wait_for(pipeline.all_done)
+    await processor.stop()
+
+    [result] = pipeline.reports.results
+    assert (result.outcome, result.tasks_succeeded, result.tasks_failed) == ('failed', 1, 1)
+    assert result.dlq is not None
+    assert (result.dlq.stage, result.dlq.task_id, result.dlq.sink, result.dlq.attempts) == ('execute', 't-bad', None, 1)
+    # No record reaches the DLQ sink, and the message result of the part is never delivered.
+    assert pipeline.dlq.sent == []
+    not_started = pipeline.recorder.of('sink_not_started')
+    if dlq_first:
+        # The other task ended after the outcome: its result did not start either.
+        assert sink.calls == 0
+        assert result.deliveries == {}
+        assert len(not_started) == 2
+    else:
+        # The other task had delivered its result before the outcome.
+        assert sink.calls == 1
+        assert result.deliveries == {'postgres/main': SinkCounts(delivered=1)}
+        assert len(not_started) == 1
+    assert all('"reason":"message_dlq"' in row['metadata'] for row in not_started)
+    assert pipeline.commits == [(PARTS_PARTITION, 1)]
 
 
 async def test_executor_on_failure_dlq_ends_the_part_with_the_capture():
@@ -422,6 +490,46 @@ async def test_a_raise_of_arrange_fails_every_part_of_the_window_and_the_loop_go
     failed = [line for line in logs if line['event'] == 'split_part_arrange_failed']
     assert len(failed) == 1
     assert (failed[0]['partition'], failed[0]['offsets']) == (SHOWN_PARTITION, [0, 1])
+    assert not [line for line in logs if line['event'] == 'partition_processor_restarting']
+
+
+@pytest.mark.parametrize(
+    ('answer', 'error_part'),
+    [
+        (lambda task: (task,), 'arrange returned tuple, want a list of ExecutorTask'),
+        (
+            lambda task: [SimpleNamespace(task_id='x', source_offsets=[0], request_id=None, labels={})],
+            'arrange returned a list with SimpleNamespace, want a list of ExecutorTask',
+        ),
+        (lambda task: None, 'NoneType'),
+    ],
+)
+async def test_an_answer_of_arrange_that_is_no_task_list_fails_the_parts_like_a_raise(answer, error_part):
+    class Handler(BaseDrakkarHandler):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def arrange(self, messages, pending):
+            self.calls += 1
+            tasks = [ExecutorTask(task_id=f't-{m.offset}', args=['x'], source_offsets=[m.offset]) for m in messages]
+            return answer(tasks[0]) if self.calls == 1 else tasks
+
+    pipeline = PartPipeline(Handler())
+    processor = pipeline.processor
+
+    with capture_logs() as logs:
+        pipeline.start(part_message(offset=0))
+        await wait_for(lambda: len(pipeline.reports.calls) == 1)
+        processor.enqueue(part_message(offset=1))
+        await wait_for(pipeline.all_done)
+        await processor.stop()
+
+    results = pipeline.reports.by_index()
+    assert results[0].outcome == 'failed'
+    assert results[0].error is not None and error_part in results[0].error
+    assert results[1].outcome == 'ok'
+    assert not processor.is_dead
+    assert pipeline.commits[-1] == (PARTS_PARTITION, 2)
     assert not [line for line in logs if line['event'] == 'partition_processor_restarting']
 
 
@@ -596,6 +704,35 @@ async def test_a_window_result_of_parts_is_delivered_as_before():
     assert pipeline.reports.results[0].outcome == 'ok'
 
 
+async def test_a_window_result_that_names_an_aggregate_sink_is_not_delivered_and_is_logged():
+    aggregate_sink_calls: list[int] = []
+
+    class Handler(FanOutHandler):
+        async def on_window_complete(self, results, source_messages):
+            return aggregate_result()
+
+    pipeline = PartPipeline(Handler(['t-a']))
+    aggregate = pipeline.manager.sinks[AGGREGATE_SINK]
+    aggregate.deliver = lambda payloads: aggregate_sink_calls.append(len(payloads))  # ty: ignore[invalid-assignment]
+
+    with capture_logs() as logs:
+        pipeline.start()
+        await wait_for(lambda: any(line['event'] == 'split_stage_error' for line in logs))
+        await wait_for(pipeline.all_done)
+        await pipeline.processor.stop()
+
+    # A window result has no message that could carry the outcome: the part itself is ok.
+    assert aggregate_sink_calls == []
+    assert pipeline.reports.results[0].outcome == 'ok'
+    [line] = [line for line in logs if line['event'] == 'split_stage_error']
+    assert (line['log_level'], line['category'], line['partition'], line['error']) == (
+        'error',
+        'split',
+        SHOWN_PARTITION,
+        STAGE_ERROR,
+    )
+
+
 async def test_capture_stage_error_keeps_the_first_outcome_and_needs_capture_mode():
     manager = SinkManager()
     message = part_message()
@@ -759,43 +896,9 @@ class DownProducer:
     def __init__(self) -> None:
         self.attempts = 0
 
-    async def enqueue(self, topic: str, record: Any) -> asyncio.Future[None]:
+    async def publish(self, topic: str, record: Any) -> None:
         self.attempts += 1
-        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        future.set_exception(SplitProduceError('broker transport failure', final=False))
-        return future
-
-
-async def test_a_stop_while_the_report_waits_in_its_backoff_ends_the_drain_with_the_offset_pending():
-    producer = DownProducer()
-    holder: dict[str, PartitionProcessor] = {}
-    writer = ResultWriter(
-        producer,  # ty: ignore[invalid-argument-type]
-        results_topic=RESULTS_TOPIC,
-        stopping=lambda: holder['processor'].is_stopping,
-    )
-    pipeline = PartPipeline(one_task_handler(), report=writer.write)
-    holder['processor'] = processor = pipeline.processor
-    failures = split_result_write_failures._value.get()
-
-    with capture_logs() as logs:
-        pipeline.start()
-        await wait_for(lambda: producer.attempts == 1 and processor.inflight_count == 0)
-        # The write failed once and now waits a second before its next attempt.
-        processor.signal_stop()
-        await asyncio.wait_for(processor.drain(), timeout=1.0)
-        await processor.stop(timeout=1.0)
-
-    assert producer.attempts == 1
-    assert split_result_write_failures._value.get() == failures + 1
-    # The offset was neither completed nor stalled: the next owner runs the part again.
-    assert pipeline.pending() == 1
-    assert processor.offset_tracker.committable() is None
-    assert pipeline.commits == []
-    assert pipeline.stalls == []
-    retries = [line for line in logs if line['event'] == 'split_result_write_failed']
-    assert [(line['log_level'], line['final'], line['part']) for line in retries] == [('warning', False, 0)]
-    assert not [line for line in logs if line['event'] == 'zombie_tasks_cancelled']
+        raise SplitProduceError('broker transport failure', final=False)
 
 
 class RecordingProducer:
@@ -805,31 +908,53 @@ class RecordingProducer:
         self.confirms = confirms
         self.records: list[Any] = []
 
-    async def enqueue(self, topic: str, record: Any) -> asyncio.Future[None]:
+    async def publish(self, topic: str, record: Any) -> None:
         self.records.append(record)
-        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        if self.confirms:
-            future.set_result(None)
-        return future
+        if not self.confirms:
+            await asyncio.Event().wait()
 
 
-def draining_pipeline(producer: RecordingProducer, gate: asyncio.Event) -> PartPipeline:
-    """A pipeline whose one task waits for ``gate``, with a real writer that reads the processor's stop flag."""
-    holder: dict[str, PartitionProcessor] = {}
-    writer = ResultWriter(
-        producer,  # ty: ignore[invalid-argument-type]
-        results_topic=RESULTS_TOPIC,
-        stopping=lambda: holder['processor'].is_stopping,
-    )
-    pipeline = PartPipeline(one_task_handler(), ScriptedPool(gates={'t-a': gate}), report=writer.write)
-    holder['processor'] = pipeline.processor
-    return pipeline
+async def test_a_stop_while_the_report_waits_in_its_backoff_ends_the_drain_with_the_offset_pending():
+    producer = DownProducer()
+    pipeline = PartPipeline(one_task_handler(), producer=producer)
+    processor = pipeline.processor
+    failures = split_result_write_failures._value.get()
+
+    with capture_logs() as logs:
+        pipeline.start()
+        await wait_for(lambda: producer.attempts == 1 and processor.inflight_count == 0)
+        # The write failed once and now waits a second before its next attempt.
+        processor.signal_stop()
+        await asyncio.wait_for(processor.drain(), timeout=0.5)
+        await processor.stop(timeout=1.0)
+
+    assert producer.attempts == 1
+    assert split_result_write_failures._value.get() == failures + 1
+    # The offset was neither completed nor stalled: the next owner runs the part again.
+    assert pipeline.pending() == 1
+    assert processor.offset_tracker.committable() is None
+    assert pipeline.commits == []
+    assert pipeline.stalls == []
+    [retry] = [line for line in logs if line['event'] == 'split_result_write_failed']
+    assert retry == {
+        'event': 'split_result_write_failed',
+        'log_level': 'warning',
+        'category': 'split',
+        'job': f'{SOURCE_PARTITION}:{SOURCE_OFFSET}#1',
+        'partition': SHOWN_PARTITION,
+        'part': 0,
+        'error': 'broker transport failure',
+        'final': False,
+        'attempt': 1,
+        'suppressed': 0,
+    }
+    assert not [line for line in logs if line['event'] == 'zombie_tasks_cancelled']
 
 
 async def test_a_part_that_finishes_while_its_partition_drains_is_still_reported():
     gate = asyncio.Event()
     producer = RecordingProducer()
-    pipeline = draining_pipeline(producer, gate)
+    pipeline = PartPipeline(one_task_handler(), ScriptedPool(gates={'t-a': gate}), producer=producer)
     processor = pipeline.processor
 
     pipeline.start()
@@ -847,11 +972,10 @@ async def test_a_part_that_finishes_while_its_partition_drains_is_still_reported
 
 
 async def test_a_write_with_no_delivery_report_holds_a_drain_only_for_the_stop_grace(monkeypatch):
-    monkeypatch.setattr(partmode, 'STOP_CHECK_SECONDS', 0.005)
     monkeypatch.setattr(partmode, 'STOP_GRACE_SECONDS', 0.05)
     gate = asyncio.Event()
     producer = RecordingProducer(confirms=False)
-    pipeline = draining_pipeline(producer, gate)
+    pipeline = PartPipeline(one_task_handler(), ScriptedPool(gates={'t-a': gate}), producer=producer)
     processor = pipeline.processor
 
     pipeline.start()
@@ -868,40 +992,87 @@ async def test_a_write_with_no_delivery_report_holds_a_drain_only_for_the_stop_g
     assert pipeline.stalls == []
 
 
+async def test_a_stop_during_the_message_hook_still_ends_the_part_with_its_report():
+    hook_entered = asyncio.Event()
+    hook_may_end = asyncio.Event()
+
+    class Handler(FanOutHandler):
+        async def on_message_complete(self, group):
+            hook_entered.set()
+            await hook_may_end.wait()
+            return postgres_result()
+
+    sink = CountingSink('main', 'postgres')
+    producer = RecordingProducer()
+    pipeline = PartPipeline(Handler(['t-a']), None, sink, producer=producer)
+    processor = pipeline.processor
+
+    pipeline.start()
+    await asyncio.wait_for(hook_entered.wait(), 2)
+    processor.signal_stop()
+    drain = asyncio.create_task(processor.drain())
+    await asyncio.sleep(0.05)
+    # The drain waits for the hook: the part's offset is still pending.
+    assert not drain.done()
+    assert producer.records == []
+    hook_may_end.set()
+    await asyncio.wait_for(drain, timeout=2.0)
+    await processor.stop()
+
+    # The message result was delivered, then the part was reported, then its offset was committed.
+    assert sink.calls == 1
+    assert len(producer.records) == 1
+    assert pipeline.commits == [(PARTS_PARTITION, 1)]
+    assert pipeline.pending() == 0
+
+
 async def test_a_report_that_can_never_be_written_stalls_the_offset():
     pipeline = PartPipeline(one_task_handler())
-    pipeline.reports.error = SplitProduceError('Broker: Unknown topic or partition', final=True)
+    pipeline.reports.error = partmode.PartReportError('Broker: Unknown topic or partition', attempt=3)
     stalled = delivery_stalled_offsets.labels(partition=str(SHOWN_PARTITION))._value.get()
     processed = split_parts_processed.labels(outcome='ok')._value.get()
 
     with capture_logs() as logs:
-        pipeline.start()
-        await wait_for(lambda: pipeline.stalls == [PARTS_PARTITION])
+        pipeline.start(part_message(offset=0), part_message(offset=1))
+        await wait_for(lambda: len(pipeline.processor._stalled_offsets) == 2)
         await asyncio.wait_for(pipeline.processor.drain(), timeout=1.0)
         await pipeline.processor.stop()
 
-    assert pipeline.pending() == 1
+    assert pipeline.pending() == 2
+    # The partition is paused once, and one line is written for both parts.
+    assert pipeline.stalls == [PARTS_PARTITION]
     assert pipeline.commits == []
-    assert delivery_stalled_offsets.labels(partition=str(SHOWN_PARTITION))._value.get() == stalled + 1
+    assert delivery_stalled_offsets.labels(partition=str(SHOWN_PARTITION))._value.get() == stalled + 2
     assert split_parts_processed.labels(outcome='ok')._value.get() == processed
+    # The same fields as the writer's retry line.
     [line] = [line for line in logs if line['event'] == 'split_result_write_failed']
-    assert (line['log_level'], line['final'], line['partition'], line['category']) == (
-        'error',
-        True,
-        SHOWN_PARTITION,
-        'split',
-    )
+    assert line == {
+        'event': 'split_result_write_failed',
+        'log_level': 'error',
+        'category': 'split',
+        'job': f'{SOURCE_PARTITION}:{SOURCE_OFFSET}#1',
+        'partition': SHOWN_PARTITION,
+        'part': 0,
+        'error': 'Broker: Unknown topic or partition',
+        'final': True,
+        'attempt': 3,
+        'suppressed': 0,
+    }
 
 
 async def test_a_report_that_fails_for_another_reason_stalls_the_offset_too():
     pipeline = PartPipeline(one_task_handler())
     pipeline.reports.error = RuntimeError('a bug in the report')
 
-    pipeline.start()
-    await wait_for(lambda: pipeline.stalls == [PARTS_PARTITION])
-    await pipeline.processor.stop()
+    with capture_logs() as logs:
+        pipeline.start()
+        await wait_for(lambda: pipeline.stalls == [PARTS_PARTITION])
+        await pipeline.processor.stop()
 
     assert pipeline.pending() == 1
+    [line] = [line for line in logs if line['event'] == 'split_result_write_failed']
+    assert (line['error'], line['final'], line['attempt']) == ('a bug in the report', True, 1)
+    assert isinstance(line['exc_info'], RuntimeError)
 
 
 async def test_a_report_cut_by_the_drain_timeout_leaves_the_offset_pending():
@@ -934,6 +1105,7 @@ async def test_a_report_cancelled_before_it_starts_leaves_the_drain():
     assert pipeline.reports.calls == []
     assert pipeline.pending() == 1
     assert not processor._has_drainable_pending()
+    assert processor._waiting_reports == 0
 
 
 async def test_a_part_that_ends_after_the_drain_timed_out_is_not_reported():
@@ -975,6 +1147,90 @@ async def test_a_part_with_an_unconfirmed_delivery_stalls_and_is_not_reported():
     assert Handler.part_data_calls == 0
 
 
+# --- the bound on finished parts that wait for their report ---
+
+
+class OneGroupStreamHandler(BaseDrakkarHandler):
+    """A stream handler with one task for each part."""
+
+    async def arrange_stream(self, message):
+        yield [stream_task(f'm{message.offset}', message.offset)]
+
+
+IN_FLIGHT_TASKS = 4
+
+
+def small_budget() -> PendingBudget:
+    return PendingBudget(max_tasks=IN_FLIGHT_TASKS, max_bytes=1_000_000_000)
+
+
+def bounded_handler(mode: str) -> BaseDrakkarHandler:
+    return one_task_handler() if mode == 'list' else OneGroupStreamHandler()
+
+
+def test_the_cap_on_waiting_reports_is_twice_the_window_size_and_at_least_sixteen():
+    assert partmode.max_waiting_reports(1) == 16
+    assert partmode.max_waiting_reports(8) == 16
+    assert partmode.max_waiting_reports(100) == 200
+
+
+@pytest.mark.parametrize('mode', ['list', 'stream'])
+async def test_the_loop_takes_no_part_while_too_many_reports_wait_and_goes_on_when_they_end(mode):
+    total = 60
+    # The budget bounds the parts in flight, as in a worker; the cap bounds the finished ones that wait.
+    pipeline = PartPipeline(bounded_handler(mode), make_pool(), window_size=1, budget=small_budget())
+    processor = pipeline.processor
+    cap = processor._max_waiting_reports
+    pipeline.reports.gate = asyncio.Event()
+
+    pipeline.start(*(part_message(offset=offset) for offset in range(total)))
+    await wait_for(lambda: len(pipeline.reports.calls) >= cap and processor.inflight_count == 0)
+    reported = len(pipeline.reports.calls)
+    await asyncio.sleep(0.2)
+
+    # The loop stopped at the cap (a part that was in flight may pass it by a few), and the rest stay queued.
+    assert cap == 16
+    assert len(pipeline.reports.calls) == reported
+    assert cap <= reported <= cap + IN_FLIGHT_TASKS + 1
+    assert processor.queue_size == total - reported
+    assert pipeline.commits == []
+
+    pipeline.reports.gate.set()
+    await wait_for(pipeline.all_done)
+    await processor.stop()
+
+    assert len(pipeline.reports.calls) == total
+    assert pipeline.commits[-1] == (PARTS_PARTITION, total)
+    assert processor._waiting_reports == 0
+
+
+@pytest.mark.parametrize('mode', ['list', 'stream'])
+async def test_a_stop_wakes_a_loop_that_waits_for_reports_to_end(mode, monkeypatch):
+    monkeypatch.setattr(partmode, 'STOP_GRACE_SECONDS', 0.02)
+    producer = RecordingProducer(confirms=False)
+    pipeline = PartPipeline(bounded_handler(mode), make_pool(), producer=producer, window_size=1, budget=small_budget())
+    processor = pipeline.processor
+    dropped = queued_messages_dropped_at_stop._value.get()
+
+    pipeline.start(*(part_message(offset=offset) for offset in range(40)))
+    await wait_for(lambda: len(producer.records) >= processor._max_waiting_reports and processor.inflight_count == 0)
+    # From now on only the stop can end the loop's wait: its own time bound is far away.
+    monkeypatch.setattr(partition_module, 'IDLE_POLL_TIMEOUT', 30.0)
+    await asyncio.sleep(0.1)
+    written = len(producer.records)
+
+    processor.signal_stop()
+    await asyncio.wait_for(processor.drain(), timeout=1.0)
+    await processor.stop(timeout=1.0)
+
+    # No part was taken after the stop, the queued ones were dropped, and no report was acknowledged.
+    assert processor._max_waiting_reports <= written < 40
+    assert len(producer.records) == written
+    assert queued_messages_dropped_at_stop._value.get() == dropped + 40 - written
+    assert pipeline.commits == []
+    assert pipeline.pending() == written
+
+
 # --- the result writer ---
 
 
@@ -982,7 +1238,6 @@ async def test_a_part_with_an_unconfirmed_delivery_stalls_and_is_not_reported():
 def fast_retries(monkeypatch) -> None:
     monkeypatch.setattr(partmode, 'RETRY_FIRST_WAIT_SECONDS', 0.01)
     monkeypatch.setattr(partmode, 'RETRY_MAX_WAIT_SECONDS', 0.02)
-    monkeypatch.setattr(partmode, 'STOP_CHECK_SECONDS', 0.005)
     monkeypatch.setattr(partmode, 'STOP_GRACE_SECONDS', 0.02)
 
 
@@ -1024,8 +1279,16 @@ def part_with_split(index: int = 3) -> SourceMessage:
     return message
 
 
+def result_writer(producer: Any, *, stopped: bool = False) -> tuple[ResultWriter, asyncio.Event]:
+    """A writer over ``producer`` with its stop event, set when ``stopped``."""
+    event = asyncio.Event()
+    if stopped:
+        event.set()
+    return ResultWriter(producer, results_topic=RESULTS_TOPIC, stopped=event, partition=SHOWN_PARTITION), event
+
+
 async def test_the_writer_publishes_the_result_record_to_the_partition_of_the_source(producer, log):
-    writer = ResultWriter(producer, results_topic=RESULTS_TOPIC, stopping=lambda: False)
+    writer, _ = result_writer(producer)
 
     await writer.write(part_with_split(), ok_result())
 
@@ -1041,7 +1304,7 @@ async def test_the_writer_publishes_the_result_record_to_the_partition_of_the_so
 
 
 async def test_the_writer_tries_again_after_a_failure_a_retry_can_fix(producer, client, log, fast_retries):
-    writer = ResultWriter(producer, results_topic=RESULTS_TOPIC, stopping=lambda: False)
+    writer, _ = result_writer(producer)
     client.fail_next_deliveries(KafkaError(KafkaError._MSG_TIMED_OUT), times=3)
     failures = split_result_write_failures._value.get()
 
@@ -1051,33 +1314,40 @@ async def test_the_writer_tries_again_after_a_failure_a_retry_can_fix(producer, 
     assert len(log.records(RESULTS_TOPIC, SOURCE_PARTITION)) == 1
     assert split_result_write_failures._value.get() == failures + 3
     # One line for the three failures: the others are held back.
-    lines = [line for line in logs if line['event'] == 'split_result_write_failed']
-    assert [(line['log_level'], line['final'], line['job'], line['part']) for line in lines] == [
-        ('warning', False, f'{SOURCE_PARTITION}:{SOURCE_OFFSET}#1', 3)
-    ]
+    [line] = [line for line in logs if line['event'] == 'split_result_write_failed']
+    assert (line['log_level'], line['final'], line['job'], line['part']) == (
+        'warning',
+        False,
+        f'{SOURCE_PARTITION}:{SOURCE_OFFSET}#1',
+        3,
+    )
+    assert (line['partition'], line['attempt'], line['suppressed']) == (SHOWN_PARTITION, 1, 0)
 
 
-async def test_the_writer_raises_a_final_error_at_once(producer, client, log):
-    writer = ResultWriter(producer, results_topic=RESULTS_TOPIC, stopping=lambda: False)
+async def test_the_writer_raises_a_final_error_with_the_number_of_the_attempt(producer, client, log, fast_retries):
+    writer, _ = result_writer(producer)
+    client.fail_next_deliveries(KafkaError(KafkaError._MSG_TIMED_OUT))
     client.fail_next_deliveries(KafkaError(KafkaError.UNKNOWN_TOPIC_OR_PART))
 
     with pytest.raises(SplitProduceError) as raised:
-        await writer.write(part_with_split(), ok_result())
+        await asyncio.wait_for(writer.write(part_with_split(), ok_result()), 5)
 
     assert raised.value.final
+    assert isinstance(raised.value, partmode.PartReportError)
+    assert raised.value.attempt == 2
     assert log.records(RESULTS_TOPIC, SOURCE_PARTITION) == []
 
 
-async def test_a_write_that_starts_while_the_worker_stops_still_makes_its_attempt(producer, log):
-    writer = ResultWriter(producer, results_topic=RESULTS_TOPIC, stopping=lambda: True)
+async def test_a_write_that_starts_while_the_partition_stops_still_makes_its_attempt(producer, log):
+    writer, _ = result_writer(producer, stopped=True)
 
     await asyncio.wait_for(writer.write(part_with_split(), ok_result()), 2)
 
     assert len(log.records(RESULTS_TOPIC, SOURCE_PARTITION)) == 1
 
 
-async def test_a_failed_attempt_is_not_tried_again_once_the_worker_stops(producer, client, log):
-    writer = ResultWriter(producer, results_topic=RESULTS_TOPIC, stopping=lambda: True)
+async def test_a_failed_attempt_is_not_tried_again_once_the_partition_stops(producer, client, log):
+    writer, _ = result_writer(producer, stopped=True)
     client.fail_next_deliveries(KafkaError(KafkaError._MSG_TIMED_OUT))
 
     # No backoff wait comes first: the write ends well inside the first wait of one second.
@@ -1088,15 +1358,30 @@ async def test_a_failed_attempt_is_not_tried_again_once_the_worker_stops(produce
     assert log.records(RESULTS_TOPIC, SOURCE_PARTITION) == []
 
 
+async def test_a_stop_ends_the_wait_between_two_attempts_at_once(producer, client):
+    writer, stopped = result_writer(producer)
+    client.fail_next_deliveries(KafkaError(KafkaError._MSG_TIMED_OUT))
+
+    write = asyncio.create_task(writer.write(part_with_split(), ok_result()))
+    await wait_for(lambda: client.produced == 1)
+    await asyncio.sleep(0.05)
+    assert not write.done()
+    stopped.set()
+
+    # The wait of one second is cut by the event, not by a poll.
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(write, 0.2)
+    assert client.produced == 1
+
+
 async def test_a_stop_ends_a_write_that_waits_for_its_delivery_report(producer, client, fast_retries):
-    stopping = False
-    writer = ResultWriter(producer, results_topic=RESULTS_TOPIC, stopping=lambda: stopping)
+    writer, stopped = result_writer(producer)
     client.hold_deliveries = True
 
     write = asyncio.create_task(writer.write(part_with_split(), ok_result()))
     await wait_for(lambda: client.produced == 1)
     assert not write.done()
-    stopping = True
+    stopped.set()
 
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(write, 1)
@@ -1106,8 +1391,41 @@ async def test_a_stop_ends_a_write_that_waits_for_its_delivery_report(producer, 
     await asyncio.sleep(0.05)
 
 
+async def test_a_stop_ends_a_write_that_waits_for_room_in_the_client_queue(log, fast_retries):
+    # A client queue with no room: the record never gets its place, so the write waits inside the producer.
+    client = FakeProducerClient(log, queue_capacity=0)
+    producer = SplitProducer(KafkaConnectionConfig(), producer_factory=lambda config: client)
+    await producer.start()
+    writer, stopped = result_writer(producer)
+
+    write = asyncio.create_task(writer.write(part_with_split(), ok_result()))
+    await wait_for(lambda: len(client.rejected) >= 2)
+    assert not write.done()
+    stopped.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(write, 1)
+    # The producer is free again: its place in the queue was given back.
+    assert not producer._enqueue_lock.locked()
+    await producer.close(0.1)
+    assert log.records(RESULTS_TOPIC, SOURCE_PARTITION) == []
+
+
+async def test_a_cancelled_write_takes_its_record_out_of_the_wait(producer, client):
+    writer, _ = result_writer(producer)
+    client.hold_deliveries = True
+
+    write = asyncio.create_task(writer.write(part_with_split(), ok_result()))
+    await wait_for(lambda: client.produced == 1)
+    write.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await write
+    client.release_deliveries()
+
+
 async def test_the_writer_refuses_a_message_that_is_no_part(producer):
-    writer = ResultWriter(producer, results_topic=RESULTS_TOPIC, stopping=lambda: False)
+    writer, _ = result_writer(producer)
 
     with pytest.raises(ValueError, match='parts topic'):
         await writer.write(plain_message(), ok_result())

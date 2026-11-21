@@ -207,9 +207,9 @@
     - metric:drakkar_split_results_ignored_total
 
 - key: drakkar_split_results_ignored_total
-  summary: Records of the results topic the job tracker ignored, by reason.
-  meaning: The reasons are duplicate, old_attempt, closed_job, unknown_job and foreign_group; repeats are normal after a restart.
-  healthy: Low; a steady rise of unknown_job or foreign_group needs a look at the topic names.
+  summary: Records of the split topics this worker ignored, by reason.
+  meaning: The reasons are duplicate, old_attempt, closed_job, unknown_job, foreign_group and malformed. The job tracker counts the records of the results topic; a partition of the parts topic counts a part record with foreign_group or malformed. Repeats are normal after a restart.
+  healthy: Low; a steady rise of unknown_job, foreign_group or malformed needs a look at the topic names.
   related:
     - config:split.enabled
 

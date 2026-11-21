@@ -187,7 +187,7 @@ These metrics carry values only for a worker with `split.enabled`.
 | `drakkar_split_parts_published_total` | Counter | -- | Parts published to the parts topic |
 | `drakkar_split_parts_processed_total` | Counter | `outcome` | Parts this worker ran, by outcome: `ok`, `failed` |
 | `drakkar_split_results_received_total` | Counter | -- | Part results counted by the job tracker |
-| `drakkar_split_results_ignored_total` | Counter | `reason` | Records of the results topic the job tracker ignored, by reason: `duplicate`, `old_attempt`, `closed_job`, `unknown_job`, `foreign_group` |
+| `drakkar_split_results_ignored_total` | Counter | `reason` | Records of the split topics this worker ignored, by reason: `duplicate`, `old_attempt`, `closed_job`, `unknown_job`, `foreign_group`, `malformed`. The job tracker counts the records of the results topic; a partition of the parts topic counts a part record (`foreign_group` or `malformed`) |
 | `drakkar_split_result_write_failures_total` | Counter | -- | Failed attempts to write a part result |
 | `drakkar_split_restore_duration_seconds` | Histogram | -- | Seconds to restore the split jobs of one source partition. Buckets 0.05, 0.25, 1, 5, 15, 60, 300 |
 

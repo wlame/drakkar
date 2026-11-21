@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from confluent_kafka import KafkaError
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from structlog.testing import capture_logs
@@ -14,6 +16,8 @@ from structlog.testing import capture_logs
 import drakkar as dk
 from drakkar import cluster_tasks, detach_slots
 from drakkar import detach as detach_module
+from drakkar.agent.rules import partition_dead
+from drakkar.agent.state import _loop_parts
 from drakkar.app import (
     DrakkarApp,
     changed_consumed_settings,
@@ -21,7 +25,13 @@ from drakkar.app import (
 )
 from drakkar.config import DrakkarConfig
 from drakkar.consumer import KafkaConsumer
-from drakkar.metrics import assigned_partitions, offsets_committed, split_parts_processed
+from drakkar.metrics import (
+    assigned_partitions,
+    consumer_lag,
+    drain_timeout_hit,
+    offsets_committed,
+    split_parts_processed,
+)
 from drakkar.metrics import detached as detached_gauge
 from drakkar.models import ConfigurationError, ExecutorTask, PrecomputedResult, SourceMessage
 from drakkar.sources.http import HttpSource
@@ -275,7 +285,7 @@ async def test_the_runtime_stop_delivers_what_the_producer_still_holds():
     runtime = parts.runtime(split_config())
     await runtime.start()
     parts.client.hold_deliveries = True
-    writer = ResultWriter(runtime.producer, results_topic=RESULTS_TOPIC, stopping=lambda: False)
+    writer = ResultWriter(runtime.producer, results_topic=RESULTS_TOPIC, stopped=asyncio.Event(), partition=0)
     message = part_message()
     message.split = parse_part_headers(message.headers)
     write = asyncio.create_task(writer.write(message, ok_result()))
@@ -416,23 +426,79 @@ async def test_the_parts_source_shows_its_partitions_with_the_base_number():
     await runtime.stop(deadline=0.0)
 
 
-async def test_a_report_of_a_partition_gives_up_when_the_partition_or_the_source_stops():
+async def test_a_stop_of_a_partition_or_of_the_source_reaches_the_report_of_its_parts():
     app = split_app()
     runtime = await wired(app)
     source = app.parts_source
     assert source is not None
     source.on_assign([0, 1])
+    stops = {pid: processor._part_mode.stopped for pid, processor in source.processors.items()}
 
-    assert not source._partition_is_stopping(0)
-    source.processors[0].signal_stop()
-    assert source._partition_is_stopping(0)
-    assert not source._partition_is_stopping(1)
-    # A partition this source does not own any more.
-    assert source._partition_is_stopping(5)
+    # Each partition has a stop of its own, which its result writer waits on.
+    assert stops[0] is not stops[1]
+    assert not stops[0].is_set() and not stops[1].is_set()
+    await source.on_revoke([0])
+    assert stops[0].is_set() and not stops[1].is_set()
     source.signal_stop()
-    assert source._partition_is_stopping(1)
+    assert stops[1].is_set()
 
-    await source.on_revoke([0, 1])
+    await source.on_revoke([1])
+    await runtime.stop(deadline=0.0)
+
+
+async def test_a_revoke_with_a_results_topic_that_cannot_be_written_ends_well_inside_the_drain_timeout():
+    parts = FakeRuntimeParts()
+    app = split_app()
+    runtime = await wired(app, parts)
+    source = app.parts_source
+    assert source is not None
+    parts.client.fail_next_deliveries(KafkaError(KafkaError._MSG_TIMED_OUT), times=1000)
+    timeouts = drain_timeout_hit._value.get()
+
+    source.on_assign([1])
+    processor = source.processors[1]
+    source._route_messages([part_message(offset=0, partition=1)])
+    # The write failed once and waits a second for its next attempt.
+    await wait_for(lambda: parts.client.produced == 1 and processor.inflight_count == 0)
+    with capture_logs() as logs:
+        # The drain timeout of this worker is one second; the revoke needs far less.
+        await asyncio.wait_for(source.on_revoke([1]), timeout=0.5)
+
+    assert parts.client.produced == 1
+    assert parts.log.records(RESULTS_TOPIC, 3) == []
+    # The offset is pending, so nothing was committed: the next owner runs the part again.
+    source.consumer.commit.assert_not_awaited()
+    assert processor.offset_tracker.pending_count == 1
+    assert drain_timeout_hit._value.get() == timeouts
+    assert not [line for line in logs if line['event'] in ('stop_processor_drain_timeout', 'zombie_tasks_cancelled')]
+    await runtime.stop(deadline=0.0)
+
+
+async def test_the_agent_state_lists_the_partitions_of_the_parts_topic_with_their_shown_numbers():
+    app = split_app()
+    runtime = await wired(app)
+    source, parts = app.kafka_source, app.parts_source
+    assert source is not None and parts is not None
+    source.on_assign([0])
+    parts.on_assign([0, 3])
+    parts.processors[3]._dead = True
+    parts.dead_partitions_paused.add(3)
+    consumer_lag.labels(partition=str(PARTS_PARTITION_BASE)).set(12)
+
+    answer = await _loop_parts(app, frozenset({'partitions'}), include_payloads=False)
+
+    rows = answer['partitions']
+    assert [row['partition'] for row in rows] == [0, PARTS_PARTITION_BASE, PARTS_PARTITION_BASE + 3]
+    # The rows of the parts topic have the shape of the rows of the source topic.
+    assert all(set(row) == set(rows[0]) for row in rows)
+    assert (rows[1]['lag'], rows[1]['dead'], rows[1]['paused']) == (12, False, False)
+    assert (rows[2]['dead'], rows[2]['paused'], rows[2]['paused_by']) == (True, True, ['death'])
+    # So the rule of a dead partition finds it.
+    rule_input = SimpleNamespace(state={'partitions': rows})
+    assert partition_dead(rule_input, None) == {'partitions': [PARTS_PARTITION_BASE + 3]}  # ty: ignore[invalid-argument-type]
+    consumer_lag.remove(str(PARTS_PARTITION_BASE))
+    await source.on_revoke([0])
+    await parts.on_revoke([0, 3])
     await runtime.stop(deadline=0.0)
 
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import structlog
@@ -34,13 +34,27 @@ logger = structlog.get_logger()
 # The wait before the second attempt to write a result; each later wait is twice as long, up to the cap.
 RETRY_FIRST_WAIT_SECONDS = 1.0
 RETRY_MAX_WAIT_SECONDS = 30.0
-# How often a wait or a write in flight asks whether the worker stops.
-STOP_CHECK_SECONDS = 0.1
 # How long a write in flight may still wait for its delivery report once a stop is signalled.
 STOP_GRACE_SECONDS = 0.5
 STOPPED_MESSAGE = 'the worker stops before the part result is acknowledged'
 
+# How many finished parts of one partition may wait for their result to be
+# written before the partition takes no further part: twice the window size,
+# and at least the floor. A result waits while the results topic cannot be
+# written. Without the bound the worker would go on running parts at full
+# speed: each one keeps its message and its result in memory, none of their
+# offsets can be committed, and after a restart all of them run again and
+# their sinks receive every delivery twice. With it the partition's queue
+# fills and the fetch pauses, as for any backlog.
+MAX_WAITING_REPORTS_PER_WINDOW = 2
+MAX_WAITING_REPORTS_FLOOR = 16
+
 ReportPart = Callable[[SourceMessage, PartResult], Awaitable[None]]
+
+
+def max_waiting_reports(window_size: int) -> int:
+    """The cap on the finished parts of one partition that wait for their result to be written."""
+    return max(MAX_WAITING_REPORTS_FLOOR, MAX_WAITING_REPORTS_PER_WINDOW * window_size)
 
 
 @dataclass(frozen=True)
@@ -52,7 +66,8 @@ class PartMode:
     part; the processor completes the part's offset only after it returns.
     ``part_data_model`` is the handler's model of the data of a part; the
     part side sends the data as the hook returned it and does not check it
-    against the model.
+    against the model. The processor sets ``stopped`` when a stop is
+    signalled, so a report that waits for the results topic can give up.
     """
 
     worker: str
@@ -60,6 +75,7 @@ class PartMode:
     part_data_model: type[BaseModel] | None
     report: ReportPart
     source_group: str
+    stopped: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 def part_request_id(headers: Sequence[Header] | None) -> str | None:
@@ -142,21 +158,25 @@ def build_part_result(
 def part_collect(sink_manager: SinkManager, on_collect: CollectCallback) -> CollectCallback:
     """Wrap ``on_collect`` for the results of a part: a result that names an aggregate sink is not delivered.
 
-    Such a result is an error of the handler. Nothing of it reaches a sink,
-    and each of its source messages gets a captured DLQ outcome of stage
-    ``sink`` with the fixed error text, so the part ends as a message on the
-    DLQ ends. A window result has no source message and is delivered as it is.
+    Such a result is an error of the handler, and nothing of it reaches a
+    sink. A result of a task, a group or a message gives each of its source
+    messages a captured DLQ outcome of stage ``sink`` with the fixed error
+    text, so the part ends as a message on the DLQ ends. A window result has
+    no source message to carry the outcome: the error is logged.
     """
 
     async def collect(
         result: CollectResult, partition_id: int, message_context: MessageContext | None = None
     ) -> dict | None:
-        if message_context is not None and not message_context.is_window:
-            error = sink_manager.stage_error(result, 'part')
-            if error is not None:
-                await sink_manager.capture_stage_error(message_context, sink=None, error=error)
-                return {}
-        return await on_collect(result, partition_id, message_context=message_context)
+        # A result with no context is left to the delivery, which fails closed for it.
+        error = None if message_context is None else sink_manager.stage_error(result, 'part')
+        if message_context is None or error is None:
+            return await on_collect(result, partition_id, message_context=message_context)
+        if message_context.is_window:
+            logger.error('split_stage_error', category='split', partition=partition_id, error=error)
+        else:
+            await sink_manager.capture_stage_error(message_context, sink=None, error=error)
+        return {}
 
     return collect
 
@@ -171,24 +191,30 @@ def _result_ref(part: SplitPart) -> JobRef:
     )
 
 
-def _retrieve_outcome(future: asyncio.Future[None]) -> None:
-    """Read the outcome of a delivery future nobody waits for any more, so no unread error is reported."""
-    if not future.cancelled():
-        future.exception()
+class PartReportError(SplitProduceError):
+    """The result of a part can never be written; ``attempt`` is the number of the write that said so."""
+
+    def __init__(self, message: str, *, attempt: int) -> None:
+        super().__init__(message, final=True)
+        self.attempt = attempt
 
 
 class ResultWriter:
     """Writes the ``result`` record of a finished part and tries again until the record is acknowledged.
 
-    A stop of the worker (or of the part's partition) ends the retries, never
-    the first attempt: a part that finishes while its partition drains is
-    still reported, so it does not run again for nothing.
+    A stop of the part's partition ends the retries, never the first
+    attempt: a part that finishes while its partition drains is still
+    reported, so it does not run again for nothing. ``stopped`` is the event
+    the partition sets at its stop; a write waits on it and never polls.
+    ``partition`` is the number the worker shows for the partition, for the
+    log lines.
     """
 
-    def __init__(self, producer: SplitProducer, *, results_topic: str, stopping: Callable[[], bool]) -> None:
+    def __init__(self, producer: SplitProducer, *, results_topic: str, stopped: asyncio.Event, partition: int) -> None:
         self._producer = producer
         self._results_topic = results_topic
-        self._stopping = stopping
+        self._stopped = stopped
+        self._partition = partition
         self._failure_log = RateLimitedLog(time.monotonic)
 
     async def write(self, message: SourceMessage, result: PartResult) -> None:
@@ -200,57 +226,61 @@ class ResultWriter:
         flight gets ``STOP_GRACE_SECONDS`` to end.
 
         Raises:
-            SplitProduceError: the record can never be delivered (``final`` is true).
-            asyncio.CancelledError: the worker stops; the record may or may not have been written.
+            PartReportError: the record can never be delivered (a ``SplitProduceError`` with ``final`` true).
+            asyncio.CancelledError: the partition stops; the record may or may not have been written.
         """
         part = message.split
         if part is None:
             raise ValueError('a result can be written only for a message of the parts topic')
         record = log_record(_result_ref(part), 'result', result_body(result))
         wait = RETRY_FIRST_WAIT_SECONDS
+        attempt = 0
         while True:
+            attempt += 1
             try:
                 await self._attempt(record)
                 return
             except SplitProduceError as error:
                 if error.final:
-                    raise
-                self._note_failure(part, error)
+                    raise PartReportError(str(error), attempt=attempt) from error
+                self._note_failure(part, error, attempt)
             await self._wait(wait)
             wait = min(wait * 2, RETRY_MAX_WAIT_SECONDS)
 
     async def _attempt(self, record: WireRecord) -> None:
-        """One write: wait for the delivery report, and after a stop only for ``STOP_GRACE_SECONDS`` more."""
-        future = await self._producer.enqueue(self._results_topic, record)
-        stop_seen_at: float | None = None
-        while True:
-            done, _ = await asyncio.wait({future}, timeout=STOP_CHECK_SECONDS)
-            if done:
-                future.result()
-                return
-            if not self._stopping():
-                continue
-            now = time.monotonic()
-            if stop_seen_at is None:
-                stop_seen_at = now
-            elif now - stop_seen_at >= STOP_GRACE_SECONDS:
-                # The record stays in the client queue and may still be written: a second result
-                # of the same part, after the part ran again, is ignored by the owner.
-                future.add_done_callback(_retrieve_outcome)
+        """One write: the place in the client queue and the delivery report, and after a stop only the grace time.
+
+        The write and the stop are awaited together, so a write that waits
+        for room in the client queue ends at a stop too.
+        """
+        publish = asyncio.ensure_future(self._producer.publish(self._results_topic, record))
+        try:
+            if not self._stopped.is_set():
+                stop = asyncio.ensure_future(self._stopped.wait())
+                try:
+                    await asyncio.wait({publish, stop}, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    stop.cancel()
+            if not publish.done():
+                await asyncio.wait({publish}, timeout=STOP_GRACE_SECONDS)
+            if not publish.done():
+                # A record already in the client queue may still be written: a second result of
+                # the same part, after the part ran again, is ignored by the owner.
                 raise asyncio.CancelledError(STOPPED_MESSAGE)
+            publish.result()
+        finally:
+            if not publish.done():
+                publish.cancel()
 
     async def _wait(self, seconds: float) -> None:
-        """Sleep ``seconds`` in short steps; a stop ends the wait at once."""
-        deadline = time.monotonic() + seconds
-        while True:
-            if self._stopping():
-                raise asyncio.CancelledError(STOPPED_MESSAGE)
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return
-            await asyncio.sleep(min(remaining, STOP_CHECK_SECONDS))
+        """Wait ``seconds`` before the next attempt; a stop ends the wait at once."""
+        try:
+            await asyncio.wait_for(self._stopped.wait(), timeout=seconds)
+        except TimeoutError:
+            return
+        raise asyncio.CancelledError(STOPPED_MESSAGE)
 
-    def _note_failure(self, part: SplitPart, error: SplitProduceError) -> None:
+    def _note_failure(self, part: SplitPart, error: SplitProduceError, attempt: int) -> None:
         split_result_write_failures.inc()
         suppressed = self._failure_log.admit('write')
         if suppressed is not None:
@@ -258,8 +288,10 @@ class ResultWriter:
                 'split_result_write_failed',
                 category='split',
                 job=part.job_id,
+                partition=self._partition,
                 part=part.index,
                 error=str(error),
                 final=False,
+                attempt=attempt,
                 suppressed=suppressed,
             )

@@ -9,7 +9,6 @@ completes.
 from __future__ import annotations
 
 import asyncio
-import functools
 from typing import TYPE_CHECKING, Any
 
 from drakkar.sources.kafka import GroupSource, KafkaSource, LeaveOutcome, SourceGauges
@@ -80,29 +79,25 @@ class PartsSource(KafkaSource):
         """The processor of a partition of the parts topic: part mode, and the shown partition number."""
         ctx = self._context()
         runtime = self._runtime()
-        writer = ResultWriter(
-            runtime.producer,
-            results_topic=runtime.results_topic,
-            stopping=functools.partial(self._partition_is_stopping, partition_id),
-        )
+        shown = self._shown(partition_id)
+        # Set by the processor at its stop: a stop of the worker, or a revoke of this partition.
+        # The writer waits on it, so a result that cannot be written holds no drain.
+        stopped = asyncio.Event()
+        writer = ResultWriter(runtime.producer, results_topic=runtime.results_topic, stopped=stopped, partition=shown)
         part_mode = PartMode(
             worker=runtime.worker,
             max_part_data=ctx.config.split.max_part_data,
             part_data_model=getattr(type(ctx.handler), 'part_data_model', None),
             report=writer.write,
             source_group=runtime.source_group,
+            stopped=stopped,
         )
         return {
             **super()._processor_settings(partition_id),
             'on_collect': part_collect(ctx.sink_manager, ctx.on_collect),
             'part_mode': part_mode,
-            'partition_label': self._shown(partition_id),
+            'partition_label': shown,
         }
-
-    def _partition_is_stopping(self, partition_id: int) -> bool:
-        """Whether a result of this partition gives up its retries: the worker stops, or the partition is given up."""
-        processor = self.processors.get(partition_id)
-        return self._stop_requested or processor is None or processor.is_stopping
 
     def _notify_handler_of_assign(self, partition_ids: list[int]) -> None:
         """Not called for the parts topic: the hook tells about the source topic."""

@@ -428,7 +428,7 @@ split_results_received = Counter(
 
 split_results_ignored = Counter(
     'drakkar_split_results_ignored_total',
-    'Records of the results topic the job tracker ignored, by reason',
+    'Records of the split topics this worker ignored, by reason',
     ['reason'],
 )
 

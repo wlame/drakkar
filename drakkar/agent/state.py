@@ -34,6 +34,7 @@ from drakkar.metrics import (
     sink_dlq_messages,
 )
 from drakkar.recorder.queries import read_memory
+from drakkar.sources.parts import PartsSource
 from drakkar.uiserver.databases_status import recorder_block
 from drakkar.uiserver.server import dispatch_bounded
 
@@ -137,12 +138,16 @@ def gauge_values_by_partition(gauge: MetricWrapperBase) -> dict[int, int]:
     return values
 
 
-def partitions_part(source: Any, *, debug_paused: bool, lags: Mapping[int, int]) -> list[dict[str, Any]]:
+def partitions_part(
+    source: Any, *, debug_paused: bool, lags: Mapping[int, int], label_base: int = 0
+) -> list[dict[str, Any]]:
     """The ``partitions`` part: one row per assigned partition, by number; empty without a Kafka source.
 
     ``paused_by`` names backpressure (the whole consumer is paused), an
     operator's debug pause, and a dead loop. A partition paused by a delivery
-    stall is ``paused`` with no named reason.
+    stall is ``paused`` with no named reason. ``label_base`` is added to the
+    number of each row: the partitions of the parts topic are shown with the
+    base of the parts source, and their lag is read under that number.
     """
     if source is None:
         return []
@@ -158,11 +163,11 @@ def partitions_part(source: Any, *, debug_paused: bool, lags: Mapping[int, int])
         tracker = processor.offset_tracker
         rows.append(
             {
-                'partition': number,
+                'partition': number + label_base,
                 'queued': processor.queue_size,
                 'pending_offsets': tracker.pending_count,
                 'committed': tracker.last_committed,
-                'lag': lags.get(number),
+                'lag': lags.get(number + label_base),
                 'paused': bool(paused_by) or number in source.stalled_partitions,
                 'paused_by': sorted(paused_by),
                 'dead': processor.is_dead,
@@ -394,11 +399,17 @@ async def _loop_parts(app: DrakkarApp, parts: frozenset[str], include_payloads: 
             config=app._config,
         )
     if 'partitions' in parts:
-        answer['partitions'] = partitions_part(
-            app.kafka_source,
-            debug_paused=app.consume_pause.active,
-            lags=gauge_values_by_partition(consumer_lag),
-        )
+        debug_paused = app.consume_pause.active
+        lags = gauge_values_by_partition(consumer_lag)
+        rows = partitions_part(app.kafka_source, debug_paused=debug_paused, lags=lags)
+        # The partitions of the parts topic follow, as more rows of the same
+        # shape under the numbers the worker shows for them.
+        parts_source = app.parts_source
+        if isinstance(parts_source, PartsSource):
+            rows += partitions_part(
+                parts_source, debug_paused=debug_paused, lags=lags, label_base=parts_source.partition_label_base
+            )
+        answer['partitions'] = rows
     if 'sinks' in parts:
         answer['sinks'] = sinks_part(app.sink_manager, now=time.time())
     if 'recent_failures' in parts:

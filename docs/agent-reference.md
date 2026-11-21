@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `64255c37467673e7`.
+Registry version: `f0042b1ed19ac3c7`.
 
 ## Concepts
 
@@ -1159,11 +1159,11 @@ Part results counted by the job tracker.
 
 ### `metric:drakkar_split_results_ignored_total`
 
-Records of the results topic the job tracker ignored, by reason.
+Records of the split topics this worker ignored, by reason.
 
-**Meaning:** The reasons are duplicate, old_attempt, closed_job, unknown_job and foreign_group; repeats are normal after a restart.
+**Meaning:** The reasons are duplicate, old_attempt, closed_job, unknown_job, foreign_group and malformed. The job tracker counts the records of the results topic; a partition of the parts topic counts a part record with foreign_group or malformed. Repeats are normal after a restart.
 
-**Healthy:** Low; a steady rise of unknown_job or foreign_group needs a look at the topic names.
+**Healthy:** Low; a steady rise of unknown_job, foreign_group or malformed needs a look at the topic names.
 
 **Related:** `config:split.enabled`
 

@@ -81,7 +81,15 @@ from drakkar.request_ids import RequestIdResolver, reset_request_id
 from drakkar.sinks.dlq_record import DLQRecord, cut_error
 from drakkar.sinks.manager import CollectCallback, DeliveryOutcome, MessageContext, MessageDLQState, sink_ref
 from drakkar.split.models import PartResult
-from drakkar.split.partmode import PartMode, build_part_result, checked_part_data, part_data_raised, part_request_id
+from drakkar.split.partmode import (
+    PartMode,
+    PartReportError,
+    build_part_result,
+    checked_part_data,
+    max_waiting_reports,
+    part_data_raised,
+    part_request_id,
+)
 from drakkar.split.producer import SplitProduceError
 from drakkar.split.records import parse_part_headers
 from drakkar.utils import make_request_id
@@ -165,6 +173,19 @@ WARM_UP_WINDOWS = 3
 def _error_text(error: BaseException) -> str:
     """The error text of a failed part: the exception text (its type when it has none), cut as ``dk-error`` is."""
     return cut_error(str(error) or type(error).__name__)
+
+
+def _check_arranged_tasks(tasks: object) -> None:
+    """Refuse an answer of ``arrange`` that is not a list of tasks.
+
+    Raises:
+        TypeError: the answer is no list, or an item of it is no ``ExecutorTask``.
+    """
+    if not isinstance(tasks, list):
+        raise TypeError(f'arrange returned {type(tasks).__name__}, want a list of ExecutorTask')
+    for task in tasks:
+        if not isinstance(task, ExecutorTask):
+            raise TypeError(f'arrange returned a list with {type(task).__name__}, want a list of ExecutorTask')
 
 
 class _StreamInterrupted(Exception):
@@ -362,7 +383,14 @@ class PartitionProcessor:
         # Set for a processor of parts: every message it accepts is a part of
         # a split job, and its result is reported before its offset completes.
         self._part_mode = part_mode
-        self._invalid_part_log = RateLimitedLog(time.monotonic)
+        self._part_log = RateLimitedLog(time.monotonic)
+        # Finished parts whose result is not written yet. At the cap the loop
+        # takes no further part (see ``max_waiting_reports``); the event is
+        # set while there is room, and a stop sets it to wake the loop.
+        self._waiting_reports = 0
+        self._max_waiting_reports = max_waiting_reports(window_size)
+        self._report_room = asyncio.Event()
+        self._report_room.set()
         # Gives each message its request id and binds ids into the log
         # context of every scope.
         self._request_ids = request_ids if request_ids is not None else RequestIdResolver(handler)
@@ -517,11 +545,6 @@ class PartitionProcessor:
         return self._partition_label
 
     @property
-    def is_stopping(self) -> bool:
-        """Whether a stop was signalled; the report of a part gives up its retries then."""
-        return self._stopping
-
-    @property
     def is_dead(self) -> bool:
         """True when the processing loop gave up and this partition is stalled.
 
@@ -592,6 +615,11 @@ class PartitionProcessor:
         # a stream is open, so a message whose stream ended loses nothing.
         if self._pull_task is not None and not self._pull_task.done():
             self._pull_task.cancel()
+        if self._part_mode is not None:
+            # A report that waits for the results topic gives up, and a loop
+            # that waits for reports to end leaves.
+            self._part_mode.stopped.set()
+            self._report_room.set()
 
     async def stop(self, timeout: float = DEFAULT_STOP_TIMEOUT) -> None:
         """Stop the partition processor and wait for completion.
@@ -841,6 +869,12 @@ class PartitionProcessor:
                 # the queued messages counts it, never accepted or arranged.
                 self._held_message = message
                 break
+            if self._part_mode is not None:
+                # Held, so it still counts as queued while the loop waits for reports to end.
+                self._held_message = message
+                if not await self._wait_to_take_stream_part():
+                    break
+                self._held_message = None
             partition_queue_size.labels(partition=str(self._partition_label)).set(self._queue.qsize())
             await self._process_stream_message(message)
 
@@ -958,6 +992,10 @@ class PartitionProcessor:
                 self._held_message = await asyncio.wait_for(self._queue.get(), timeout=IDLE_POLL_TIMEOUT)
             except TimeoutError:
                 return []
+        # Parts only, and before the wait for budget room: no part is taken
+        # while too many finished parts wait for their result to be written.
+        if self._part_mode is not None and not await self._wait_for_report_room():
+            return []
         if self._account is not None and not await self._wait_for_room():
             return []
 
@@ -1248,6 +1286,10 @@ class PartitionProcessor:
 
         try:
             tasks = await self._call_arrange(window, messages)
+            if self._part_mode is not None:
+                # For parts an answer that is no task list is a failure of
+                # ``arrange`` too; it must not reach the code below.
+                _check_arranged_tasks(tasks)
         except Exception as error:
             if self._part_mode is None:
                 raise
@@ -2997,7 +3039,7 @@ class PartitionProcessor:
     async def _skip_invalid_part(self, message: SourceMessage, *, reason: str) -> None:
         """Count and log a message of the parts topic that is no part of this worker's group, and complete its offset."""
         split_results_ignored.labels(reason=reason).inc()
-        suppressed = self._invalid_part_log.admit(reason)
+        suppressed = self._part_log.admit(reason)
         if suppressed is not None:
             logger.warning(
                 'split_part_invalid',
@@ -3109,6 +3151,9 @@ class PartitionProcessor:
             started_at=tracker.started_at,
             finished_at=tracker.finished_at,
         )
+        # The result holds all that the report needs: the tracker, with its
+        # task list, does not wait for the results topic.
+        self._message_trackers.pop(message.offset, None)
         self._spawn_part_report(message, result)
 
     async def _call_part_data(self, group: MessageGroup) -> tuple[Any, str | None]:
@@ -3146,16 +3191,49 @@ class PartitionProcessor:
         report = asyncio.create_task(self._report_part(message, result))
         self._active_tasks.add(report)
         report.add_done_callback(self._active_tasks.discard)
-        report.add_done_callback(functools.partial(self._note_cancelled_report, message.offset))
+        report.add_done_callback(functools.partial(self._end_part_report, message.offset))
+        self._waiting_reports += 1
+        if not self._reports_have_room():
+            self._report_room.clear()
 
-    def _note_cancelled_report(self, offset: int, report: asyncio.Task) -> None:
-        """Take the offset of a cancelled report out of the drain, also when the report never started.
+    def _end_part_report(self, offset: int, report: asyncio.Task) -> None:
+        """One report ended, however it did: the loop may take parts again once fewer than the cap wait.
 
-        The offset stays pending: the result may not be written, so the part
-        runs again on the next owner of its partition.
+        The offset of a cancelled report leaves the drain, also when the
+        report never started. It stays pending: the result may not be
+        written, so the part runs again on the next owner of its partition.
         """
+        self._waiting_reports -= 1
+        if self._reports_have_room():
+            self._report_room.set()
         if report.cancelled() and offset not in self._stalled_offsets:
             self._abandoned_offsets.add(offset)
+
+    def _reports_have_room(self) -> bool:
+        """Whether fewer finished parts than the cap wait for their result to be written."""
+        return self._waiting_reports < self._max_waiting_reports
+
+    async def _wait_for_report_room(self) -> bool:
+        """Wait, at most ``IDLE_POLL_TIMEOUT``, until the loop may take parts; false after the time bound or a stop.
+
+        Nothing is charged to the pending budget and no executor slot is
+        held meanwhile. The messages stay in the queue, so the fetch pauses
+        by the rule of ``sources.kafka.max_queued_messages``.
+        """
+        if not self._reports_have_room():
+            try:
+                await asyncio.wait_for(self._report_room.wait(), timeout=IDLE_POLL_TIMEOUT)
+            except TimeoutError:
+                return False
+        return self._running and self._reports_have_room()
+
+    async def _wait_to_take_stream_part(self) -> bool:
+        """Wait until the stream loop may take its next part; each turn retries a due commit. False at a stop."""
+        while not await self._wait_for_report_room():
+            if not self._running:
+                return False
+            await self._note_commit_due()
+        return True
 
     async def _report_part(self, message: SourceMessage, result: PartResult) -> None:
         """Write the result of a part, count it, and only then complete the part's offset.
@@ -3182,24 +3260,34 @@ class PartitionProcessor:
             self._abandoned_offsets.add(offset)
             return
         except Exception as error:
-            logger.error(
-                'split_result_write_failed',
-                category='split',
-                partition=self._partition_label,
-                offset=offset,
-                part=result.index,
-                error=str(error),
-                error_type=type(error).__name__,
-                final=True,
-                exc_info=not isinstance(error, SplitProduceError),
-            )
+            self._log_final_report_failure(message, result, error)
             await self._stall_offset(offset)
             return
         split_parts_processed.labels(outcome=result.outcome).inc()
         self._offset_tracker.complete(offset)
         offset_lag.labels(partition=str(self._partition_label)).set(self._offset_tracker.pending_count)
         await self._note_commit_due()
-        self._message_trackers.pop(offset, None)
+
+    def _log_final_report_failure(self, message: SourceMessage, result: PartResult, error: Exception) -> None:
+        """Log a result that can never be written, with the fields of the writer's retry line; one line per 60 s."""
+        suppressed = self._part_log.admit('report')
+        if suppressed is None:
+            return
+        part = message.split
+        # A produce error says all there is; any other error is a fault of the report itself.
+        traceback: dict[str, Any] = {} if isinstance(error, SplitProduceError) else {'exc_info': error}
+        logger.error(
+            'split_result_write_failed',
+            category='split',
+            job=part.job_id if part is not None else None,
+            partition=self._partition_label,
+            part=result.index,
+            error=str(error) or type(error).__name__,
+            final=True,
+            attempt=error.attempt if isinstance(error, PartReportError) else 1,
+            suppressed=suppressed,
+            **traceback,
+        )
 
     async def _note_commit_due(self) -> None:
         """A watermark advance happened; commit now or shortly.

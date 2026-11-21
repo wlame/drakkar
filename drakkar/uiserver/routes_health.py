@@ -66,10 +66,13 @@ def create_health_router(drakkar_app: DrakkarApp) -> APIRouter:
             if processor.is_dead:
                 reasons.append(f'partition_{pid}_processor_died')
         # The same for a partition of the parts topic, under the number the
-        # worker shows for it.
+        # worker shows for it. ``sorted`` copies the items in one step: this
+        # runs on the API thread while the main loop changes the dict.
         parts = drakkar_app.parts_source
         if isinstance(parts, PartsSource):
-            reasons.extend(f'partition_{pid}_processor_died' for pid in parts.dead_partitions())
+            for pid, processor in sorted(parts.processors.items()):
+                if processor.is_dead:
+                    reasons.append(f'partition_{pid + parts.partition_label_base}_processor_died')
         if reasons:
             return JSONResponse({'status': 'not_ready', 'reasons': reasons}, status_code=503)
         return JSONResponse({'status': 'ready'})
