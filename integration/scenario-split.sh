@@ -35,7 +35,10 @@
 # first a worker the check killed, restarted or detached, the second a
 # worker that logged split_job_resumed or split_attempt_started for it;
 # never three. A stop on purpose waits 45 s, longer than the 30 s drain.
-#   1. large request (60 items, 12 parts): exactly 60 item records, one per
+#   1. large request (60 items, 12 parts): the owner's /api/v1/debug/split
+#      lists the job (no other worker does) with 12 parts and `received`
+#      growing between two reads, and the trace by label split_job returns
+#      rows with split_part; exactly 60 item records, one per
 #      item, from at least two workers; one summary with 12 parts, 12
 #      received, 60 items; the committed offset of its partition, read about
 #      once a second, stayed at or below the request until the owner logged
@@ -736,10 +739,89 @@ sample_held_offset() {
     done
 }
 
+# The job PARTITION:OFFSET as the split route of worker $1 lists it: prints
+# "<received> <parts> <phase>" (parts `null` before split-done), nothing when
+# the worker does not list the job or does not answer.
+job_view() {
+    curl -sf --connect-timeout 2 --max-time 5 "http://localhost:$(api_port "$1")/api/v1/debug/split?limit=500" \
+        | P="$PARTITION" O="$OFFSET" python3 -c '
+import json, os, sys
+state = json.load(sys.stdin)
+for job in state.get("jobs", []):
+    if str(job["partition"]) == os.environ["P"] and str(job["offset"]) == os.environ["O"]:
+        print(job["received"], job["parts"] if job["parts"] is not None else "null", job["phase"])
+' 2>/dev/null
+}
+
+# The workers whose split route lists the current job, with their view:
+# "<service>=<received> <parts> <phase>" one per line.
+job_views() {
+    local service view
+    for service in "${SPLIT_SERVICES[@]}"; do
+        view=$(job_view "$service")
+        [ -n "$view" ] && echo "${service}=${view}"
+    done
+}
+
+# Poll the split route until `received` of the current job grew between two
+# reads while the job was open. Only the owner may list the job. Prints the
+# facts, or the broken rule and returns 1.
+check_split_route() {
+    local views first_received="" received parts phase listed deadline owners
+    deadline=$(python3 -c 'import time; print(time.time() + 90)')
+    while true; do
+        views=$(job_views)
+        owners=$(grep -c . <<<"$views")
+        if [ -n "$views" ]; then
+            [ "$owners" = 1 ] || { echo "${owners} workers list the job ${PARTITION}:${OFFSET}, expected only its owner: ${views}"; return 1; }
+            listed=${views%%=*}
+            [ "$listed" = "$OWNER" ] || { echo "${listed} lists the job, but ${OWNER} owns it"; return 1; }
+            read -r received parts phase <<<"${views#*=}"
+            [ "$parts" = null ] || [ "$parts" = "$LARGE_PARTS" ] \
+                || { echo "the route shows ${parts} parts for ${JOB}, expected ${LARGE_PARTS}"; return 1; }
+            if [ -z "$first_received" ]; then
+                first_received=$received
+            elif [ "$received" -gt "$first_received" ] && [ "$parts" = "$LARGE_PARTS" ]; then
+                echo "split route of ${OWNER}: received ${first_received} then ${received} of ${parts} parts (phase ${phase})"
+                return 0
+            fi
+        elif [ -n "$first_received" ]; then
+            echo "the job ${JOB} left the route of ${OWNER} after received ${first_received}, before it grew"
+            return 1
+        fi
+        if python3 -c 'import sys, time; sys.exit(0 if time.time() > float(sys.argv[1]) else 1)' "$deadline"; then
+            echo "received did not grow within 90s (first ${first_received:-none}); views: ${views:-none}"
+            return 1
+        fi
+        sleep 2
+    done
+}
+
+# One worker's trace by label split_job=<partition>:<offset> returns task
+# rows, and the rows carry split_part. Prints the facts or the reason.
+check_split_labels() {
+    local service body count parts_seen=0 total=0
+    for service in "${SPLIT_SERVICES[@]}"; do
+        body=$(curl -sf --connect-timeout 2 --max-time 10 -G \
+            --data-urlencode "key=split_job" --data-urlencode "value=${PARTITION}:${OFFSET}" \
+            "http://localhost:$(api_port "$service")/api/v1/debug/trace-by-label") \
+            || { echo "trace-by-label failed on ${service}"; return 1; }
+        count=$(python3 -c 'import json, sys; print(len(json.load(sys.stdin)))' <<<"$body") \
+            || { echo "trace-by-label on ${service} did not answer JSON"; return 1; }
+        total=$((total + count))
+        grep -q split_part <<<"$body" && parts_seen=$((parts_seen + 1))
+    done
+    [ "$total" -ge 1 ] || { echo "no task row with the label split_job=${PARTITION}:${OFFSET} on any worker"; return 1; }
+    [ "$parts_seen" -ge 1 ] || { echo "${total} rows with split_job, none with split_part"; return 1; }
+    echo "trace by label split_job: ${total} rows over the workers, split_part on ${parts_seen} of them"
+}
+
 check_large_request() {
-    local pair summary items rows summary_ms closed_rec_ms closed_log_ms commit commit_ms commit_offset below_ms below_offset
+    local route labels pair summary items rows summary_ms closed_rec_ms closed_log_ms commit commit_ms commit_offset below_ms below_offset
     start_large_job 1 4000 || return
     wait_split_done || return
+    route=$(check_split_route) || { cfail "${route}"; return; }
+    labels=$(check_split_labels) || { cfail "${labels}"; return; }
     sample_held_offset || return
     [ "$HELD" -ge 1 ] \
         || { cfail "the committed offset was never read at or below the request while its parts ran"; return; }
@@ -768,7 +850,7 @@ check_large_request() {
     [ "$(grep -o '=[0-9]*' <<<"$items" | grep -c .)" -ge 2 ] \
         || { cfail "fewer than two workers ran items of ${RID}: ${items}"; return; }
     wait_lag_zero || return
-    check_pass "${summary}; ${items}; owner ${OWNER}; offset held in ${HELD} samples; commit to ${commit_offset} at +$((commit_ms - summary_ms)) ms after the summary record, +$((commit_ms - closed_rec_ms)) ms after the closed record, +$((commit_ms - closed_log_ms)) ms after split_job_closed (last commit before: ${below_offset} at ${below_ms}); $(seconds_between "$PRODUCED_AT" "$CLOSED_AT")s from produce to commit"
+    check_pass "${route}; ${labels}; ${summary}; ${items}; owner ${OWNER}; offset held in ${HELD} samples; commit to ${commit_offset} at +$((commit_ms - summary_ms)) ms after the summary record, +$((commit_ms - closed_rec_ms)) ms after the closed record, +$((commit_ms - closed_log_ms)) ms after split_job_closed (last commit before: ${below_offset} at ${below_ms}); $(seconds_between "$PRODUCED_AT" "$CLOSED_AT")s from produce to commit"
 }
 
 check_small_request() {
