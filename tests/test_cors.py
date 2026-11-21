@@ -1,6 +1,6 @@
 """Cross-origin reads for the browser fan-out.
 
-The page served by one worker reads these three paths from every worker of
+The page served by one worker reads these four paths from every worker of
 its cluster. They answer cross-origin requests with the same origin rule as
 the WebSocket (``origin_allowed``, ``ui.allowed_origins``); a preflight
 never needs the token, because a browser sends none with it.
