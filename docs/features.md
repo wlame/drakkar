@@ -43,6 +43,7 @@ Every feature is optional. A worker can run its main loop only: no API, no UI, n
 | HTTP input source | `sources.http.enabled` | **off** (`:8090`) | POST, handler pipeline, JSON response |
 | Aligned startup | `sources.kafka.startup_align.enabled` | **on** | Fleet restarts converge on one rebalance |
 | DLQ | `dlq.enabled` | **on** | Failed messages written to a Kafka topic as DLQ records |
+| [Split](split.md) | `split.enabled` | **off** | A handler with `split()` cuts large messages into parts that every worker processes, and `aggregate()` puts the results together; needs `sources.kafka.enabled` and two topics that the operator creates |
 
 Sources are not optional as a group: **at least one input source must be
 enabled**. Both are off by default, so every worker states where its work

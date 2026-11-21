@@ -75,6 +75,15 @@ breaking change, never a refactor:
   the `task_locks` DDL and statements, the `task-locks` Redis keys and
   scripts, the Consul paths and session names) — workers of one cluster
   contend for the same lock
+- the two internal topics of the split feature
+  (`tests/fixtures/split_contract.json`): the part records of the parts topic
+  (key and value of the original message, its non-`dk-` headers, then the
+  `dk-split-*` headers in a fixed order, and the partition rule
+  `(source offset + index) mod N`), and the records of the results log
+  (`open`, `split-done`, `split-cancelled`, `result`, `closed`: key
+  `<partition>:<offset>`, headers in a fixed order, sorted compact JSON
+  values, the closed sets of outcomes) — workers of other releases write and
+  read the same log, and a restart rebuilds every job from it
 - framework datetimes in JSON use one canonical format:
   `drakkar.format_rfc3339_micro` — never `isoformat()` on framework values
 
@@ -220,6 +229,24 @@ parametrize).
     `inside_pipeline_hook` (`drakkar/hook_scope.py`), because the revoke drain
     would wait for the call itself. The state never survives a restart.
 
+14. With `split.enabled` false nothing changes: no parts source, no job
+    tracker, no split producer, and `split` is never called. With it on, the
+    source offset of a split job completes only by the owner's own end of the
+    job (`drakkar/split/ending.py`), by a `closed` record in the results log,
+    or because the restored table already has `closed`; never because a timer
+    or a stop gave up. The worker that holds the source message follows the
+    log (`drakkar/split/owner.py`): the latest `open` is the current attempt
+    whichever instance wrote it, so two owners of a short overlap agree; it
+    never forgets a job whose message it holds while it owns the partition.
+    The offset of an open job is not drainable, and a stop or revoke cancels
+    a split outside the drain, because a job can last hours. A part's offset
+    completes only after its `result` record is acknowledged
+    (`drakkar/split/partmode.py`), so a finished part never runs again after
+    a restart. The job table (`drakkar/split/table.py`) is pure code with no
+    I/O and no handler call, and applies the same rules in restore and in
+    live reading; a second rule set for one of the two would let a restart
+    rebuild a different state than the live owner had.
+
 ## API server footguns
 
 - The API server (`drakkar/uiserver/`) runs on its own thread and event loop. It is
@@ -271,12 +298,19 @@ drakkar/
   detach.py, detach_slots.py, detach_group.py   leave the consumer group for a bounded time: the state machine,
                            the budget slots in the election store, the group size from the registry cards
   hook_scope.py            marks the handler calls that are part of a partition's work, and Message Probe runs
+  split/                   split a source message into parts that run on every worker: models, the wire records
+                           (records.py), the pure job table (table.py), the job tracker over the results log
+                           (tracker.py), the producer, the results reader, the topic check (topics.py), the run
+                           of one split (splitting.py), the end of a job (ending.py), the owner (owner.py), part
+                           mode of a processor (partmode.py), and the runtime the lifecycle builds (runtime.py)
   budget.py                the worker's pending budget: tasks and bytes, reservations, the FIFO of waiting loops
   executor.py              subprocess pool (argv exec, process-group kill)
   procwatch.py             the exit watcher: one daemon thread reads each task's exit time off the loop
   reported_run.py          the optional task_run_seconds hook: call it and check its answer
   sinks/                   sink implementations + DLQ + circuit breaker
-  sources/                 input-source protocol, registry, handler validation
+  sources/                 input-source protocol, registry, handler validation; parts.py is the parts source of
+                           the split feature (the Kafka source code over the parts topic, partitions shown as
+                           1000000 + n)
   cache/                   LWW SQLite cache + the HTTP cache exchange (client and query parsing)
   fleet/                   worker registry: cards, providers, service
   periodic.py              @periodic decorator, its rules, the worker-scope loop, the shared run-once helper

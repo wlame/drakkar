@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `f0042b1ed19ac3c7`.
+Registry version: `69b5374d5a421cf8`.
 
 ## Concepts
 
@@ -575,7 +575,7 @@ The lease of the detach slot in the autodiscover store.
 
 Whether messages of the Kafka source may be cut into parts that run on every worker and are put together again.
 
-**Advice:** Turn it on only with the Kafka source on; the parts and results topics must exist and live longer than split.job_timeout.
+**Advice:** Turn it on only with the Kafka source on; the parts and results topics must exist, and their retention must be longer than split.job_timeout (longer than the longest job when split.job_timeout is 0).
 
 **Related:** `config:split.aggregate_sinks`, `config:split.job_timeout`
 

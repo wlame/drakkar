@@ -134,6 +134,18 @@ Yes — that's what `on_message_complete` is for. You get a `MessageGroup` with 
 
 Implement `arrange_stream()` instead of `arrange()`. It is an async generator that yields the tasks of one message in groups; the framework starts each group at once and pulls the next one only when the pending budget has room, so the memory is bounded by the limits plus one group. `on_group_complete` gives you a hook per group, and `on_message_complete` still fires once for the message. The offset still completes only when the whole message ends, so a restart runs every group again. See [Streaming a large message](fan-out.md#streaming-a-large-message).
 
+### One message makes far too many tasks for one worker. What can I do?
+
+When one worker cannot finish your largest message in an acceptable time,
+even with `arrange_stream()`, and the work can be cut into independent
+pieces, turn on [split](split.md) (`split.enabled`, off by default). The
+handler's `split()` cuts the message into parts; every worker of the group
+processes parts with the usual hooks, and `aggregate()` puts the results
+together on the worker that owns the message, which commits its offset only
+after that. You create two more Kafka topics, and the progress survives a
+restart of any worker. A part and the final result can be delivered twice,
+so the sinks must accept repeats. See [When to use it](split.md#when-to-use-it).
+
 ### Can one task cover multiple messages (fan-in)?
 
 Yes. An `ExecutorTask` can list multiple `source_offsets`; it only completes the window when all its source messages' trackers have settled. See [Multi-message tasks (fan-IN)](fan-out.md#multi-message-tasks-fan-in).

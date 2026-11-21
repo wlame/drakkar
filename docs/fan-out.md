@@ -9,6 +9,9 @@ Drakkar supports this natively via the `on_message_complete` hook and
 the `MessageGroup` dataclass. When one message makes so many tasks that they
 should not all exist at once, the handler can yield them in groups with
 `arrange_stream()` instead (see [Streaming a large message](#streaming-a-large-message)).
+When one message is too large for one worker, even with `arrange_stream()`,
+the handler can [split](split.md) it into parts that run on every worker of
+the group.
 The [Pipeline Map](pipeline-map.md) compares `arrange()`, `arrange_stream()`
 and the HTTP source side by side, with the outcome of each failure.
 
@@ -245,6 +248,7 @@ returns. This means:
 | 1 message → N tasks → N detail + 1 aggregate | BOTH `on_task_complete` and `on_message_complete` |
 | Multi-message batch metrics | `on_window_complete` (coarser than message-level) |
 | 1 message → thousands of tasks, in independent parts | `arrange_stream()` with `on_group_complete` per part and `on_message_complete` for the whole (see [Streaming a large message](#streaming-a-large-message)) |
+| 1 message → more work than one worker can do in time, in independent parts | [`split()`](split.md): each part runs on any worker with `on_message_complete`, and `aggregate()` runs once for the whole message on its owner |
 
 All three hooks coexist — they fire on the same underlying data but at
 different granularities. Which to use is a choice about what you want
@@ -482,6 +486,18 @@ class ImportHandler(dk.BaseDrakkarHandler):
         total = sum(g.notes.get('bytes', 0) for g in group.groups)
         return dk.CollectResult(...)
 ```
+
+### When one worker is not enough
+
+`arrange_stream()` bounds the memory of a large message, but every task of
+the message still runs on one worker: the worker that owns its partition.
+A message of 100 000 tasks can take many hours there while the other
+workers are idle. When the work of such a message can be cut into
+independent pieces, [split](split.md) it: each piece becomes a part that any
+worker of the group runs, and `aggregate()` puts the results together on the
+owner. A part can still use `arrange_stream()`. Stay with `arrange_stream()`
+alone when one worker handles your largest message in an acceptable time:
+split needs two more topics and more hooks.
 
 ### The rules of the generator
 

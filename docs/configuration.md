@@ -650,7 +650,7 @@ When every configured client has an empty token, the worker logs a `webapp_unaut
 
 ## Split messages (`split:`) {#split-messages-split}
 
-A new root section, after `sources` and before `executor`. With `split.enabled: false` the section loads, is checked, and does nothing.
+A root section, after `sources` and before `executor`. It lets a handler cut a large source message into parts that every worker of the group processes; the [Split](split.md) page explains the feature, the two topics to create and the risks. With `split.enabled: false` the section loads, is checked, and does nothing. Every key has an environment form `DK_SPLIT__<KEY>`, for example `DK_SPLIT__JOB_TIMEOUT=6h`; no key is secret.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -662,11 +662,23 @@ A new root section, after `sources` and before `executor`. With `split.enabled: 
 | `split.results_group` | `str` | `''` | Empty: `<consumer group>_split_results`. |
 | `split.aggregate_sinks` | `list[str]` | `[]` | Sinks of the aggregate stage, each `<type>/<name>` of a configured sink. Every other sink is a part sink. |
 | `split.job_timeout` | duration | `24h` | The longest run of a job: `0` (no limit) or `1m` to `30d`. |
-| `split.idle_timeout` | duration | `0` | The longest time without a part result: `0` (no limit) or `1m` to `30d`, and below `job_timeout` when both are set. |
-| `split.max_attempts` | `int` | `3` | How many times a job may be split, 1 to 10. |
+| `split.idle_timeout` | duration | `0` | The longest time without a new part result, counted only after the split has finished: `0` (no limit) or `1m` to `30d`, and below `job_timeout` when both are set. |
+| `split.max_attempts` | `int` | `3` | How many attempts of one job may end without finishing their split (the worker died), 1 to 10. An attempt that a stop or a revoke cancelled is not counted. |
 | `split.max_part_data` | size | `64KiB` | The largest data of one part, `1KiB` to `512KiB`. |
 
-The load fails when: `split.enabled` is on and the Kafka source is off; `split.connection` is not defined under `connections.kafka` (checked only with the feature on); an `aggregate_sinks` entry is not a configured sink; both timeouts are `0`; `idle_timeout` is not below `job_timeout`; the source topic, the parts topic, the results topic and the DLQ topic are not four different topics; or, with the feature on, a sink depends on a sink of the other stage. The checks run again after `on_startup`. The config summary has the token `split=on` or `split=off` after `sources=[...]`.
+The load fails when: `split.enabled` is on and the Kafka source is off; `split.connection` is not defined under `connections.kafka` (checked only with the feature on); an `aggregate_sinks` entry is not a configured sink; both timeouts are `0`; `idle_timeout` is not below `job_timeout`; the source topic, the parts topic, the results topic and the DLQ topic are not four different topics; or, with the feature on, a sink depends on a sink of the other stage. The checks run again after `on_startup`; a change of `split.enabled` there is ignored and logged. The config summary has the token `split=on` or `split=off` after `sources=[...]`.
+
+The load messages:
+
+- `split.enabled needs sources.kafka.enabled: only messages of the Kafka source are split`
+- `split.connection '<name>' is not defined under connections.kafka`
+- `split.aggregate_sinks: '<ref>' is not a configured sink; write '<type>/<name>'`
+- `split.job_timeout and split.idle_timeout cannot both be 0: a job with a lost part would never end`
+- `split.idle_timeout (<v>) must be < split.job_timeout (<v>)`
+- `split: <path> and <path> name the same topic '<topic>'`
+- `sinks.<type>.<name>.depends_on: '<ref>' is in the other split stage; a sink depends only on sinks of its own stage`
+
+At start the worker also checks that both topics exist and that the results topic has the partition count of the source topic (see [The two topics](split.md#the-two-topics)).
 
 ---
 

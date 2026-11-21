@@ -440,6 +440,17 @@ later. Inside one group the payload order is the delivery order, as always.
 The load checks every reference, refuses a sink that depends on itself, and
 refuses a cycle (the messages are listed under [Failure policy](#failure-policy)).
 
+With [`split.enabled`](split.md), each sink belongs to one stage: an
+**aggregate sink** when `split.aggregate_sinks` names it, else a **part
+sink**. Part sinks receive the results of the parts (from
+`on_task_complete`, `on_group_complete`, `on_message_complete` and
+`on_window_complete`); aggregate sinks receive the answer of `aggregate()`
+and `on_job_timeout()`. `depends_on` must stay inside one stage: a
+dependency on a sink of the other stage fails the load with
+`sinks.<type>.<name>.depends_on: '<ref>' is in the other split stage; a sink depends only on sinks of its own stage`.
+A result that names a sink of the wrong stage is not delivered (see
+[Sink stages](split.md#sink-stages)).
+
 #### Waiting after the dependencies (`depends_on_wait`)
 
 Sometimes the data that a dependency wrote is not visible at once to what the
@@ -757,8 +768,13 @@ each failed source message:
 - a sink delivery that ends in `dlq`: the sink's `on_failure`, the handler's
   `DeliveryAction.DLQ`, a spent retry budget, or an open circuit
   (stage `sink`);
-- a split message whose split did not finish (stage `split`), or whose
-  aggregate step chose the DLQ, raised or timed out (stage `aggregate`).
+- a [split job](split.md#when-a-part-fails) whose `split()` raised, could
+  not publish a part, or spent its attempts (stage `split`); or whose
+  `aggregate()` or `on_job_timeout()` raised, or answered `JobAction.DLQ`
+  with no part that ended in a `dlq` outcome (stage `aggregate`, also for
+  the default answer of a timeout). When the job has a part with a `dlq`
+  outcome, the record takes the stage and the facts of that part (`execute`
+  or `sink`). A part itself never writes a DLQ record.
 
 A record is written once per message: after it, [the message is
 done](#on_failure-dlq-the-message-is-done).
@@ -805,7 +821,7 @@ replayed message that fails again gets fresh facts, never two sets). Then the
 | `dk-error` | The error text with URL credentials redacted, cut to 2000 bytes at a UTF-8 character boundary. The full text is in the log line. |
 | `dk-sink` | `<sink_type>/<sink_name>` of the failed sink; `sink` stage only |
 | `dk-task-id` | The failed task's id; `execute` stage only |
-| `dk-attempts` | Attempts made, in decimal. `sink`: the hook-level attempts of that sink for this message (`0` for an open circuit). `execute`: the task's attempts. `split`: the split attempts. Absent for `parse` and `aggregate`. |
+| `dk-attempts` | Attempts made, in decimal. `sink`: the hook-level attempts of that sink for this message (`0` for an open circuit). `execute`: the task's attempts. `split`: the attempts of a job whose attempts are spent; absent when `split()` failed. Absent for `parse` and `aggregate`. |
 | `dk-delivered-sinks` | The sinks that delivered a result of this message before the record was written, as sorted, comma-joined `<sink_type>/<sink_name>`; absent when none |
 | `dk-source-topic` | The source topic |
 | `dk-source-partition` | The source partition, in decimal |

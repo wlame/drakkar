@@ -25,6 +25,20 @@ Nothing changes for a worker that does not turn the new features on.
 2. **The detach feature is off by default.** To use it, turn on
    `autodiscover` and `sources.kafka.detach.enabled`; to give operators the
    Live-page control, also `ui.detach_enabled`.
+3. **The split feature is off by default.** A worker with `split.enabled:
+   false` behaves as before, also when its handler defines `split`; it then
+   logs `split_disabled` once. `BaseDrakkarHandler` has the new hooks
+   `split`, `part_data`, `aggregate` and `on_job_timeout` and the class
+   attribute `part_data_model`. A handler class that already defines its own
+   `part_data`, `aggregate`, `on_job_timeout` or `part_data_model` without
+   `split` now fails the start: rename yours. The
+   DLQ record has two new values of `dk-stage`, `split` and `aggregate`;
+   check consumers of the DLQ topic that read that header. Before you set
+   `split.enabled: true`, create the parts topic and the results topic (the
+   results topic with the partition count of the source topic), give the
+   worker the rights on them and on the two new consumer groups, set
+   `split.aggregate_sinks`, and make your sinks accept repeats. See
+   [Split](split.md#the-two-topics).
 
 ## Upgrading from 3.0.3 to 3.1.0 {#from-3-0-3}
 

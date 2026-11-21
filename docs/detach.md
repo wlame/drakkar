@@ -391,7 +391,9 @@ A detach runs these steps after the checks of the answer table:
    runs, the partition loops drain and commit within
    `executor.drain_timeout`, and the partitions move. The wait ends when no
    partition and no revoke is left. A worker that holds no partition leaves
-   with its next poll.
+   with its next poll. A worker that [splits messages](split.md) leaves the
+   consumer group of the parts topic at the same time, and an attach joins
+   both groups.
 5. **Detached.** The state is `detached`. The deadline timer starts, the
    registry card is published again, and the worker records
    `worker_detached`.

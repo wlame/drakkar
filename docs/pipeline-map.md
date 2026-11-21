@@ -9,6 +9,12 @@ each form, the path of a message from the source to the commit, which hooks
 run on that path and when, and what happens at each step when something
 fails.
 
+A handler that [splits](split.md) large messages into parts uses the same
+paths: each part, and each local message, runs the Kafka path of the map on
+the worker that reads it. The extra steps of a split job (the split, the
+part results, `aggregate()` and the job timeouts) are described on the
+[Split](split.md) page.
+
 Choose a form to see which hooks run. Choose a step to see what can fail
 there, which hook or config key decides, and what happens to the message and
 its offset. Your choice is kept in the address of the page, so a link shows

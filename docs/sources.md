@@ -30,6 +30,19 @@ Sinks behave the same for both. A Kafka sink works on an HTTP-only worker,
 because the cluster connection in [`connections.kafka`](configuration.md#kafka-connectionskafkaname)
 is separate from the Kafka source.
 
+### The parts source of the split feature
+
+A worker with [`split.enabled`](split.md) runs one more Kafka reader, the
+**parts source**. It is internal: it has no `sources.*` block and needs no
+hook of its own. It reads the parts topic in the consumer group
+`split.parts_group`, with the poll and session settings of `sources.kafka`,
+and runs each part through the same pipeline as a source message. It shares
+the executor pool, the pending budget, the sinks and the drain with the
+Kafka source. It does not call `on_assign` and `on_revoke`. What the worker
+shows about partition `n` of the parts topic uses the number `1000000 + n`
+(see [Partition numbers of the parts topic](split.md#partition-numbers)).
+A detach leaves its group too, and the debug consume pause pauses it.
+
 ## Choosing a mode
 
 ### Kafka only

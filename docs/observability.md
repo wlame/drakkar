@@ -175,17 +175,27 @@ Prometheus needed for a quick read.
 
 #### Split
 
-These metrics carry values only for a worker with `split.enabled`.
+These metrics carry values only for a worker with [`split.enabled`](split.md).
+The [Split page](split.md#log-events) lists the log events of the feature.
+
+What the worker shows about partition `n` of the parts topic uses the number
+`1000000 + n`: the `partition` label of `drakkar_partition_queue_size`,
+`drakkar_consumer_lag` and the other metrics with a partition label. The
+worker-level gauges without a partition label (`drakkar_assigned_partitions`,
+`drakkar_backpressure_active`, `drakkar_total_queued`,
+`drakkar_consumer_idle_seconds_total`, `drakkar_executor_idle_slot_seconds_total`)
+describe the source topic only. `drakkar_handler_duration_seconds` has the
+`hook` values `split`, `part_data`, `aggregate` and `on_job_timeout`.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `drakkar_split_jobs_open` | Gauge | -- | Split jobs this worker owns that are not closed |
 | `drakkar_split_oldest_job_age_seconds` | Gauge | -- | Age in seconds of the oldest open split job this worker owns, `0` when there is none |
 | `drakkar_split_restoring_partitions` | Gauge | -- | Source partitions that wait for the restore of their split jobs |
-| `drakkar_split_jobs_total` | Counter | `outcome` | Split jobs ended, by outcome: `aggregated`, `dlq`, `timeout`, `split_failed`, `attempts_spent`, `orphaned`, `superseded`, `local` |
-| `drakkar_split_job_duration_seconds` | Histogram | -- | Seconds from the open record of a split job to its end. Buckets 1, 5, 15, 60, 300, 900, 3600, 14400, 43200, 86400 |
+| `drakkar_split_jobs_total` | Counter | `outcome` | Split jobs ended, by outcome: `aggregated`, `dlq`, `timeout`, `split_failed`, `attempts_spent`, `orphaned`, `superseded`, `local`. `local` is a local message that did not go to the DLQ (a local message that did counts as `dlq`); `superseded` is an attempt of this worker that a newer attempt of another worker replaced, and its job goes on |
+| `drakkar_split_job_duration_seconds` | Histogram | -- | Seconds from the open record of a split job to its end; local messages are not counted. Buckets 1, 5, 15, 60, 300, 900, 3600, 14400, 43200, 86400 |
 | `drakkar_split_parts_published_total` | Counter | -- | Parts published to the parts topic |
-| `drakkar_split_parts_processed_total` | Counter | `outcome` | Parts this worker ran, by outcome: `ok`, `failed` |
+| `drakkar_split_parts_processed_total` | Counter | `outcome` | Parts this worker ran, by outcome: `ok`, `failed`. Parts of the parts topic only: local messages are not counted |
 | `drakkar_split_results_received_total` | Counter | -- | Part results counted by the job tracker |
 | `drakkar_split_results_ignored_total` | Counter | `reason` | Records of the split topics this worker ignored, by reason: `duplicate`, `old_attempt`, `closed_job`, `unknown_job`, `foreign_group`, `malformed`. The job tracker counts the records of the results topic; a partition of the parts topic counts a part record (`foreign_group` or `malformed`) |
 | `drakkar_split_result_write_failures_total` | Counter | -- | Failed attempts to write a part result |
@@ -256,7 +266,7 @@ The sink delivery and DLQ log events (category `sink`, except where noted):
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `drakkar_handler_duration_seconds` | Histogram | `hook` (`arrange`, `arrange_stream`, `on_task_complete`, `on_group_complete`, `on_message_complete`, `on_error`, `on_window_complete`, etc.) | Duration of user handler hook execution; for `arrange_stream`, one sample for each pull that returned a group. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 30 |
+| `drakkar_handler_duration_seconds` | Histogram | `hook` (`arrange`, `arrange_stream`, `split`, `part_data`, `aggregate`, `on_job_timeout`, `on_task_complete`, `on_group_complete`, `on_message_complete`, `on_error`, `on_window_complete`, etc.) | Duration of user handler hook execution; for `arrange_stream`, one sample for each pull that returned a group. Buckets: 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 30 |
 | `drakkar_handler_hook_errors_total` | Counter | `hook` | User hooks that raised instead of returning. The framework contains the failure and keeps the partition flowing, so this counter is the only signal that a handler is broken — **alert on any non-zero rate** |
 
 The log events of [`arrange_stream`](fan-out.md#streaming-a-large-message) and its groups:

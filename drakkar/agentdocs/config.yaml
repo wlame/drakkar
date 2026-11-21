@@ -82,7 +82,7 @@
 
 - key: split.enabled
   summary: Whether messages of the Kafka source may be cut into parts that run on every worker and are put together again.
-  advice: Turn it on only with the Kafka source on; the parts and results topics must exist and live longer than split.job_timeout.
+  advice: Turn it on only with the Kafka source on; the parts and results topics must exist, and their retention must be longer than split.job_timeout (longer than the longest job when split.job_timeout is 0).
   related:
     - config:split.aggregate_sinks
     - config:split.job_timeout
