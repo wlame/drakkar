@@ -271,6 +271,10 @@ class SplitRun:
             _SplitFailed: the generator raised.
             _SplitInterrupted: the split must stop; the pull is left to the close.
         """
+        if self._interrupt.done():
+            # Checked before every pull: a generator that never suspends ends each pull in the
+            # same loop turn, and the wait below would never see the interrupt.
+            raise _SplitInterrupted(self._interrupt.result())
         context = self._context
         tokens = context.run(self._bind_pull)
         started = time.monotonic()
@@ -439,6 +443,8 @@ class SplitRun:
         if waiting:
             # Cancelling the group cancels the futures it waits for.
             every = asyncio.gather(*waiting, return_exceptions=True)
+            # Read in every case: a group that is cancelled at an interrupt has no other reader.
+            every.add_done_callback(_read_outcome)
             try:
                 await self._wait(every)
             finally:

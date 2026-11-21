@@ -244,6 +244,8 @@ class SplitRuntime:
             instance=self.instance,
             max_attempts=self._config.split.max_attempts,
             results_reader=self._results_reader,
+            job_timeout=self._config.split.job_timeout,
+            idle_timeout=self._config.split.idle_timeout,
             clock=self._clock,
             sleep=self._sleep,
         )

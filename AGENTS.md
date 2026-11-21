@@ -238,6 +238,11 @@ parametrize).
     log (`drakkar/split/owner.py`): the latest `open` is the current attempt
     whichever instance wrote it, so two owners of a short overlap agree; it
     never forgets a job whose message it holds while it owns the partition.
+    Its rules read the job table and the clock; an event of the tracker only
+    wakes them, so an event that came before the message is never needed.
+    The end of a job works on a snapshot of one attempt, and its offset
+    completes only when the table shows `closed`: every reader ignores a
+    `closed` record of an older attempt.
     The offset of an open job is not drainable, and a stop or revoke cancels
     a split outside the drain, because a job can last hours. A part's offset
     completes only after its `result` record is acknowledged

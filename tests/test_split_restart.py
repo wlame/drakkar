@@ -28,7 +28,8 @@ from drakkar.split import partmode
 from drakkar.split.models import PartResult, SplitJob, SplitResultsUnavailable
 from drakkar.split.partmode import no_report
 from drakkar.split.records import JobRef, log_record, open_body, parse_log_record, parse_part_headers, result_body
-from drakkar.split.tracker import FOREIGN_SPLIT_GRACE_SECONDS, TIMEOUT_CHECK_SECONDS
+from drakkar.split.table import FOREIGN_SPLIT_GRACE_SECONDS
+from drakkar.split.tracker import TIMEOUT_CHECK_SECONDS
 from tests.conftest import wait_for
 from tests.split_helpers import FakeConsumerClient
 from tests.split_owner_helpers import (
@@ -532,6 +533,13 @@ class GatedConsumer(FakeConsumerClient):
         return await super().committed(partitions, timeout)
 
 
+def real_time_parts() -> FakeRuntimeParts:
+    """The fakes of a runtime whose records carry the time of the wall clock, which the app's runtime reads."""
+    parts = FakeRuntimeParts()
+    parts.log.clock = lambda: int(time.time() * 1000)
+    return parts
+
+
 def source_record(offset: int, partition: int = 1) -> SourceMessage:
     return SourceMessage(topic=SOURCE_TOPIC, partition=partition, offset=offset, value=b'{"n": 1}', timestamp=0)
 
@@ -552,7 +560,7 @@ def put_complete_job(parts: FakeRuntimeParts, *, partition: int = 1, offset: int
 async def test_assign_revoke_assign_during_a_slow_restore_starts_the_processor_once_on_a_complete_table():
     handler = SplittingHandler({40: items(1)}, answer=None)
     app = split_app(handler)
-    parts = FakeRuntimeParts()
+    parts = real_time_parts()
     runtime = await wired(app, parts)
     gated = GatedConsumer(parts.log, group_id=RESULTS_GROUP)
     runtime.tracker._consumer_factory = lambda client_config: gated
@@ -1061,11 +1069,11 @@ async def test_a_new_attempt_outside_the_partition_loop_that_yields_nothing_fail
     world.put(world.ref(500, SECOND, 2), 'split-cancelled', {})
     await wait_until(lambda: worker.committed == 501)
 
-    # The partition loop has passed the message, so it cannot run here as a local message.
+    # Parts of an earlier attempt may have run: the message cannot run here as a local message too.
     [record] = worker.dlq_records()
     assert (record.stage, record.error) == (
         'split',
-        'split failed: split yielded no part for a job that has an attempt',
+        'split failed: the split yielded no part for a job that has parts in the log',
     )
     closed = world.entries()[-1]
     assert (closed.kind, closed.body['outcome'], closed.ref.attempt_id) == ('closed', 'split_failed', SECOND)
@@ -1128,7 +1136,6 @@ async def test_a_restored_job_that_timed_out_and_then_got_its_last_result_is_agg
     world.clock.advance(61_000)
     await worker.sleep.fire(TIMEOUT_CHECK_SECONDS)
     await asyncio.sleep(0.02)
-    assert worker.owner is not None and 500 in worker.owner._early_timeouts
     foreign_result(world, FIRST, 1)
     await worker.caught_up()
     worker.give(source_message(500))
@@ -1287,7 +1294,7 @@ async def test_a_delivery_that_fails_after_its_split_stopped_leaves_no_unread_ex
 async def test_a_revoke_during_a_split_and_with_an_open_job_ends_inside_the_drain_bound():
     handler = SplittingHandler({40: items(1), 41: [Item(n=0), asyncio.Event()]})
     app = split_app(handler)
-    parts = FakeRuntimeParts()
+    parts = real_time_parts()
     runtime = await wired(app, parts)
     source = app.kafka_source
     assert source is not None
@@ -1481,3 +1488,247 @@ async def test_an_error_that_ends_a_task_of_the_owner_is_logged():
     # Nothing says the request reached the DLQ: the offset does not commit.
     assert worker.pending == 1 and worker.commits == []
     await worker.stop()
+
+
+# --- a job first seen through its message: every step of the rules of a holder reads the table ---
+
+
+async def live_owner(world: World, handler: SplittingHandler) -> OwnerWorker:
+    """An owner that exists before any record of job 500: the tracker reads them live, with no message held."""
+    worker = OwnerWorker(world, handler, config=owner_config(job_timeout='2m', idle_timeout='1m'))
+    return await worker.start()
+
+
+async def told_before_the_message(world: World, worker: OwnerWorker, *, advance_ms: int) -> None:
+    """Let time pass and let the tracker tell what it tells once, while the owner holds no message."""
+    await worker.caught_up()
+    world.clock.advance(advance_ms)
+    await worker.sleep.fire(TIMEOUT_CHECK_SECONDS)
+    await asyncio.sleep(0.02)
+
+
+async def test_a_job_closed_before_its_message_arrived_completes_the_offset():
+    world = World()
+    handler = SplittingHandler({500: items(2)}, answer=summary())
+    worker = await live_owner(world, handler)
+    world.put_open(500, FIRST, instance=NEW_INSTANCE)
+    world.put_closed(500, FIRST)
+    await told_before_the_message(world, worker, advance_ms=0)
+
+    worker.give(source_message(500))
+    await wait_until(lambda: worker.committed == 501)
+
+    assert handler.split_calls == [] and handler.jobs == [] and handler.timeouts == []
+    await worker.stop()
+
+
+async def test_a_job_complete_before_its_message_arrived_is_aggregated_whatever_time_has_passed():
+    world = World()
+    handler = SplittingHandler({500: items(2)}, answer=summary())
+    worker = await live_owner(world, handler)
+    world.put_open(500, FIRST, instance=NEW_INSTANCE)
+    world.put(world.ref(500, FIRST), 'split-done', {'parts': 1})
+    foreign_result(world, FIRST, 1)
+    await told_before_the_message(world, worker, advance_ms=10 * 60_000)
+
+    worker.give(source_message(500))
+    await wait_until(lambda: worker.committed == 501)
+
+    assert len(handler.jobs) == 1 and handler.timeouts == [] and handler.split_calls == []
+    await worker.stop()
+
+
+@pytest.mark.parametrize(
+    ('split_done', 'advance_ms', 'kind'),
+    [
+        (True, 121_000, 'job'),
+        (True, 61_000, 'idle'),
+        # No split-done: the idle time does not run, only the job timeout can pass.
+        (False, 121_000, 'job'),
+    ],
+)
+async def test_a_job_that_timed_out_before_its_message_arrived_ends_through_on_job_timeout(
+    split_done, advance_ms, kind
+):
+    world = World()
+    handler = SplittingHandler({500: items(2)})
+    worker = await live_owner(world, handler)
+    # Another instance opens the job after this owner exists; the tracker tells its timeout once, to nobody.
+    world.put_open(500, FIRST, instance=NEW_INSTANCE)
+    if split_done:
+        world.put(world.ref(500, FIRST), 'split-done', {'parts': 2})
+    await told_before_the_message(world, worker, advance_ms=advance_ms)
+    assert handler.timeouts == []
+
+    worker.give(source_message(500))
+    await wait_until(lambda: worker.committed == 501)
+
+    [job] = handler.timeouts
+    assert (job.timed_out, job.received_parts, job.total_parts) == (kind, 0, 2 if split_done else None)
+    assert handler.split_calls == [] and handler.jobs == []
+    assert world.closed()[0]['outcome'] == 'timeout'
+    await worker.stop()
+
+
+async def test_a_job_that_was_idle_before_its_message_arrived_ends_when_it_is_idle_again():
+    world = World()
+    handler = SplittingHandler({500: items(2)})
+    worker = await OwnerWorker(world, handler, config=owner_config(job_timeout='1h', idle_timeout='1m')).start()
+    world.put_open(500, FIRST, instance=NEW_INSTANCE)
+    world.put(world.ref(500, FIRST), 'split-done', {'parts': 2})
+    # The idle timeout passes and is told while nobody holds the message; then a result comes.
+    await told_before_the_message(world, worker, advance_ms=61_000)
+    foreign_result(world, FIRST, 1)
+    await worker.caught_up()
+
+    worker.give(source_message(500))
+    await wait_until(lambda: worker.owner is not None and 500 in worker.owner._jobs)
+    await worker.sleep.fire(TIMEOUT_CHECK_SECONDS)
+    # Not idle now: the job waits for its second result.
+    assert handler.timeouts == [] and worker.pending == 1
+
+    world.clock.advance(61_000)
+    await worker.sleep.fire(TIMEOUT_CHECK_SECONDS)
+    await wait_until(lambda: worker.committed == 501)
+    [job] = handler.timeouts
+    assert (job.timed_out, job.received_parts, job.total_parts) == ('idle', 1, 2)
+    await worker.stop()
+
+
+async def test_a_job_with_split_done_before_its_message_arrived_waits_for_its_results():
+    world = World()
+    handler = SplittingHandler({500: items(2)}, answer=summary())
+    worker = await live_owner(world, handler)
+    world.put_open(500, FIRST, instance=NEW_INSTANCE)
+    world.put(world.ref(500, FIRST), 'split-done', {'parts': 1})
+    await told_before_the_message(world, worker, advance_ms=1_000)
+
+    worker.give(source_message(500))
+    await wait_until(lambda: worker.owner is not None and 500 in worker.owner._jobs)
+    await asyncio.sleep(0.02)
+    assert handler.jobs == [] and handler.split_calls == [] and worker.pending == 1
+
+    foreign_result(world, FIRST, 1)
+    await wait_until(lambda: worker.committed == 501)
+    assert len(handler.jobs) == 1
+    await worker.stop()
+
+
+@pytest.mark.parametrize(
+    ('cancelled', 'advance_ms', 'crashed_attempts'),
+    [
+        # Cancelled by its owner: the attempt is not counted.
+        (True, 1_000, 0),
+        # Left behind for longer than the grace time, and told as stalled before the message came.
+        (False, FOREIGN_SPLIT_GRACE_SECONDS * 1000, 1),
+        # A message that arrives finds an attempt with no split-done: its split is made again at once.
+        (False, 1_000, 1),
+    ],
+)
+async def test_a_job_whose_split_did_not_end_before_its_message_arrived_starts_its_next_attempt(
+    cancelled, advance_ms, crashed_attempts
+):
+    world = World()
+    handler = SplittingHandler({500: items(1)}, answer=summary())
+    worker = OwnerWorker(world, handler, config=owner_config(job_timeout='1h'))
+    await worker.start()
+    world.put_open(500, FIRST, instance=NEW_INSTANCE)
+    if cancelled:
+        world.put(world.ref(500, FIRST), 'split-cancelled', {})
+    await told_before_the_message(world, worker, advance_ms=advance_ms)
+
+    with capture_logs() as logs:
+        worker.give(source_message(500))
+        await wait_until(lambda: world.kinds()[-1] == 'split-done')
+
+    [started] = events(logs, 'split_attempt_started')
+    assert (started['attempt'], started['crashed_attempts']) == (2, crashed_attempts)
+    assert handler.split_calls == [500]
+    world.report_all(world.parts(attempt=2))
+    await wait_until(lambda: worker.committed == 501)
+    await worker.stop()
+
+
+async def test_a_restored_job_whose_new_split_yields_nothing_fails_as_it_does_in_a_takeover():
+    world = World()
+    world.put_open(500, FIRST)
+    handler = SplittingHandler(answer=summary())
+    worker = await OwnerWorker(world, handler).start(source_message(500))
+    await wait_until(lambda: worker.committed == 501)
+
+    # Parts of the first attempt may have run, so the message does not run here as a local message too.
+    assert handler.split_calls == [500] and handler.jobs == []
+    [record] = worker.dlq_records()
+    assert (record.stage, record.error) == (
+        'split',
+        'split failed: the split yielded no part for a job that has parts in the log',
+    )
+    closed = world.entries()[-1]
+    assert (closed.kind, closed.body['outcome'], closed.ref.attempt_id) == ('closed', 'split_failed', FIRST)
+    await worker.stop()
+
+
+# --- the end of a job and what the log shows ---
+
+
+async def test_an_end_whose_closed_record_is_not_read_back_before_a_stop_leaves_the_offset_pending(monkeypatch):
+    monkeypatch.setattr(partmode, 'STOP_GRACE_SECONDS', 0.05)
+    world = World()
+    gate = asyncio.Event()
+
+    async def answer(job: SplitJob) -> Any:
+        await gate.wait()
+        return summary()
+
+    handler = SplittingHandler({500: items(1)}, answer=answer)
+    worker = await OwnerWorker(world, handler).start(source_message(500))
+    await wait_until(lambda: world.kinds() == ['open', 'split-done'])
+    world.report_all()
+    await wait_until(lambda: len(handler.jobs) == 1)
+    # From here on the tracker reads nothing.
+    [consumer] = worker.tracker_consumers
+    consumer.fail_next('consume', KafkaException(KafkaError(KafkaError._TRANSPORT)), times=1000)
+    # The read that was already waiting gets one more record, of another job; every later read fails.
+    world.put_open(900, SECOND)
+    await worker.caught_up()
+
+    gate.set()
+    await wait_until(lambda: world.kinds()[-1] == 'closed')
+    await asyncio.sleep(0.02)
+    # The record is in the log, but the table does not show it: the offset is not completed.
+    assert worker.commits == [] and worker.pending == 1
+    worker.processor.signal_stop()
+    await asyncio.wait_for(worker.processor.drain(), timeout=1)
+
+    # The drain waited only the grace time; the next owner finds the closed record and completes the offset.
+    assert worker.pending == 1 and worker.processor._abandoned_offsets == {500}
+    await worker.stop()
+
+
+async def test_two_owners_that_hold_one_message_both_complete_its_offset_when_the_job_ends():
+    world = World()
+    gate = asyncio.Event()
+    late_handler = SplittingHandler({500: [Item(n=0), gate, Item(n=1)]}, answer=summary())
+    new_handler = SplittingHandler({500: items(2)}, answer=summary())
+    late = await OwnerWorker(world, late_handler).start(source_message(500))
+    await wait_until(lambda: world.kinds() == ['open'] and len(world.parts()) == 1)
+    await late.caught_up()
+    # The new owner begins the same message: its open replaces the attempt of the late owner, which follows it.
+    new = await OwnerWorker(world, new_handler, instance=NEW_INSTANCE).start(source_message(500))
+    await wait_until(lambda: world.kinds() == ['open', 'open', 'split-done'])
+    await late.caught_up()
+    await wait_until(lambda: late_handler.closed_splits == 1)
+
+    world.report_all(world.parts(attempt=2))
+    await wait_until(lambda: late.committed == 501 and new.committed == 501)
+
+    # Each owner ends the job on attempt 2, or finds the closed record of the other before its own
+    # hook ran. The log accepts one closed record, and both offsets complete by it.
+    ended = late_handler.jobs + new_handler.jobs
+    assert 1 <= len(ended) <= 2 and len(late_handler.jobs) <= 1 and len(new_handler.jobs) <= 1
+    assert {job.attempt for job in ended} == {2}
+    assert world.kinds().count('closed') == len(ended)
+    assert {closed['outcome'] for closed in world.closed()} == {'aggregated'}
+    assert late.pending == 0 and new.pending == 0
+    await late.stop()
+    await new.stop()

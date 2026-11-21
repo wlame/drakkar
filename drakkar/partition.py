@@ -1460,17 +1460,17 @@ class PartitionProcessor:
         self._open_job_offsets.discard(offset)
         await self._stall_offset(offset)
 
-    def start_job_end(self, message: SourceMessage, end: Callable[[], Awaitable[bool]]) -> asyncio.Task:
+    def start_job_end(self, message: SourceMessage, end: Callable[[], Awaitable[bool | None]]) -> asyncio.Task:
         """Run the end of a job as a task of this processor.
 
         From here on the offset counts for the drain: an end in progress may
         finish inside the drain budget. Its answer completes or stalls the
-        offset.
+        offset; None leaves the offset as the owner set it.
         """
         self._open_job_offsets.discard(message.offset)
         return self._spawn_end(message, end)
 
-    def _spawn_end(self, message: SourceMessage, end: Callable[[], Awaitable[bool]]) -> asyncio.Task:
+    def _spawn_end(self, message: SourceMessage, end: Callable[[], Awaitable[bool | None]]) -> asyncio.Task:
         """Start the end of a job or of a local message as a tracked task; a stop cancels it with the other tasks."""
         task = asyncio.create_task(self._settle_end(message, end))
         self._active_tasks.add(task)
@@ -1483,8 +1483,11 @@ class PartitionProcessor:
         if task.cancelled() and offset not in self._stalled_offsets:
             self._abandoned_offsets.add(offset)
 
-    async def _settle_end(self, message: SourceMessage, end: Callable[[], Awaitable[bool]]) -> None:
+    async def _settle_end(self, message: SourceMessage, end: Callable[[], Awaitable[bool | None]]) -> None:
         """Await the end of a job and act on its answer: complete the offset, or stall it.
+
+        With the answer None the job is still open in the results log, and
+        its owner has put the offset back among the open jobs.
 
         An end that gave up at a stop leaves the offset pending and out of
         the drain; the next owner of the partition ends the job again. An
@@ -1514,6 +1517,8 @@ class PartitionProcessor:
                 exc_info=error,
             )
             may_complete = False
+        if may_complete is None:
+            return
         if not may_complete:
             await self._stall_offset(offset)
             return

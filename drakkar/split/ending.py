@@ -166,11 +166,13 @@ class JobEnder:
     def job_facts(
         self, message: SourceMessage, state: JobState, timed_out: TimedOutKind, *, parts_written: int | None = None
     ) -> EndFacts:
-        """The view of a job for its hook, built from what the job table says now.
+        """The view of one attempt of a job for its hook.
 
-        ``parts_written`` is the number of parts the owner itself wrote in
-        the ``split-done`` of the current attempt; it stands in while the
-        table has not read that record yet.
+        ``state`` is a snapshot of the job (``JobState.snapshot``): the view
+        and the results it reads back stay on that attempt, also when the
+        log gets a newer one meanwhile. ``parts_written`` is the number of
+        parts the owner itself wrote in the ``split-done`` of the attempt;
+        it stands in while the table has not read that record yet.
         """
         settings = self._settings
         opened_at = state.opened_at_ms / MS_PER_SECOND
@@ -220,11 +222,11 @@ class JobEnder:
         """Call the hook of the end, act on its answer, then close the job; true when the offset may complete.
 
         ``state`` is the DLQ state of the original message. ``rebuild`` makes
-        the facts anew for a second call of the hook. ``closing_ref`` gives
-        the attempt the ``closed`` record names, read when the record is
-        written; it gives None when the results log already has the job as
-        closed, and is None itself for a local message, which writes no
-        record.
+        the facts anew, of the same attempt, for a second call of the hook.
+        ``closing_ref`` gives the attempt the ``closed`` record names, asked
+        when the record is written; it gives None when the results log
+        already has the job as closed, and is None itself for a local
+        message, which writes no record.
 
         False means the offset must stall: a delivery or a DLQ record could
         not be confirmed under ``dlq.on_send_failure: stall``, or ``closed``

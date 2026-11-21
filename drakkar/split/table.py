@@ -11,7 +11,7 @@ the whole log.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Literal, TypeGuard, cast, get_args
 
@@ -22,6 +22,14 @@ from drakkar.split.records import ClosedOutcome, LogEntry, part_result_from_body
 
 BITS_PER_BYTE = 8
 MS_PER_SECOND = 1000
+# How long a split may show no ``split-done`` and no ``split-cancelled`` before
+# a worker that holds the message of the job takes the owner of that split for
+# dead. A live owner writes one of the two; one that died wrote neither, and
+# only its timeout would end the job. A constant, the same on every worker:
+# two owners that judge one attempt must agree. It is long, because a healthy
+# split of a large message takes minutes, and taking it over too early runs
+# its parts twice.
+FOREIGN_SPLIT_GRACE_SECONDS = 300
 # A bound on a part number seen before ``split-done`` gives the job's size: the
 # bit set grows to the highest part number, so a damaged record must not make it huge.
 MAX_PART_INDEX = 2**24 - 1
@@ -92,11 +100,50 @@ class JobState:
             return False
         return bool(self.received_bits[byte] >> bit & 1)
 
+    def snapshot(self) -> JobState:
+        """A copy of the job as it is now, which later records of the log do not change.
+
+        The end of a job works on one attempt from its start to its
+        ``closed`` record; a new ``open`` resets the live state meanwhile.
+        """
+        return replace(
+            self,
+            deliveries={sink: counts.model_copy() for sink, counts in self.deliveries.items()},
+            received_bits=bytearray(self.received_bits),
+        )
+
+    def due_kind(self, *, now_ms: int, job_timeout: int, idle_timeout: int) -> DueKind | None:
+        """The timeout this job has passed, in seconds (``0`` is off); the job timeout wins over the idle one.
+
+        A closed job and a job whose every part has a result are never due:
+        a complete job only waits for its owner to end it. The idle timeout
+        counts from ``split-done`` and from each new result, so it does not
+        run while the split still publishes parts.
+        """
+        if self.closed is not None or self.is_complete:
+            return None
+        if job_timeout > 0 and now_ms - self.opened_at_ms >= job_timeout * MS_PER_SECOND:
+            return 'job'
+        idle_runs = idle_timeout > 0 and self.parts is not None
+        if idle_runs and now_ms - self.last_progress_ms >= idle_timeout * MS_PER_SECOND:
+            return 'idle'
+        return None
+
     def missing_parts(self) -> list[int]:
         """The part numbers below ``parts`` with no result; empty while ``parts`` is unknown."""
         if self.parts is None:
             return []
         return [index for index in range(self.parts) if not self.has_result(index)]
+
+    def is_split_left_behind(self, now_ms: int) -> bool:
+        """Whether the split of the current attempt shows no end after the grace time.
+
+        It has neither ``split-done`` nor ``split-cancelled``, and its
+        ``open`` record is older than ``FOREIGN_SPLIT_GRACE_SECONDS``.
+        """
+        is_splitting = self.closed is None and self.parts is None and not self.cancelled
+        waited_ms = now_ms - self.attempt_opened_at_ms
+        return is_splitting and waited_ms >= FOREIGN_SPLIT_GRACE_SECONDS * MS_PER_SECOND
 
     def _mark(self, index: int) -> None:
         """Set the bit of part ``index``, growing the bit set in place."""
@@ -239,25 +286,12 @@ class JobTable:
         return min((job.first_open_offset for job in self._jobs.values()), default=next_offset)
 
     def due(self, *, now_ms: int, job_timeout: int, idle_timeout: int) -> list[tuple[JobState, DueKind]]:
-        """The open jobs past a timeout, in seconds (``0`` is off); the job timeout wins over the idle one.
-
-        A job whose every part has a result is never due: it only waits for
-        its owner to end it. The idle timeout counts from ``split-done`` and
-        from each new result, so it does not run while the split still
-        publishes parts.
-        """
+        """The open jobs past a timeout with its kind, by the rule of :meth:`JobState.due_kind`."""
         found: list[tuple[JobState, DueKind]] = []
         for job in self.open_jobs():
-            if job.is_complete:
-                continue
-            if job_timeout > 0 and now_ms - job.opened_at_ms >= job_timeout * MS_PER_SECOND:
-                found.append((job, 'job'))
-            elif (
-                idle_timeout > 0
-                and job.parts is not None
-                and now_ms - job.last_progress_ms >= idle_timeout * MS_PER_SECOND
-            ):
-                found.append((job, 'idle'))
+            kind = job.due_kind(now_ms=now_ms, job_timeout=job_timeout, idle_timeout=idle_timeout)
+            if kind is not None:
+                found.append((job, kind))
         return found
 
     def _apply_open(self, entry: LogEntry, job: JobState | None, offset: int, timestamp_ms: int) -> Applied:

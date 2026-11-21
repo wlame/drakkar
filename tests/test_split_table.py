@@ -6,7 +6,7 @@ import pytest
 
 from drakkar.split.models import PartDLQ, PartResult, SinkCounts
 from drakkar.split.records import JobRef, LogEntry, closed_body, open_body, result_body
-from drakkar.split.table import Applied, IgnoreReason, JobTable, PartFailure
+from drakkar.split.table import FOREIGN_SPLIT_GRACE_SECONDS, Applied, IgnoreReason, JobTable, PartFailure
 
 GROUP = 'items-group'
 PARTITION = 7
@@ -522,3 +522,55 @@ def test_entry_of_an_unknown_kind_is_malformed(log):
     entry = LogEntry(ref=ref(), kind='open', body={})
     object.__setattr__(entry, 'kind', 'rename')
     assert log.put(entry).ignored is IgnoreReason.MALFORMED
+
+
+def test_a_snapshot_of_a_job_keeps_its_attempt_when_a_later_open_resets_the_job(log):
+    log.put(open_entry(ref()))
+    log.put(done_entry(ref(), 2))
+    log.put(result_entry(ref(), 0, deliveries={'kafka/out': SinkCounts(delivered=1)}))
+    log.put(result_entry(ref(), 1))
+    job = log.table.job(JOB)
+    last_result = job.last_result_offset
+    kept = job.snapshot()
+
+    log.put(open_entry(ref(attempt=2, attempt_id=ATTEMPT_2)))
+
+    # The live job is on the new attempt, with nothing counted yet.
+    assert (job.attempt_id, job.parts, job.received_count, job.last_result_offset) == (ATTEMPT_2, None, 0, None)
+    assert job.deliveries == {}
+    # The copy still is the attempt it was made from.
+    assert (kept.attempt_id, kept.attempt, kept.parts, kept.received_count) == (ATTEMPT_1, 1, 2, 2)
+    assert (kept.first_open_offset, kept.last_result_offset) == (0, last_result)
+    assert kept.is_complete and kept.missing_parts() == []
+    assert kept.deliveries['kafka/out'].delivered == 1
+
+
+@pytest.mark.parametrize(
+    ('ending', 'left_behind'),
+    [(None, True), ('split-done', False), ('split-cancelled', False), ('closed', False)],
+)
+def test_a_split_is_left_behind_only_with_no_end_after_the_grace_time(log, ending, left_behind):
+    log.put(open_entry(ref()))
+    opened = log.ms
+    endings = {
+        'split-done': done_entry(ref(), 1),
+        'split-cancelled': cancelled_entry(ref()),
+        'closed': closed_entry(ref()),
+    }
+    if ending is not None:
+        log.put(endings[ending])
+    job = log.table.job(JOB)
+    grace_ms = FOREIGN_SPLIT_GRACE_SECONDS * 1000
+
+    assert not job.is_split_left_behind(opened + grace_ms - 1)
+    assert job.is_split_left_behind(opened + grace_ms) is left_behind
+
+
+def test_the_grace_time_of_a_split_counts_from_the_open_of_the_current_attempt(log):
+    log.put(open_entry(ref()))
+    log.put(open_entry(ref(attempt=2, attempt_id=ATTEMPT_2)), after_ms=200_000)
+    job = log.table.job(JOB)
+    grace_ms = FOREIGN_SPLIT_GRACE_SECONDS * 1000
+
+    assert not job.is_split_left_behind(log.ms + grace_ms - 1)
+    assert job.is_split_left_behind(log.ms + grace_ms)

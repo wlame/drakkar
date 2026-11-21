@@ -18,10 +18,9 @@ from drakkar.metrics import (
 )
 from drakkar.split.models import PartResult
 from drakkar.split.records import JobRef, closed_body, log_record, open_body, result_body
-from drakkar.split.table import JobState
+from drakkar.split.table import FOREIGN_SPLIT_GRACE_SECONDS, JobState
 from drakkar.split.tracker import (
     CONSUMER_ERROR_PAUSE_SECONDS,
-    FOREIGN_SPLIT_GRACE_SECONDS,
     LOOP_RESTART_SECONDS,
     POSITION_COMMIT_SECONDS,
     TIMEOUT_CHECK_SECONDS,
@@ -560,6 +559,31 @@ async def test_a_new_attempt_can_time_out_again():
         h.clock.advance(11_000)
         await h.sleep.fire(TIMEOUT_CHECK_SECONDS)
         assert [event[3] for event in h.listener.events] == ['idle', 'idle']
+    finally:
+        await h.t.stop()
+
+
+async def test_a_job_that_is_idle_again_after_a_new_result_is_told_again():
+    h = Harness(job_timeout=0, idle_timeout=10)
+    await h.t.start()
+    try:
+        h.writer.open(40)
+        h.writer.done(40, 3)
+        await h.follow()
+        h.clock.advance(11_000)
+        await h.sleep.fire(TIMEOUT_CHECK_SECONDS)
+        await h.sleep.fire(TIMEOUT_CHECK_SECONDS)
+        assert h.listener.events == [('timed_out', PARTITION, 40, 'idle')]
+        # A new result: the job is not idle any more, and nothing is told.
+        h.writer.result(40, 0)
+        await settle()
+        await h.sleep.fire(TIMEOUT_CHECK_SECONDS)
+        assert h.listener.events == [('timed_out', PARTITION, 40, 'idle')]
+        # Idle for a second time: an owner that could not act on the first telling must hear of this one.
+        h.clock.advance(11_000)
+        await h.sleep.fire(TIMEOUT_CHECK_SECONDS)
+        await h.sleep.fire(TIMEOUT_CHECK_SECONDS)
+        assert h.listener.events == [('timed_out', PARTITION, 40, 'idle')] * 2
     finally:
         await h.t.stop()
 

@@ -94,7 +94,9 @@ offset 500.
    completes offset 500. The usual commit follows.
 
 The order at the end is always: aggregate sinks, then `closed`, then the
-offset.
+offset. The owner completes the offset when its job tracker has read the
+`closed` record back from the results topic, which takes up to about one
+second.
 
 The offset of the job stays uncommitted while the job is open. Later
 messages of partition 7 are processed meanwhile, but their offsets are not
@@ -689,6 +691,14 @@ is current:
   The aggregate sinks may receive the result twice.
 - A `closed` record of either owner completes the offset of the other with
   no hook.
+- The end of a job works on one attempt, from the call of its hook to its
+  `closed` record. When another worker opens a newer attempt meanwhile, the
+  end still finishes on its own attempt: the hook sees that attempt's
+  counters and results, and the aggregate sinks receive its answer. Its
+  `closed` record names the older attempt, so the results topic still has
+  the job as open (`split_job_end_superseded`). The owner does not complete
+  the offset; it keeps the message and follows the newer attempt, and the
+  aggregate sinks may receive a second result when that attempt ends.
 - When the attempt that an owner follows is cancelled, the owner starts the
   next attempt itself. When it shows neither `split-done` nor
   `split-cancelled` for 300 seconds after its `open`, its worker is taken
@@ -709,7 +719,7 @@ is current:
 | The owner dies during the split | The next attempt runs. Results of the old attempt are ignored. Its parts still run. |
 | The split crashes its worker each time | After `split.max_attempts` attempts: a DLQ record with stage `split`, and the job closes as `attempts_spent`. |
 | `split` raises, or a part cannot be produced | A DLQ record with stage `split`; the job closes as `split_failed`. Parts already published still run, and their results are ignored. |
-| A new attempt after a takeover yields nothing (two releases of the handler disagree about one message) | The job fails with a DLQ record of stage `split`. |
+| A new attempt of a job that the results topic already has yields nothing: after a restart or after a takeover (two releases of the handler disagree about one message) | The job fails with a DLQ record of stage `split` and the error `split failed: the split yielded no part for a job that has parts in the log`, and closes as `split_failed`. Parts of an earlier attempt may have run, so the message does not run as a local message too. |
 | `aggregate` or `on_job_timeout` raises | A DLQ record with stage `aggregate`. The job closes as `dlq`, or as `timeout` when the hook was `on_job_timeout`. |
 | The results cannot be read back in `aggregate` | The job stays open. The hook runs again after 30 seconds, at most 20 times; then it is handled as a raise. Records that expired are a raise at once. |
 | An aggregate sink fails | The policy of the sink decides, as always: retry, skip, or the original message to the DLQ. |
@@ -761,7 +771,9 @@ is current:
 - A stop or a revoke cancels a split in progress: the generator is closed
   and `split-cancelled` is written, together in at most a few seconds. The
   drain does not wait for it. An `aggregate` in progress may end within the
-  drain time.
+  drain time. When its `closed` record is written but not read back within
+  half a second, the offset stays uncommitted: the next owner finds
+  `closed` and completes the offset with no hook.
 - The parts source drains as the Kafka source does.
 - A [detach](detach.md) leaves both consumer groups, the source group and
   the parts group, and an attach joins both. The jobs of the worker move to
@@ -838,6 +850,7 @@ The life of a job, on the owner:
 | `split_job_closed` | info | The job is closed. Fields `partition`, `job`, `outcome`, `parts`, `received`, `failed_parts`. |
 | `split_job_closed_elsewhere` | info | Another worker closed a job whose message this worker holds; the offset completes with no hook. Fields `partition`, `job`, `outcome`. |
 | `split_job_superseded` | warning | Another worker opened a newer attempt; this worker stopped its split and follows that attempt. |
+| `split_job_end_superseded` | warning | Another worker opened a newer attempt while this worker ended the job. The offset is not completed, and this worker follows the newer attempt. Fields `partition`, `job`. |
 | `split_job_orphaned` | warning | The source message of a restored job did not arrive; the job closes as `orphaned`. Fields `partition`, `job`, `received`, `parts`. |
 
 Failures of a job, on the owner:

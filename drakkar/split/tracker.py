@@ -34,7 +34,13 @@ from drakkar.metrics import (
 )
 from drakkar.providers.resilience import RateLimitedLog, describe_error
 from drakkar.split.records import LogEntry, parse_log_record
-from drakkar.split.table import MS_PER_SECOND, Applied, IgnoreReason, JobState, JobTable
+from drakkar.split.table import (
+    MS_PER_SECOND,
+    Applied,
+    IgnoreReason,
+    JobState,
+    JobTable,
+)
 
 logger = structlog.get_logger()
 
@@ -51,14 +57,6 @@ RESTORE_BACKOFF_MAX_SECONDS = 30.0
 RESTORE_END_CHECK_SECONDS = 1.0
 # Kafka gives a record without a known time the timestamp -1.
 NO_TIMESTAMP = -1
-
-# How long the split of another worker instance may show no ``split-done`` and no
-# ``split-cancelled`` before the worker that holds the message of the job takes it
-# for dead. A live owner writes one of the two; one that died wrote neither, and
-# only its timeout would end the job. A constant, the same on every worker: two
-# owners that judge one attempt must agree. It is long, because a healthy split of
-# a large message takes minutes, and taking it over too early runs its parts twice.
-FOREIGN_SPLIT_GRACE_SECONDS = 300
 
 TimeoutKind = Literal['job', 'idle']
 SleepFn = Callable[[float], Awaitable[None]]
@@ -677,7 +675,7 @@ class JobTracker:
     # --- timeouts ---
 
     async def _check_timeouts(self) -> None:
-        """Send ``job_timed_out`` once per job, attempt and kind; set the job gauges from the live tables.
+        """Send ``job_timed_out`` once per job, attempt and kind while that timeout lasts; set the job gauges.
 
         The same pass sends ``attempt_stalled`` once for each attempt of
         another instance that shows no end of its split after the grace time.
@@ -693,8 +691,10 @@ class JobTracker:
             for job in open_jobs:
                 oldest_ms = job.opened_at_ms if oldest_ms is None else min(oldest_ms, job.opened_at_ms)
             current = {(job.offset, job.attempt_id) for job in open_jobs}
-            state.timed_out = {key for key in state.timed_out if key[:2] in current}
             due = state.table.due(now_ms=now_ms, job_timeout=self._job_timeout, idle_timeout=self._idle_timeout)
+            # A timeout is told once for as long as it lasts. A job that got a new result is not
+            # idle any more; when it is idle again, that is told again.
+            state.timed_out &= {(job.offset, job.attempt_id, kind) for job, kind in due}
             for job, kind in due:
                 key = (job.offset, job.attempt_id, kind)
                 if key in state.timed_out:
@@ -712,9 +712,7 @@ class JobTracker:
 
     def _is_stalled(self, job: JobState, now_ms: int) -> bool:
         """Whether the current attempt of ``job`` is a split of another instance that is taken for dead."""
-        splitting = job.parts is None and not job.cancelled
-        waited_ms = now_ms - job.attempt_opened_at_ms
-        return splitting and job.instance != self._instance and waited_ms >= FOREIGN_SPLIT_GRACE_SECONDS * MS_PER_SECOND
+        return job.instance != self._instance and job.is_split_left_behind(now_ms)
 
     def _forget_job_timeouts(self, state: _Followed, offset: int) -> None:
         state.timed_out = {key for key in state.timed_out if key[0] != offset}
