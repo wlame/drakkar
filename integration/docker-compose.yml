@@ -706,6 +706,9 @@ services:
         PYTHON_IMAGE: ${HARNESS_PYTHON_IMAGE:-python:3.13-slim}
         EXTRA_APT: ${HARNESS_EXTRA_APT:-}
     image: drakkar-harness-split-worker:local
+    # Longer than executor.drain_timeout (30 s): a stop lets the worker
+    # commit the parts it ran, so they do not run again at the next start.
+    stop_grace_period: 45s
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -727,6 +730,9 @@ services:
   split-worker-2:
     profiles: ["split"]
     image: drakkar-harness-split-worker:local
+    # Longer than executor.drain_timeout (30 s): a stop lets the worker
+    # commit the parts it ran, so they do not run again at the next start.
+    stop_grace_period: 45s
     depends_on:
       kafka-init:
         condition: service_completed_successfully
@@ -745,6 +751,9 @@ services:
   split-worker-3:
     profiles: ["split"]
     image: drakkar-harness-split-worker:local
+    # Longer than executor.drain_timeout (30 s): a stop lets the worker
+    # commit the parts it ran, so they do not run again at the next start.
+    stop_grace_period: 45s
     depends_on:
       kafka-init:
         condition: service_completed_successfully
