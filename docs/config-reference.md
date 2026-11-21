@@ -119,6 +119,29 @@ When `sources.http.enabled=true`, the handler must declare `HttpRequestT` / `Htt
 
 ---
 
+## Split messages (`split:`)
+
+📚 [Deep details](configuration.md#split-messages-split)
+
+Cut a message of the Kafka source into parts that run on every worker, and put the results together again. Off by default; with `enabled: false` the section is checked and does nothing.
+
+```yaml
+split:
+  enabled: false                   # split messages of the Kafka source; needs sources.kafka.enabled. env: DK_SPLIT__ENABLED
+  connection: main                 # entry under connections.kafka for the two internal topics. env: DK_SPLIT__CONNECTION
+  parts_topic: ''                  # '' = <sources.kafka.topic>_<consumer group>_split_parts. env: DK_SPLIT__PARTS_TOPIC
+  results_topic: ''                # '' = <sources.kafka.topic>_<consumer group>_split_results. env: DK_SPLIT__RESULTS_TOPIC
+  parts_group: ''                  # '' = <consumer group>_split_parts. env: DK_SPLIT__PARTS_GROUP
+  results_group: ''                # '' = <consumer group>_split_results. env: DK_SPLIT__RESULTS_GROUP
+  aggregate_sinks: []              # sinks of the aggregate stage, each <type>/<name>. env: DK_SPLIT__AGGREGATE_SINKS
+  job_timeout: 24h                 # longest run of a job; 0 or 1m to 30d. env: DK_SPLIT__JOB_TIMEOUT
+  idle_timeout: 0                  # longest time without a part result; 0 or 1m to 30d, below job_timeout. env: DK_SPLIT__IDLE_TIMEOUT
+  max_attempts: 3                  # times a job may be split, 1 to 10. env: DK_SPLIT__MAX_ATTEMPTS
+  max_part_data: 64KiB             # largest data of one part, 1KiB to 512KiB. env: DK_SPLIT__MAX_PART_DATA
+```
+
+---
+
 ## Executor pool (`executor:`)
 
 📚 [Deep details](configuration.md#executor-pool-executor) · [Backpressure](performance.md#backpressure)

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A new root config section `split`, after `sources`: the keys `enabled`, `connection`, `parts_topic`, `results_topic`, `parts_group`, `results_group`, `aggregate_sinks`, `job_timeout`, `idle_timeout`, `max_attempts` and `max_part_data`, with their load checks. It is off by default and does nothing yet. The config summary line has a new token `split=on` or `split=off` after `sources=[...]`.
+
 ## [3.4.0] - 2026-11-20
 
 ### Added

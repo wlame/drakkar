@@ -24,6 +24,7 @@ CONFIG_PARTS = (
     'cluster',
     'connections',
     'sources',
+    'split',
     'executor',
     'threads',
     'sinks',

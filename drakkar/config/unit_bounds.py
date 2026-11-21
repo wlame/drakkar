@@ -36,11 +36,13 @@ class UnitBound:
 
     ``minimum`` and ``maximum`` are in the unit the model holds (seconds,
     minutes, hours or bytes); ``None`` means no bound on that side.
+    ``allows_zero`` lets the value 0 pass although it is below ``minimum``.
     """
 
     path: str
     minimum: float | None
     maximum: float | None
+    allows_zero: bool = False
 
 
 UNIT_BOUNDS: tuple[UnitBound, ...] = (
@@ -49,6 +51,9 @@ UNIT_BOUNDS: tuple[UnitBound, ...] = (
     UnitBound('sources.kafka.detach.max_duration', 10, 604_800),
     UnitBound('sources.kafka.detach.cooldown', None, 86_400),
     UnitBound('sources.kafka.detach.lease', 40, 86_400),
+    UnitBound('split.job_timeout', 60, 2_592_000, allows_zero=True),
+    UnitBound('split.idle_timeout', 60, 2_592_000, allows_zero=True),
+    UnitBound('split.max_part_data', KIB, 512 * KIB),
     UnitBound('executor.task_timeout', 1, None),
     UnitBound('executor.drain_timeout', 1, None),
     UnitBound('executor.max_pending_bytes', 16 * MIB, None),
@@ -94,11 +99,15 @@ UNIT_BOUNDS: tuple[UnitBound, ...] = (
 
 def bound_message(path: str, bound: UnitBound, value: Any, to_text: Any) -> str | None:
     """The message for ``value`` outside ``bound``, or ``None`` when it is inside; texts come from ``to_text``."""
+    if bound.allows_zero and value == 0:
+        return None
     below = bound.minimum is not None and value < bound.minimum
     above = bound.maximum is not None and value > bound.maximum
     if not below and not above:
         return None
     got = to_text(value)
+    if bound.allows_zero and bound.minimum is not None and bound.maximum is not None:
+        return f'{path} must be 0 or from {to_text(bound.minimum)} to {to_text(bound.maximum)}, got {got}'
     if bound.minimum is not None and bound.maximum is not None:
         return f'{path} must be from {to_text(bound.minimum)} to {to_text(bound.maximum)}, got {got}'
     if bound.minimum is not None:

@@ -108,6 +108,7 @@ class TestShape:
             'cluster',
             'connections',
             'sources',
+            'split',
             'executor',
             'threads',
             'sinks',

@@ -648,6 +648,28 @@ When every configured client has an empty token, the worker logs a `webapp_unaut
 
 ---
 
+## Split messages (`split:`) {#split-messages-split}
+
+A new root section, after `sources` and before `executor`. With `split.enabled: false` the section loads, is checked, and does nothing.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `split.enabled` | `bool` | `false` | Split messages of the Kafka source into parts. Needs `sources.kafka.enabled`. |
+| `split.connection` | `str` | `main` | The entry under `connections.kafka` that the parts and results topics use. |
+| `split.parts_topic` | `str` | `''` | Empty: `<sources.kafka.topic>_<consumer group>_split_parts`. |
+| `split.results_topic` | `str` | `''` | Empty: `<sources.kafka.topic>_<consumer group>_split_results`. |
+| `split.parts_group` | `str` | `''` | Empty: `<consumer group>_split_parts`. |
+| `split.results_group` | `str` | `''` | Empty: `<consumer group>_split_results`. |
+| `split.aggregate_sinks` | `list[str]` | `[]` | Sinks of the aggregate stage, each `<type>/<name>` of a configured sink. Every other sink is a part sink. |
+| `split.job_timeout` | duration | `24h` | The longest run of a job: `0` (no limit) or `1m` to `30d`. |
+| `split.idle_timeout` | duration | `0` | The longest time without a part result: `0` (no limit) or `1m` to `30d`, and below `job_timeout` when both are set. |
+| `split.max_attempts` | `int` | `3` | How many times a job may be split, 1 to 10. |
+| `split.max_part_data` | size | `64KiB` | The largest data of one part, `1KiB` to `512KiB`. |
+
+The load fails when: `split.enabled` is on and the Kafka source is off; `split.connection` is not defined under `connections.kafka` (checked only with the feature on); an `aggregate_sinks` entry is not a configured sink; both timeouts are `0`; `idle_timeout` is not below `job_timeout`; the source topic, the parts topic, the results topic and the DLQ topic are not four different topics; or, with the feature on, a sink depends on a sink of the other stage. The checks run again after `on_startup`. The config summary has the token `split=on` or `split=off` after `sources=[...]`.
+
+---
+
 ## Executor Pool (`executor:`)
 
 Controls the subprocess executor pool that runs user-defined binaries.

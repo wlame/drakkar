@@ -38,6 +38,7 @@ from drakkar.config.runtime import (
 )
 from drakkar.config.sinks import DLQConfig, SinksConfig
 from drakkar.config.sources import SourcesConfig
+from drakkar.config.split import SplitConfig
 from drakkar.config.storage import StorageConfig
 from drakkar.config.strict import (
     decode_env_json,
@@ -71,6 +72,17 @@ DETACH_WITHOUT_AUTODISCOVER_MESSAGE = (
 )
 
 UI_DETACH_WITHOUT_FEATURE_MESSAGE = 'ui.detach_enabled needs sources.kafka.detach.enabled'
+
+SPLIT_WITHOUT_KAFKA_SOURCE_MESSAGE = (
+    'split.enabled needs sources.kafka.enabled: only messages of the Kafka source are split'
+)
+
+# The topic keys that must name four different topics, in the order a message names them.
+SPLIT_TOPIC_PATHS = ('sources.kafka.topic', 'split.parts_topic', 'split.results_topic', 'dlq.topic')
+
+# The suffixes of the names that a ``split`` key left empty resolves to.
+SPLIT_PARTS_SUFFIX = '_split_parts'
+SPLIT_RESULTS_SUFFIX = '_split_results'
 
 # The loader passes the whole tree, the ``DK_*`` values already in it with their
 # map names resolved. No variable name can start with NUL, so with this prefix the
@@ -139,6 +151,7 @@ class DrakkarConfig(BaseSettings):
     cluster: ClusterConfig = Field(default_factory=ClusterConfig)
     connections: ConnectionsConfig = Field(default_factory=ConnectionsConfig)
     sources: SourcesConfig = Field(default_factory=SourcesConfig)
+    split: SplitConfig = Field(default_factory=SplitConfig)
     executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
     threads: ThreadsConfig = Field(default_factory=ThreadsConfig)
     sinks: SinksConfig = Field(default_factory=SinksConfig)
@@ -229,6 +242,12 @@ class DrakkarConfig(BaseSettings):
     def _validate_detach(self) -> 'DrakkarConfig':
         """What an enabled detach and the UI detach switch need from the rest of the config."""
         self.check_detach()
+        return self
+
+    @model_validator(mode='after')
+    def _validate_split(self) -> 'DrakkarConfig':
+        """What the ``split`` section needs from the sources, the connections and the sinks."""
+        self.check_split()
         return self
 
     @model_validator(mode='after')
@@ -421,6 +440,60 @@ class DrakkarConfig(BaseSettings):
         if self.ui.detach_enabled and not detach.enabled:
             raise ValueError(UI_DETACH_WITHOUT_FEATURE_MESSAGE)
 
+    def check_split(self) -> None:
+        """Refuse a ``split`` section that cannot run.
+
+        With ``split.enabled`` false the section is still checked, except for the
+        rules that need the feature itself: the Kafka source, the connection and the
+        sink stages. The load calls this, and so does the startup after ``on_startup``,
+        which may have changed the keys: both give the same messages.
+
+        Raises:
+            ValueError: with the pinned message of the first broken rule.
+        """
+        split = self.split
+        if split.enabled:
+            if not self.sources.kafka.enabled:
+                raise ValueError(SPLIT_WITHOUT_KAFKA_SOURCE_MESSAGE)
+            _require_declared_connection('split.connection', 'kafka', split.connection, self.connections)
+        self._check_split_aggregate_sinks()
+        split.check_timeouts()
+        self._check_split_topics_differ()
+        if split.enabled:
+            self._check_split_stages()
+
+    def _check_split_aggregate_sinks(self) -> None:
+        """Every ``split.aggregate_sinks`` entry names a configured sink."""
+        configured = self.sinks.policies()
+        for ref in self.split.aggregate_sinks:
+            if ref not in configured:
+                raise ValueError(f"split.aggregate_sinks: '{ref}' is not a configured sink; write '<type>/<name>'")
+
+    def _check_split_topics_differ(self) -> None:
+        """The source topic, the parts topic, the results topic and the DLQ topic are four different topics."""
+        topics = {
+            'sources.kafka.topic': self.sources.kafka.topic,
+            'split.parts_topic': self.resolved_split_parts_topic,
+            'split.results_topic': self.resolved_split_results_topic,
+            'dlq.topic': self.resolved_dlq_topic,
+        }
+        for index, first in enumerate(SPLIT_TOPIC_PATHS):
+            for second in SPLIT_TOPIC_PATHS[index + 1 :]:
+                if topics[first] and topics[first] == topics[second]:
+                    raise ValueError(f"split: {first} and {second} name the same topic '{topics[first]}'")
+
+    def _check_split_stages(self) -> None:
+        """A sink depends only on sinks of its own stage: the aggregate stage or the part stage."""
+        aggregate = set(self.split.aggregate_sinks)
+        policies = self.sinks.policies()
+        for ref, policy in sorted(policies.items()):
+            for dependency in policy.depends_on:
+                if dependency in policies and (dependency in aggregate) != (ref in aggregate):
+                    raise ValueError(
+                        f"{self.sinks.instance_path(ref)}.depends_on: '{dependency}' is in the other split stage; "
+                        'a sink depends only on sinks of its own stage'
+                    )
+
     def declared_connection(self, path: str, kind: str, name: str) -> Any:
         """The connection ``name`` of the service ``kind``, read at run time.
 
@@ -443,6 +516,47 @@ class DrakkarConfig(BaseSettings):
         return self.sources.kafka.consumer_group if self.sources.kafka.enabled else ''
 
     @property
+    def resolved_split_parts_topic(self) -> str:
+        """The parts topic: ``split.parts_topic``, else ``<source topic>_<consumer group>_split_parts``."""
+        return (
+            self.split.parts_topic or f'{self.sources.kafka.topic}_{self.resolved_consumer_group}{SPLIT_PARTS_SUFFIX}'
+        )
+
+    @property
+    def resolved_split_results_topic(self) -> str:
+        """The results topic: ``split.results_topic``, else ``<source topic>_<consumer group>_split_results``."""
+        return (
+            self.split.results_topic
+            or f'{self.sources.kafka.topic}_{self.resolved_consumer_group}{SPLIT_RESULTS_SUFFIX}'
+        )
+
+    @property
+    def resolved_split_parts_group(self) -> str:
+        """The consumer group of the parts: ``split.parts_group``, else ``<consumer group>_split_parts``."""
+        return self.split.parts_group or f'{self.resolved_consumer_group}{SPLIT_PARTS_SUFFIX}'
+
+    @property
+    def resolved_split_results_group(self) -> str:
+        """The consumer group of the results log: ``split.results_group``, else ``<consumer group>_split_results``."""
+        return self.split.results_group or f'{self.resolved_consumer_group}{SPLIT_RESULTS_SUFFIX}'
+
+    @property
+    def split_connection(self) -> KafkaConnectionConfig | None:
+        """The connection of the split topics; ``None`` when ``split.enabled`` is false."""
+        if not self.split.enabled:
+            return None
+        return self.declared_connection('split.connection', 'kafka', self.split.connection)
+
+    @property
+    def split_aggregate_sinks(self) -> frozenset[tuple[str, str]]:
+        """The aggregate sinks as ``(sink type, name)`` pairs."""
+        pairs: set[tuple[str, str]] = set()
+        for ref in self.split.aggregate_sinks:
+            sink_type, _, name = ref.partition('/')
+            pairs.add((sink_type, name))
+        return frozenset(pairs)
+
+    @property
     def resolved_dlq_topic(self) -> str:
         """The DLQ topic the worker will use; ``''`` when the DLQ is off."""
         if not self.dlq.enabled:
@@ -457,10 +571,10 @@ class DrakkarConfig(BaseSettings):
         """One-line human-readable config summary for startup logging and debug UI.
 
         Format:
-        [worker/cluster] sources=[kafka:topic/group/100poll http:8090] exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=consul cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
+        [worker/cluster] sources=[kafka:topic/group/100poll http:8090] split=off exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=consul cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
 
         ``sources=[...]`` lists the enabled input sources in fixed order
-        (kafka, then http). ``api`` is the port of the API server, or ``off``;
+        (kafka, then http). ``split`` says whether messages are split into parts. ``api`` is the port of the API server, or ``off``;
         ``ui`` says whether its UI routes are served (the ``ui.release``
         bundle-fetch settings are left out: they never affect pipeline
         behavior). ``agent`` says whether the agent routes are served.
@@ -492,6 +606,7 @@ class DrakkarConfig(BaseSettings):
         api_part = str(self.api.port) if self.api.enabled else 'off'
         ui_part = 'on' if self.ui.enabled else 'off'
         agent_part = 'on' if self.agent.enabled else 'off'
+        split_part = 'on' if self.split.enabled else 'off'
 
         storage_part = self.storage.dir or 'mem'
         shared_dir = self.storage.shared_dir
@@ -518,6 +633,7 @@ class DrakkarConfig(BaseSettings):
         return (
             f'[{identity}]'
             f' sources=[{" ".join(source_tokens)}]'
+            f' split={split_part}'
             f' exec={exec_part}'
             f' retries={retries_part}'
             f' api={api_part}'

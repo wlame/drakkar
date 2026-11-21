@@ -4,7 +4,7 @@ Supports YAML files with environment variable overrides.
 Use DK_ prefix with __ for nesting (e.g., DK_EXECUTOR__MAX_EXECUTORS).
 
 The models are split per domain across this package — ``sinks``,
-``identity``, ``sources``, ``runtime``, ``api``, ``ui``, ``recorder``, ``cache``, ``storage``, ``autodiscover``, ``connections``, ``webapp``
+``identity``, ``sources``, ``split``, ``runtime``, ``api``, ``ui``, ``recorder``, ``cache``, ``storage``, ``autodiscover``, ``connections``, ``webapp``
 — and assembled by ``root``. ``base`` holds their base class, ``units`` the types
 for values with units, and ``strict`` the check for unknown keys.
 Everything is re-exported here, so ``from drakkar.config import X`` remains
@@ -67,6 +67,7 @@ from drakkar.config.sinks import (
     SinksConfig,
 )
 from drakkar.config.sources import KafkaDetachConfig, KafkaSourceConfig, SourcesConfig, StartupAlignConfig
+from drakkar.config.split import SplitConfig
 from drakkar.config.storage import StorageConfig
 from drakkar.config.strict import UnknownKey, deep_merge, find_unknown_keys, unknown_keys_message
 from drakkar.config.ui import (
@@ -158,6 +159,7 @@ __all__ = [
     'SinkPolicy',
     'SinksConfig',
     'SourcesConfig',
+    'SplitConfig',
     'StartupAlignConfig',
     'StorageConfig',
     'ThreadsConfig',

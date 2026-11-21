@@ -795,7 +795,7 @@ class AppLifecycle:
 
         Raises:
             ValueError: the UI, the recorder or ``autodiscover`` cannot run as configured, the detach
-                durations, the detach store or the UI detach switch break their rules, or a sink's
+                durations, the detach store or the UI detach switch break their rules, the ``split`` section breaks its rules, or a sink's
                 ``depends_on_wait`` is not shorter than ``executor.drain_timeout``.
         """
         app = self._app
@@ -803,6 +803,7 @@ class AppLifecycle:
         app._config.check_recorder_provider()
         app._config.check_autodiscover()
         app._config.check_detach()
+        app._config.check_split()
         app._config.check_sink_waits()
         if app._config.autodiscover.enabled and not app._cluster_name:
             logger.warning(

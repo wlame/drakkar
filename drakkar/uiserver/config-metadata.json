@@ -615,6 +615,123 @@
       ]
     },
     {
+      "key": "split",
+      "title": "Split messages (split:)",
+      "doc_anchor": "split-messages-split",
+      "entries": [
+        {
+          "path": "split.enabled",
+          "env": "DK_SPLIT__ENABLED",
+          "description": "Split messages of the Kafka source into parts that run on every worker.",
+          "full_description": "Split messages of the Kafka source into parts that run on every worker. Needs sources.kafka.enabled.",
+          "type": "boolean",
+          "default": false,
+          "secret": false,
+          "group": "split"
+        },
+        {
+          "path": "split.connection",
+          "env": "DK_SPLIT__CONNECTION",
+          "description": "The name of the entry under connections.kafka that the parts and results topics use.",
+          "full_description": "The name of the entry under connections.kafka that the parts and results topics use.",
+          "type": "string",
+          "default": "main",
+          "secret": false,
+          "group": "split"
+        },
+        {
+          "path": "split.parts_topic",
+          "env": "DK_SPLIT__PARTS_TOPIC",
+          "description": "The internal topic of the parts.",
+          "full_description": "The internal topic of the parts. Empty: \"<sources.kafka.topic>_<consumer group>_split_parts\".",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "split"
+        },
+        {
+          "path": "split.results_topic",
+          "env": "DK_SPLIT__RESULTS_TOPIC",
+          "description": "The internal results log.",
+          "full_description": "The internal results log. Empty: \"<sources.kafka.topic>_<consumer group>_split_results\". It needs the partition count of the source topic.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "split"
+        },
+        {
+          "path": "split.parts_group",
+          "env": "DK_SPLIT__PARTS_GROUP",
+          "description": "The consumer group of the parts.",
+          "full_description": "The consumer group of the parts. Empty: \"<sources.kafka.consumer_group>_split_parts\".",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "split"
+        },
+        {
+          "path": "split.results_group",
+          "env": "DK_SPLIT__RESULTS_GROUP",
+          "description": "The consumer group of the results log.",
+          "full_description": "The consumer group of the results log. Empty: \"<sources.kafka.consumer_group>_split_results\".",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "split"
+        },
+        {
+          "path": "split.aggregate_sinks",
+          "env": "DK_SPLIT__AGGREGATE_SINKS",
+          "description": "Sinks of the aggregate stage, each written \"<type>/<name>\".",
+          "full_description": "Sinks of the aggregate stage, each written \"<type>/<name>\". Every other sink is a part sink. A sink depends only on sinks of its own stage.",
+          "type": "array",
+          "default": [],
+          "secret": false,
+          "group": "split"
+        },
+        {
+          "path": "split.job_timeout",
+          "env": "DK_SPLIT__JOB_TIMEOUT",
+          "description": "The longest time a job may run, from 1m to 30d.",
+          "full_description": "The longest time a job may run, from 1m to 30d. 0 means no limit, and then idle_timeout must be set.",
+          "type": "duration",
+          "default": "1d",
+          "secret": false,
+          "group": "split"
+        },
+        {
+          "path": "split.idle_timeout",
+          "env": "DK_SPLIT__IDLE_TIMEOUT",
+          "description": "The longest time a job may go without a new part result, from 1m to 30d, and below job_timeout when both are set.",
+          "full_description": "The longest time a job may go without a new part result, from 1m to 30d, and below job_timeout when both are set. 0 means no limit.",
+          "type": "duration",
+          "default": "0",
+          "secret": false,
+          "group": "split"
+        },
+        {
+          "path": "split.max_attempts",
+          "env": "DK_SPLIT__MAX_ATTEMPTS",
+          "description": "How many times a job may be split, from 1 to 10.",
+          "full_description": "How many times a job may be split, from 1 to 10. The attempts include the first one.",
+          "type": "integer",
+          "default": 3,
+          "secret": false,
+          "group": "split"
+        },
+        {
+          "path": "split.max_part_data",
+          "env": "DK_SPLIT__MAX_PART_DATA",
+          "description": "The largest data of one part, from 1KiB to 512KiB.",
+          "full_description": "The largest data of one part, from 1KiB to 512KiB.",
+          "type": "size",
+          "default": "64KiB",
+          "secret": false,
+          "group": "split"
+        }
+      ]
+    },
+    {
       "key": "executor",
       "title": "Executor pool (executor:)",
       "doc_anchor": "executor-pool-executor",
