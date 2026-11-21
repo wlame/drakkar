@@ -9,6 +9,7 @@ tracker over the fake consumer.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import gc
 import time
 from typing import Any
@@ -1071,7 +1072,7 @@ async def test_a_new_attempt_outside_the_partition_loop_that_yields_nothing_fail
     await worker.stop()
 
 
-# --- what the review found ---
+# --- a stop, a timeout and an event around a restore; the DLQ record of a job ---
 
 
 async def test_a_stop_while_an_orphan_is_closed_does_not_hold_the_drain(monkeypatch):
@@ -1321,3 +1322,162 @@ async def test_a_revoke_during_a_split_and_with_an_open_job_ends_inside_the_drai
     assert handler.jobs == [] and source.processors == {}
     assert runtime.tracker.table(1) is None
     await runtime.stop(deadline=0.0)
+
+
+async def test_the_holder_takes_over_from_a_real_owner_that_died_in_its_split():
+    world = World()
+    gate = asyncio.Event()
+    new_handler = SplittingHandler({500: [Item(n=0), gate]}, answer=summary())
+    new = await OwnerWorker(world, new_handler, instance=NEW_INSTANCE).start(source_message(500))
+    await wait_until(lambda: world.kinds() == ['open'] and len(world.parts()) == 1)
+    await new.caught_up()
+    # Another owner begins the same message, replaces the attempt, and dies with no clean stop.
+    old = await OwnerWorker(world, SplittingHandler({500: [Item(n=0), asyncio.Event()]}), instance='c' * 16).start(
+        source_message(500)
+    )
+    await wait_until(lambda: world.kinds() == ['open', 'open'] and new_handler.closed_splits == 1)
+    await old.crash()
+    assert world.kinds() == ['open', 'open']
+
+    # No record will ever end that attempt; after the grace time its owner is taken for dead.
+    await new.caught_up()
+    world.clock.advance(FOREIGN_SPLIT_GRACE_SECONDS * 1000)
+    await new.sleep.fire(TIMEOUT_CHECK_SECONDS)
+    await wait_until(lambda: world.kinds() == ['open', 'open', 'open'])
+    gate.set()
+    await wait_until(lambda: world.kinds()[-1] == 'split-done')
+    world.report_all(world.parts(attempt=3))
+    await wait_until(lambda: new.committed == 501)
+
+    [job] = new_handler.jobs
+    assert (job.attempt, job.received_parts) == (3, 1)
+    await new.stop()
+
+
+async def test_an_end_in_progress_runs_to_its_finish_when_another_instance_closes_the_job():
+    world = World()
+    gate = asyncio.Event()
+
+    async def answer(job: SplitJob) -> Any:
+        await gate.wait()
+        return summary()
+
+    handler = SplittingHandler({500: items(1)}, answer=answer)
+    worker = await OwnerWorker(world, handler).start(source_message(500))
+    await wait_until(lambda: world.kinds() == ['open', 'split-done'])
+    world.report_all()
+    await wait_until(lambda: len(handler.jobs) == 1)
+
+    world.put_closed(500, world.entries()[0].ref.attempt_id)
+    await worker.caught_up()
+    assert worker.commits == []
+    gate.set()
+    await wait_until(lambda: worker.committed == 501)
+
+    # A duplicate aggregate is allowed; the job has its closed record already, so no second one is written.
+    assert worker.aggregate_sink.calls == 1
+    assert world.kinds().count('closed') == 1
+    await worker.stop()
+
+
+async def test_a_raise_of_on_job_timeout_sends_the_message_to_the_dlq_and_closes_as_timeout():
+    class Handler(SplittingHandler):
+        async def on_job_timeout(self, job: SplitJob) -> Any:
+            raise ValueError('cannot decide')
+
+    world = World()
+    handler = Handler({500: items(2)})
+    worker = OwnerWorker(world, handler, config=owner_config(job_timeout='1m'))
+    await worker.start(source_message(500))
+    await wait_until(lambda: world.kinds() == ['open', 'split-done'])
+    await worker.caught_up()
+
+    world.clock.advance(61_000)
+    await worker.sleep.fire(TIMEOUT_CHECK_SECONDS)
+    await wait_until(lambda: worker.committed == 501)
+
+    [record] = worker.dlq_records()
+    assert (record.stage, record.error) == ('aggregate', 'on_job_timeout failed: cannot decide')
+    # Every end through on_job_timeout closes as timeout.
+    assert world.closed()[0]['outcome'] == 'timeout'
+    await worker.stop()
+
+
+async def test_the_cancel_of_a_split_closes_the_generator_and_writes_split_cancelled_at_the_same_time():
+    class Handler(SplittingHandler):
+        async def split(self, message):
+            try:
+                yield Item(n=0)
+                await asyncio.Event().wait()
+            finally:
+                # A generator that needs time to clean up.
+                await asyncio.sleep(0.3)
+                self.closed_splits += 1
+
+    world = World()
+    handler = Handler()
+    worker = OwnerWorker(world, handler)
+    await worker.restore()
+    worker.run()
+    assert worker.owner is not None
+    worker.owner._split_settings = dataclasses.replace(worker.owner._split_settings, cancel_write_seconds=0.4)
+    worker.give(source_message(500))
+    await wait_until(lambda: world.kinds() == ['open'] and len(world.parts()) == 1)
+    # The split-cancelled record gets no delivery report, so its write takes its whole time limit.
+    worker.client.hold_deliveries = True
+
+    worker.processor.signal_stop()
+    started = time.monotonic()
+    # The drain does not wait for the cancel at all.
+    await asyncio.wait_for(worker.processor.drain(), timeout=0.1)
+    await worker.processor.stop()
+    elapsed = time.monotonic() - started
+
+    # One after the other they would take 0.7 seconds.
+    assert handler.closed_splits == 1 and 0.35 < elapsed < 0.6
+    worker.client.release_deliveries()
+    await worker.runtime.stop(deadline=0.0)
+
+
+async def test_the_stop_of_a_processor_cancels_a_split_cancel_that_does_not_end_in_its_time():
+    class Handler(SplittingHandler):
+        async def split(self, message):
+            try:
+                yield Item(n=0)
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(5)
+
+    world = World()
+    worker = await OwnerWorker(world, Handler()).start(source_message(500))
+    await wait_until(lambda: world.kinds() == ['open'] and len(world.parts()) == 1)
+
+    worker.processor.signal_stop()
+    await asyncio.wait_for(worker.processor.stop(timeout=0.05), timeout=1)
+
+    assert worker.owner is not None and worker.owner._tasks == set()
+    assert worker.pending == 1 and worker.commits == []
+    await worker.runtime.stop(deadline=0.0)
+
+
+async def test_an_error_that_ends_a_task_of_the_owner_is_logged():
+    world = World()
+    gate = asyncio.Event()
+    handler = SplittingHandler({500: [Item(n=0), gate]}, answer=summary())
+    worker = await superseded_owner(world, handler)
+    assert worker.owner is not None
+
+    async def broken_send(*args: Any, **kwargs: Any) -> bool:
+        raise RuntimeError('the DLQ sink broke')
+
+    worker.owner._ender.send_to_dlq = broken_send  # ty: ignore[invalid-assignment]
+    handler.plan[500] = [RuntimeError('boom')]
+    with capture_logs() as logs:
+        world.put(world.ref(500, SECOND, 2), 'split-cancelled', {})
+        await wait_until(lambda: events(logs, 'split_owner_task_failed') != [])
+
+    [line] = events(logs, 'split_owner_task_failed')
+    assert (line['log_level'], line['category'], line['error']) == ('error', 'split', 'the DLQ sink broke')
+    # Nothing says the request reached the DLQ: the offset does not commit.
+    assert worker.pending == 1 and worker.commits == []
+    await worker.stop()

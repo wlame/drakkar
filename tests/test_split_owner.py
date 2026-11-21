@@ -1330,3 +1330,33 @@ async def test_a_failed_split_that_waits_for_its_closed_record_holds_no_reservat
     assert [job.source_message.offset for job in handler.jobs] == [501]
     assert (budget.free_tasks, budget.free_bytes) == (100, 1_000_000)
     await worker.stop()
+
+
+async def test_a_split_waits_for_room_in_a_full_client_queue_and_a_stop_ends_that_wait():
+    world = World()
+    gate = asyncio.Event()
+    handler = SplittingHandler({500: items(5), 501: [Item(n=0), gate, Item(n=1), Item(n=2)]})
+    client = FakeProducerClient(world.log, queue_capacity=1)
+    worker = OwnerWorker(world, handler, client=client)
+    await worker.start(source_message(500))
+    # One record fits in the queue at a time: the split waits for room and loses no part.
+    await wait_until(lambda: world.kinds() == ['open', 'split-done'])
+    assert [part.index for part in world.parts(offset=500)] == [0, 1, 2, 3, 4]
+
+    assert worker.owner is not None
+    worker.owner._split_settings = dataclasses.replace(worker.owner._split_settings, cancel_write_seconds=0.05)
+    worker.give(source_message(501))
+    await wait_until(lambda: len(world.parts(offset=501)) == 1)
+    client.hold_deliveries = True
+    gate.set()
+    # The second part fills the queue; the third finds no room and waits for it.
+    await wait_until(lambda: client.produced == 10 and handler.pulls == 9)
+    await asyncio.sleep(0.03)
+    worker.processor.signal_stop()
+    await asyncio.wait_for(worker.processor.drain(), timeout=0.5)
+    await asyncio.wait_for(worker.processor.stop(), timeout=3)
+
+    assert client.produced == 10 and worker.pending == 2 and worker.commits == []
+    assert handler.closed_splits == 2
+    client.release_deliveries()
+    await worker.runtime.stop(deadline=0.0)

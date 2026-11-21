@@ -25,6 +25,19 @@ from drakkar.logging import (
 )
 
 
+@pytest.fixture(autouse=True)
+def restored_structlog_config():
+    """Put the structlog configuration back after each test.
+
+    These tests set a level filter and cached loggers for the whole process;
+    left in place, they hide the debug lines that later tests of the same
+    worker expect.
+    """
+    saved = dict(structlog.get_config())
+    yield
+    structlog.configure(**saved)
+
+
 def _capture_json_line(emit, **identity) -> dict:
     """Configure json logging with ``identity``, run ``emit(logger)`` and return the parsed line."""
     buf = io.StringIO()
