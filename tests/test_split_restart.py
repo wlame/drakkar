@@ -834,6 +834,46 @@ async def test_a_revoke_waits_a_bounded_time_for_a_restore_that_does_not_end(mon
     await runtime.stop(deadline=0.0)
 
 
+async def test_a_revoke_releases_all_its_split_partitions_at_once_under_one_time_limit(monkeypatch):
+    monkeypatch.setattr(kafka_module, 'SPLIT_RELEASE_TIMEOUT_SECONDS', 0.05)
+    app = split_app(SplittingHandler())
+    runtime = await wired(app)
+    source = app.kafka_source
+    assert source is not None
+    partitions = [1, 2, 3, 4]
+    source.on_assign(partitions)
+    await wait_for(lambda: source._restore_tasks == {}, interval=0.001)
+    started: list[int] = []
+    all_started = asyncio.Event()
+
+    async def release_that_hangs(partition: int) -> None:
+        started.append(partition)
+        if len(started) == len(partitions):
+            all_started.set()
+        await asyncio.Event().wait()
+
+    runtime.release = release_that_hangs  # ty: ignore[invalid-assignment]
+
+    with capture_logs() as logs:
+        await asyncio.wait_for(source.on_revoke(partitions), timeout=10)
+
+    # Every release ran inside the one wait: a wait for each partition in turn starts the second after the first.
+    assert all_started.is_set() and sorted(started) == partitions
+    failed = events(logs, 'split_release_failed')
+    assert sorted(line['partition'] for line in failed) == partitions
+    assert {line['error'] for line in failed} == {'the release did not end in time'}
+    await runtime.stop(deadline=0.0)
+
+
+def test_a_split_step_of_a_revoke_takes_its_time_from_the_deadline_of_the_revoke():
+    now = time.monotonic()
+
+    # Much time left: the cap of one step. No time left: the floor, so the step is still tried.
+    assert kafka_module._split_step_bound(now + 60) == kafka_module.SPLIT_RELEASE_TIMEOUT_SECONDS
+    assert kafka_module._split_step_bound(now - 5) == kafka_module.MIN_TEARDOWN_STEP_SECONDS
+    assert kafka_module.MIN_TEARDOWN_STEP_SECONDS < kafka_module._split_step_bound(now + 1) <= 1
+
+
 async def test_a_commit_of_the_parts_source_is_not_told_to_the_job_tracker():
     app = split_app(SplittingHandler())
     runtime = await wired(app)

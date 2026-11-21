@@ -828,14 +828,32 @@ class JobTracker:
             await asyncio.wait({pending})
 
     async def _unassign(self, state: _Followed) -> None:
-        """Take the partition off the consumer; a failure is logged."""
+        """Take the partition off the consumer; a failure is logged.
+
+        An assignment that a cancellation or an error cut short may never
+        have reached the client (the call waited for a thread of the
+        consumer, and its cancel took it out of the queue). The unassign is
+        still sent, because the assignment may have happened; its failure
+        then only says that there was nothing to take off, and is logged at
+        debug level. Nothing tries an unassign again: the partition is
+        assigned anew by the next ``follow``.
+        """
         if not state.assigned:
             return
+        was_complete = state.assign_complete
         state.assigned = False
         state.assign_complete = False
         try:
             await self._consumer.incremental_unassign([TopicPartition(self._topic, state.partition)])
         except Exception as exc:
+            if not was_complete:
+                logger.debug(
+                    'split_tracker_unassign_not_needed',
+                    category='split',
+                    partition=state.partition,
+                    error=describe_error(exc),
+                )
+                return
             logger.warning(
                 'split_tracker_unassign_failed',
                 category='split',

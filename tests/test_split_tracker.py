@@ -752,6 +752,21 @@ async def test_an_unassign_failure_at_release_is_logged(harness):
     assert [entry['event'] for entry in logs] == ['split_tracker_unassign_failed']
 
 
+async def test_an_unassign_failure_after_an_assign_that_was_cut_short_is_not_a_warning(harness):
+    # The assign fails, so it never reached the client; the unassign of the retry then has nothing to take off.
+    harness.consumer.fail_next('incremental_assign', KafkaException(KafkaError(KafkaError._TRANSPORT)))
+    harness.consumer.fail_next('incremental_unassign', KafkaException(KafkaError(KafkaError._STATE)))
+
+    with capture_logs() as logs:
+        following = asyncio.ensure_future(harness.t.follow(PARTITION, committed_source_offset=None))
+        await harness.sleep.fire(1.0)
+        await following
+
+    by_event = {entry['event']: entry['log_level'] for entry in logs}
+    assert by_event['split_tracker_unassign_not_needed'] == 'debug'
+    assert 'split_tracker_unassign_failed' not in by_event
+
+
 async def test_a_failing_periodic_step_is_logged_and_the_loop_goes_on(harness, monkeypatch):
     calls = []
 

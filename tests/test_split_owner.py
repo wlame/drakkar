@@ -48,6 +48,7 @@ from tests.split_owner_helpers import (
     wait_until,
 )
 from tests.stream_helpers import make_pool, stream_task
+from tests.test_message_dlq import ScriptedPool
 from tests.test_split_part_mode import PARTS_PARTITION, PartPipeline, part_message
 
 
@@ -905,6 +906,75 @@ async def test_a_split_in_progress_holds_no_reservation_of_the_pending_budget():
     world.report_all()
     await wait_until(lambda: worker.committed == 503)
     assert (budget.free_tasks, budget.free_bytes) == (100, 1_000_000)
+    await worker.stop()
+
+
+async def test_the_local_messages_behind_a_job_are_admitted_in_windows_that_fit_the_pending_budget():
+    world = World()
+    arranged: list[list[int]] = []
+    task_gate, split_gate = asyncio.Event(), asyncio.Event()
+
+    class Handler(SplittingHandler):
+        async def arrange(self, messages, pending):
+            arranged.append([message.offset for message in messages])
+            return await super().arrange(messages, pending)
+
+    handler = Handler({500: [Item(n=0), split_gate]}, answer=None)
+    budget = PendingBudget(max_tasks=4, max_bytes=1_000_000)
+    budget.shape.note_window(1, 1, 10)
+    worker = OwnerWorker(world, handler, budget=budget, pool=ScriptedPool(gates={'t-a': task_gate}))
+    worker.processor._windows_seen = partition_module.WARM_UP_WINDOWS
+    local = [501, 502, 503, 504, 505, 506]
+    await worker.start(source_message(500), *(source_message(offset) for offset in local))
+    await wait_until(lambda: handler.pulls == 2)
+    # Another loop of the worker holds half of the room while the split runs: two tasks fit.
+    other = BudgetAccount(budget)
+    other.charge(2, 0)
+
+    split_gate.set()
+    await wait_until(lambda: arranged != [])
+    for _ in range(50):
+        await asyncio.sleep(0)
+
+    # Two of the six local messages fit. All six at once would pass the limit of 4 tasks by a whole window.
+    assert arranged == [[501, 502]]
+    assert budget.free_tasks == 0
+
+    task_gate.set()
+    await wait_until(lambda: [offset for window in arranged for offset in window] == local)
+    assert all(len(window) <= 2 for window in arranged)
+    world.report_all()
+    await wait_until(lambda: worker.committed == 507)
+    other.close()
+    await worker.stop()
+
+
+async def test_the_ends_of_local_messages_are_capped_like_waiting_part_reports():
+    world = World()
+    gate = asyncio.Event()
+
+    async def slow_end(job):
+        await gate.wait()
+
+    handler = SplittingHandler(answer=slow_end)
+    worker = OwnerWorker(world, handler, window_size=1)
+    cap = worker.processor._max_waiting_reports
+    offsets = range(500, 500 + cap + 10)
+    await worker.start(*(source_message(offset) for offset in offsets))
+
+    await wait_until(lambda: len(handler.jobs) >= cap and worker.processor.inflight_count == 0)
+    for _ in range(50):
+        await asyncio.sleep(0)
+
+    # The ends wait for their aggregate, so the loop takes no further message. The cap is checked when a
+    # window is taken, so the one message that was taken while the cap was not reached yet is above it.
+    waiting = len(handler.jobs)
+    assert cap <= waiting <= cap + 1 and worker.processor._waiting_reports == waiting
+    assert worker.processor.queue_size == len(offsets) - waiting
+
+    gate.set()
+    await wait_until(lambda: worker.committed == offsets[-1] + 1)
+    assert len(handler.jobs) == len(offsets) and worker.processor._waiting_reports == 0
     await worker.stop()
 
 

@@ -54,7 +54,7 @@ MIN_TEARDOWN_STEP_SECONDS = 0.5
 # How often the broker-lag gauge is refreshed from the cached watermarks.
 LAG_REFRESH_INTERVAL_SECONDS = 10.0
 
-# How long a revoke waits for the job tracker to drop one partition, and for
+# How long a revoke waits at most for the job tracker to drop the revoked partitions, and for
 # cancelled restores to end. The drop only unassigns a partition of a consumer
 # that reads no group; the bound keeps a client that hangs from holding the
 # rebalance callback.
@@ -75,6 +75,11 @@ class LeaveOutcome(StrEnum):
     LEFT = 'left'
     TIMED_OUT = 'timed_out'
     STOPPING = 'stopping'
+
+
+def _split_step_bound(deadline: float) -> float:
+    """The time limit of one split step of a revoke: what is left of ``deadline``, within its floor and its cap."""
+    return min(_remaining(deadline), SPLIT_RELEASE_TIMEOUT_SECONDS)
 
 
 def _remaining(deadline: float) -> float:
@@ -645,7 +650,8 @@ class KafkaSource:
         """
         ctx = self._context()
         log = logger.bind(worker_id=ctx.worker_id)
-        await self._cancel_restores(list(self._restore_tasks))
+        # Its own time limit, as every step of a stop has: the cap of one split step.
+        await self._cancel_restores(list(self._restore_tasks), time.monotonic() + SPLIT_RELEASE_TIMEOUT_SECONDS)
 
         # Only commit final offsets if drain succeeded cleanly. After
         # a timeout / drain-exception we cannot be sure tasks have
@@ -957,12 +963,12 @@ class KafkaSource:
             )
             return None
 
-    async def _cancel_restores(self, partition_ids: list[int]) -> None:
+    async def _cancel_restores(self, partition_ids: list[int], deadline: float) -> None:
         """Cancel the restores of these partitions and wait a bounded time for them to end.
 
         A revoke calls this inside the rebalance callback, so the wait has a
-        time limit; a restore that does not end in it is logged and left to
-        end by itself.
+        time limit, taken from the ``deadline`` of the whole revoke; a
+        restore that does not end in it is logged and left to end by itself.
         """
         restores = [restore for pid in partition_ids if (restore := self._restore_tasks.pop(pid, None)) is not None]
         self.restoring_partitions.difference_update(partition_ids)
@@ -970,30 +976,41 @@ class KafkaSource:
             restore.cancel()
         if not restores:
             return
-        _, late = await asyncio.wait(restores, timeout=SPLIT_RELEASE_TIMEOUT_SECONDS)
+        bound = _split_step_bound(deadline)
+        _, late = await asyncio.wait(restores, timeout=bound)
         if late:
             logger.warning(
                 'split_restore_cancel_slow',
                 category='split',
                 partitions=[self._shown(pid) for pid in partition_ids],
-                waited_seconds=SPLIT_RELEASE_TIMEOUT_SECONDS,
+                waited_seconds=round(bound, 3),
             )
 
-    async def _release_split_partitions(self, partition_ids: list[int]) -> None:
-        """Tell the job tracker to drop the revoked partitions and their job tables; a failure is logged."""
+    async def _release_split_partitions(self, partition_ids: list[int], deadline: float) -> None:
+        """Tell the job tracker to drop the revoked partitions and their job tables; a failure is logged.
+
+        All partitions are released at once, under one time limit taken from
+        the ``deadline`` of the whole revoke: the rebalance callback waits
+        for this, and one limit for each partition would add up to far more
+        than the drain timeout when the client of the job tracker hangs.
+        """
         runtime = self._owner_runtime()
-        if runtime is None:
+        if runtime is None or not partition_ids:
             return
-        for pid in partition_ids:
-            try:
-                await asyncio.wait_for(runtime.release(pid), timeout=SPLIT_RELEASE_TIMEOUT_SECONDS)
-            except Exception as error:
-                logger.warning(
-                    'split_release_failed',
-                    category='split',
-                    partition=self._shown(pid),
-                    error=describe_error(error),
-                )
+        releases = {asyncio.ensure_future(runtime.release(pid)): pid for pid in partition_ids}
+        _, late = await asyncio.wait(releases, timeout=_split_step_bound(deadline))
+        for release, pid in releases.items():
+            if release in late:
+                release.cancel()
+                self._log_release_failure(pid, 'the release did not end in time')
+            elif not release.cancelled() and release.exception() is not None:
+                self._log_release_failure(pid, describe_error(release.exception()))
+        if late:
+            # A cancelled release ends at once unless it ignores its cancel; then it is left behind.
+            await asyncio.wait(late, timeout=MIN_TEARDOWN_STEP_SECONDS)
+
+    def _log_release_failure(self, partition_id: int, error: str) -> None:
+        logger.warning('split_release_failed', category='split', partition=self._shown(partition_id), error=error)
 
     def _notify_handler_of_assign(self, partition_ids: list[int]) -> None:
         """Call the handler's ``on_assign`` hook on a background task."""
@@ -1048,10 +1065,14 @@ class KafkaSource:
         ctx = self._context()
         if ctx.recorder:
             ctx.recorder.record_revoked([self._shown(pid) for pid in partition_ids])
+        # One deadline for the whole revoke: the cancel of the restores, the stop of the processors
+        # and the release of the split partitions all come out of the same budget.
+        deadline = time.monotonic() + ctx.config.executor.drain_timeout
         # First: a restore that ends now would start a processor of a partition that is gone.
         was_restoring = self.restoring_partitions.intersection(partition_ids)
-        if was_restoring or not self._restore_tasks.keys().isdisjoint(partition_ids):
-            await self._cancel_restores(partition_ids)
+        waited_for_restores = bool(was_restoring) or not self._restore_tasks.keys().isdisjoint(partition_ids)
+        if waited_for_restores:
+            await self._cancel_restores(partition_ids, deadline)
         to_stop: list[PartitionProcessor] = []
         for pid in partition_ids:
             # A revoked partition is no longer ours — clear any stall-pause
@@ -1077,12 +1098,19 @@ class KafkaSource:
         if to_stop:
             self._revokes_in_progress += 1
             try:
-                await asyncio.gather(*(self._stop_processor(p) for p in to_stop))
+                # A revoke that spent no time on restores starts the deadline of each stop now, as it
+                # always did; one that did gives the stops what is left of its own deadline.
+                stops = (
+                    (self._stop_processor(p, deadline) for p in to_stop)
+                    if waited_for_restores
+                    else (self._stop_processor(p) for p in to_stop)
+                )
+                await asyncio.gather(*stops)
             finally:
                 self._revokes_in_progress -= 1
 
         # After the processors stopped: an end of a job in progress read the table until then.
-        await self._release_split_partitions(partition_ids)
+        await self._release_split_partitions(partition_ids, deadline)
         self._notify_handler_of_revoke(partition_ids)
 
     def _notify_handler_of_revoke(self, partition_ids: list[int]) -> None:
@@ -1184,8 +1212,12 @@ class KafkaSource:
                 exc_info=True,
             )
 
-    async def _stop_processor(self, processor: PartitionProcessor) -> None:
+    async def _stop_processor(self, processor: PartitionProcessor, deadline: float | None = None) -> None:
         """Drain in-flight tasks, commit final offsets, then stop.
+
+        ``deadline`` (monotonic) is the deadline of a teardown that already
+        spent time on an earlier step; None starts one of
+        ``executor.drain_timeout`` now.
 
         Only commits the watermark when drain completed cleanly. If drain
         timed out, tasks may still be in flight — committing their offsets
@@ -1198,12 +1230,13 @@ class KafkaSource:
         # of the same budget — a step that takes its own would let the
         # callback overrun ``max.poll.interval.ms`` and get the member
         # evicted, which triggers the next rebalance.
-        deadline = time.monotonic() + drain_timeout
+        if deadline is None:
+            deadline = time.monotonic() + drain_timeout
         try:
             processor.signal_stop()
             drained_cleanly = False
             try:
-                await asyncio.wait_for(processor.drain(), timeout=drain_timeout)
+                await asyncio.wait_for(processor.drain(), timeout=_remaining(deadline))
                 drained_cleanly = True
             except TimeoutError:
                 # Tasks still running are zombies now — the new partition

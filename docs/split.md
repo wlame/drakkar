@@ -449,6 +449,17 @@ So a handler has one rule: `on_message_complete` is for a part, and
   `arrange` for a local message ends in a DLQ record of the original
   message. Without the feature it restarts the partition loop and leaves the
   offset pending.
+- A window that holds a job gives its reservation of the pending budget
+  back when the job publishes its first part, because a split can take
+  minutes. The local messages of that window then pass the admission again:
+  the loop waits for room and arranges as many of them as fit, then the
+  rest. So `executor.max_pending_tasks` is passed by at most one message, as
+  for any window.
+- The end of a local message (`aggregate` and the aggregate sinks) runs
+  beside the partition loop. The loop takes no further message while too
+  many ends wait (twice `executor.window_size`, at least 16; the same cap
+  as for finished parts that wait for their result). So a slow aggregate
+  sink slows the partition down and does not pile up messages in memory.
 - `drakkar_split_jobs_total` counts a local message with the outcome
   `local`, or `dlq` when it went to the DLQ.
   `drakkar_split_parts_processed_total` does not count it.
@@ -933,7 +944,9 @@ The restore and the job tracker:
 | `split_restore_cancel_slow` | warning | A revoke waited for restores that did not end in time. |
 | `split_committed_offset_unknown` | warning | The committed offset of a source partition could not be read for a restore. |
 | `split_release_failed` | warning | The tracker could not drop a revoked partition in time. |
-| `split_tracker_consume_failed`, `split_tracker_seek_failed`, `split_position_commit_failed`, `split_tracker_unassign_failed` | warning | A call of the tracker's consumer failed; it is tried again. |
+| `split_tracker_consume_failed`, `split_tracker_seek_failed`, `split_position_commit_failed` | warning | A call of the tracker's consumer failed; it is tried again. |
+| `split_tracker_unassign_failed` | warning | The tracker could not take a results partition off its consumer when the worker lost the source partition. It is not tried again: the partition is assigned anew when the worker gets the source partition back. Records of the partition that the consumer still reads meanwhile are ignored. |
+| `split_tracker_unassign_not_needed` | debug | The same call failed for a partition whose assignment was cut short before it reached the consumer (a restore that was cancelled at once, as in the rebalances of a start). There was nothing to take off. |
 | `split_tracker_record_failed`, `split_tracker_listener_failed`, `split_tracker_loop_failed`, `split_tracker_periodic_failed`, `split_tracker_task_failed` | error | An unexpected error in the job tracker; it is logged and the tracker goes on. |
 | `split_tracker_close_failed` | warning | The tracker's consumer did not close cleanly at a stop. |
 

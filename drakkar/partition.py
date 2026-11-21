@@ -385,8 +385,9 @@ class PartitionProcessor:
         # a split job, and its result is reported before its offset completes.
         self._part_mode = part_mode
         self._part_log = RateLimitedLog(time.monotonic)
-        # Finished parts whose result is not written yet. At the cap the loop
-        # takes no further part (see ``max_waiting_reports``); the event is
+        # Finished parts whose result is not written yet, and local messages
+        # whose end (``aggregate`` and its sinks) still runs. At the cap the loop
+        # takes no further message (see ``max_waiting_reports``); the event is
         # set while there is room, and a stop sets it to wake the loop.
         self._waiting_reports = 0
         self._max_waiting_reports = max_waiting_reports(window_size)
@@ -401,7 +402,7 @@ class PartitionProcessor:
         # results of a job can take hours, and the next owner continues it.
         self._open_job_offsets: set[int] = set()
         # Whether a job of the window being accepted gave the window's
-        # reservation back; the local messages of the window reserve again.
+        # reservation back; the local messages of the window pass the admission again.
         self._window_reservation_released = False
         # Gives each message its request id and binds ids into the log
         # context of every scope.
@@ -1316,10 +1317,7 @@ class PartitionProcessor:
         holder.kept_bytes = 0
 
     async def _process_window(self, messages: list[SourceMessage]) -> None:
-        self._window_counter += 1
-        # Counted before any early return: a window whose messages all fail to
-        # parse, or whose arrange creates no tasks, still ends a warm-up step.
-        self._windows_seen += 1
+        self._start_window()
 
         # Register offsets and deserialize BEFORE building the window so
         # the parse-error policy can drop unparseable messages from the
@@ -1328,13 +1326,54 @@ class PartitionProcessor:
         arrange_started_at = time.monotonic()
         self._window_reservation_released = False
         messages = await self._accept_messages(messages)
-        released = self._window_reservation_released
-        if released and messages and not await self._reserve_local_messages(len(messages)):
-            # A stop came before the local messages of the window got room
-            # again: they are never arranged, their offsets stay pending and
-            # leave the drain.
-            self._abandoned_offsets.update(msg.offset for msg in messages)
+        if not self._window_reservation_released:
+            await self._arrange_window(messages, arrange_started_at)
             return
+        await self._arrange_local_messages(messages)
+
+    def _start_window(self) -> None:
+        """Count one more window of this partition."""
+        self._window_counter += 1
+        # Counted before any early return: a window whose messages all fail to
+        # parse, or whose arrange creates no tasks, still ends a warm-up step.
+        self._windows_seen += 1
+
+    async def _arrange_local_messages(self, messages: list[SourceMessage]) -> None:
+        """Arrange the local messages of a window whose reservation a job gave back.
+
+        The messages pass the admission again, as a new window does: the
+        loop waits for room, takes as many of them as fit, reserves their
+        estimate with no await in between, and arranges them as one window;
+        then the same for the rest. So the pending limits are passed by at
+        most one message, as for any window. Reserving the estimate of them
+        all at once would pass the limits by a whole window.
+
+        A stop that comes before a message got room leaves it unarranged:
+        its offset stays pending and leaves the drain.
+        """
+        if not messages:
+            await self._note_commit_due()
+            return
+        remaining = messages
+        is_first = True
+        while remaining:
+            admitted = await self._admit_local_messages(len(remaining))
+            if admitted == 0:
+                self._abandoned_offsets.update(msg.offset for msg in remaining)
+                return
+            window, remaining = remaining[:admitted], remaining[admitted:]
+            if not is_first:
+                self._start_window()
+            is_first = False
+            try:
+                await self._arrange_window(window, time.monotonic())
+            finally:
+                if remaining:
+                    # The loop gives the last reservation back; the ones before it end here.
+                    self._end_window_reservation()
+
+    async def _arrange_window(self, messages: list[SourceMessage], arrange_started_at: float) -> None:
+        """Call ``arrange`` for the accepted messages of a window and start its tasks."""
         if not messages:
             await self._note_commit_due()
             return
@@ -1430,21 +1469,24 @@ class PartitionProcessor:
             outcome = await owner.begin(msg)
         return outcome is BeginOutcome.LOCAL
 
-    async def _reserve_local_messages(self, message_count: int) -> bool:
-        """Wait for room in the pending budget and reserve the estimate of the local messages of a window.
+    async def _admit_local_messages(self, message_count: int) -> int:
+        """Wait for room in the pending budget and reserve the estimate of as many local messages as fit.
 
         Called after a job of the window gave the window's first reservation
-        back. From the room check to the reservation there is no await, so no
-        other loop can pass on the same room. False after a stop.
+        back. The answer is how many of the ``message_count`` messages were
+        admitted, at least 1; 0 after a stop. From the room check to the
+        reservation there is no await, so no other loop can pass on the same
+        room.
         """
         if self._account is None:
-            return True
+            return message_count
         while not await self._wait_for_room():
             if not self._running:
-                return False
+                return 0
             await self._note_commit_due()
-        self._reserve_window(message_count)
-        return True
+        admitted = min(message_count, self._admitted_window_size())
+        self._reserve_window(admitted)
+        return admitted
 
     # --- what the owner of the split jobs asks of its processor (``OwnerHost``) ---
 
@@ -1460,7 +1502,7 @@ class PartitionProcessor:
         failed split and an orphaned job wait for their records to be
         written. A reservation held that long would keep every other
         partition loop waiting for room. The local messages of the window
-        reserve again before ``arrange``. A stream handler reserves nothing
+        pass the admission again before ``arrange``. A stream handler reserves nothing
         before its first pull, so there is nothing to give back.
         """
         if self._stream_mode or self._window_reservation_released:
@@ -3413,15 +3455,20 @@ class PartitionProcessor:
         """Report ``result`` on a task of its own, so neither the loop nor a task run waits for the results topic.
 
         The result of a local message goes to no topic: its owner ends the
-        message with it. That end does not count as a waiting report.
+        message with it (``aggregate`` and the aggregate sinks). That end
+        counts as a waiting report: it holds its source message, so a slow
+        aggregate sink must stop the loop from taking more messages, as a
+        slow results topic does for parts. The end runs on a task of its
+        own and needs nothing from the loop, so the cap cannot hold it.
         """
         if self._owner is not None:
-            self._spawn_end(message, functools.partial(self._owner.end_local, message, result))
-            return
-        report = asyncio.create_task(self._report_part(message, result))
-        self._active_tasks.add(report)
-        report.add_done_callback(self._active_tasks.discard)
-        report.add_done_callback(functools.partial(self._end_part_report, message.offset))
+            end = self._spawn_end(message, functools.partial(self._owner.end_local, message, result))
+            end.add_done_callback(self._end_waiting_report)
+        else:
+            report = asyncio.create_task(self._report_part(message, result))
+            self._active_tasks.add(report)
+            report.add_done_callback(self._active_tasks.discard)
+            report.add_done_callback(functools.partial(self._end_part_report, message.offset))
         self._waiting_reports += 1
         if not self._reports_have_room():
             self._report_room.clear()
@@ -3433,11 +3480,15 @@ class PartitionProcessor:
         report never started. It stays pending: the result may not be
         written, so the part runs again on the next owner of its partition.
         """
+        self._end_waiting_report(report)
+        if report.cancelled() and offset not in self._stalled_offsets:
+            self._abandoned_offsets.add(offset)
+
+    def _end_waiting_report(self, _ended: asyncio.Task) -> None:
+        """One report, or one end of a local message, is over: the loop may take messages again below the cap."""
         self._waiting_reports -= 1
         if self._reports_have_room():
             self._report_room.set()
-        if report.cancelled() and offset not in self._stalled_offsets:
-            self._abandoned_offsets.add(offset)
 
     def _reports_have_room(self) -> bool:
         """Whether fewer finished parts than the cap wait for their result to be written."""
