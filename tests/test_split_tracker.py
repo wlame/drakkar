@@ -710,18 +710,91 @@ async def test_records_of_an_assignment_that_lands_during_a_consume_are_read():
         await h.t.stop()
 
 
-async def test_a_failed_seek_back_is_logged_and_tried_again():
+async def test_records_after_a_failed_seek_back_wait_for_the_seek_and_none_is_lost():
     h = Harness()
     await h.t.start()
     try:
         h.consumer.wait_for_records = True
-        h.consumer.fail_next('seek', KafkaException(KafkaError(KafkaError._TRANSPORT)))
+        original = h.consumer.seek
+        failed = []
+
+        async def seek(partition):
+            if not failed:
+                failed.append(partition.offset)
+                # A record that the client returns before the seek is tried again.
+                h.writer.open(11)
+                raise KafkaException(KafkaError(KafkaError._STATE, 'Erroneous state'))
+            await original(partition)
+
+        h.consumer.seek = seek
         h.writer.open(10)
         await wait_until(lambda: h.consumer.consumes_waiting > 0)
         with capture_logs() as logs:
             table = await h.follow()
-        assert [job.offset for job in table.open_jobs()] == [10]
+            await wait_until(lambda: table.job(11) is not None)
+        # The batch of job 11 came while the seek was pending: it did not move the next offset past job 10.
+        assert failed == [0]
+        assert [job.offset for job in table.open_jobs()] == [10, 11]
         assert 'split_tracker_seek_failed' in [entry['event'] for entry in logs]
+    finally:
+        await h.t.stop()
+
+
+async def test_a_restore_ends_when_the_last_offsets_hold_no_record(monkeypatch):
+    monkeypatch.setattr('drakkar.split.tracker.RESTORE_END_CHECK_SECONDS', 0)
+    h = Harness()
+    await h.t.start()
+    try:
+        h.writer.open(10)
+        h.log.skip(TOPIC, PARTITION, 3)
+        table = await h.follow()
+        assert [job.offset for job in table.open_jobs()] == [10]
+        offset = h.writer.open(11)
+        assert offset == 4
+        await wait_until(lambda: table.job(11) is not None)
+    finally:
+        await h.t.stop()
+
+
+async def test_a_failed_position_check_is_logged_and_tried_again(monkeypatch):
+    monkeypatch.setattr('drakkar.split.tracker.RESTORE_END_CHECK_SECONDS', 0)
+    h = Harness()
+    await h.t.start()
+    try:
+        h.consumer.fail_next('position', KafkaException(KafkaError(KafkaError._STATE)))
+        h.writer.open(10)
+        h.log.skip(TOPIC, PARTITION, 2)
+        with capture_logs() as logs:
+            table = await h.follow()
+        assert len(table) == 1
+        assert 'split_restore_position_check_failed' in [entry['event'] for entry in logs]
+    finally:
+        await h.t.stop()
+
+
+async def test_the_position_is_not_used_while_a_seek_back_is_pending(monkeypatch):
+    monkeypatch.setattr('drakkar.split.tracker.RESTORE_END_CHECK_SECONDS', 0)
+    h = Harness()
+    gate = asyncio.Event()
+    h.consumer_class = GatedConsumer
+    await h.t.start()
+    try:
+        h.consumer.gate = gate
+        h.writer.open(10)
+        h.log.skip(TOPIC, PARTITION, 2)
+        follow = asyncio.create_task(h.t.follow(PARTITION, committed_source_offset=None))
+        await wait_until(lambda: (TOPIC, PARTITION) in h.consumer._positions and h.consumer.gated > 0)
+        state = h.t._followed[PARTITION]
+        # The client stands past the end, and a seek back is pending: the restore must not end on it.
+        h.consumer._positions[(TOPIC, PARTITION)] = 3
+        state.reposition = True
+        await h.t._check_position(state)
+        assert h.t.is_restoring(PARTITION) and state.next_offset == 0
+        state.reposition = False
+        h.consumer._positions[(TOPIC, PARTITION)] = 0
+        gate.set()
+        table = await asyncio.wait_for(follow, timeout=2)
+        assert [job.offset for job in table.open_jobs()] == [10]
     finally:
         await h.t.stop()
 
@@ -992,3 +1065,52 @@ async def test_a_restart_restores_the_same_jobs_as_live_reading_built():
         assert snapshot(restored) == live
     finally:
         await second.t.stop()
+
+
+class SteppedConsumer(CountingConsumer):
+    """Lets a test hold an assignment and the return of a collected batch, as the client's threads can."""
+
+    def __init__(self, log: FakeLog, *, group_id: str) -> None:
+        super().__init__(log, group_id=group_id)
+        self.wait_for_records = True
+        self.assign_gate = asyncio.Event()
+        self.hold_returns = False
+        self.return_gate = asyncio.Event()
+        self.held = 0
+
+    async def incremental_assign(self, partitions):
+        await super().incremental_assign(partitions)
+        await self.assign_gate.wait()
+
+    async def consume(self, num_messages=1, timeout=-1):
+        messages = await super().consume(num_messages=num_messages, timeout=timeout)
+        if messages and self.hold_returns:
+            self.held += 1
+            await self.return_gate.wait()
+        return messages
+
+
+async def test_a_batch_collected_before_a_seek_and_returned_after_it_is_dropped():
+    h = Harness()
+    h.consumer_class = SteppedConsumer
+    await h.t.start()
+    try:
+        consumer = h.consumer
+        h.writer.open(10)
+        await wait_until(lambda: consumer.consumes_waiting > 0)
+        follow = asyncio.create_task(h.t.follow(PARTITION, committed_source_offset=None))
+        # The batch in flight returns job 10 while the assignment has not returned: it is dropped.
+        await wait_until(lambda: PARTITION in h.t._followed and h.t._followed[PARTITION].reposition)
+        consumer.hold_returns = True
+        h.writer.open(11)
+        await wait_until(lambda: consumer.held == 1)
+        # The next batch holds job 11, read from the old position; the seek back runs and works meanwhile.
+        consumer.assign_gate.set()
+        await wait_until(lambda: not h.t._followed[PARTITION].reposition)
+        consumer.hold_returns = False
+        consumer.return_gate.set()
+        table = await asyncio.wait_for(follow, timeout=2)
+        await wait_until(lambda: table.job(11) is not None)
+        assert [job.offset for job in table.open_jobs()] == [10, 11]
+    finally:
+        await h.t.stop()

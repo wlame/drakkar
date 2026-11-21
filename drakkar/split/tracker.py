@@ -83,10 +83,15 @@ class _Followed:
     # assignment; its records are dropped, and the partition is moved back to ``next_offset``.
     first_batch: int = 0
     reposition: bool = False
+    # ``next_offset`` moves only past a record that was applied, or skipped because it lies below it, or to
+    # the consumer's position at the end of a restore (offsets that hold no record a consumer returns). It
+    # never jumps over offsets that may still hold records: while a seek back is pending, every record of
+    # the partition is dropped and leaves it where it is.
     next_offset: int = 0
     restore_end: int = 0
     records: int = 0
     last_end_check: float = 0.0
+    position_check_due: bool = False
     end_check_task: asyncio.Task[None] | None = None
     restore_done: asyncio.Future[None] | None = None
     restore_task: asyncio.Task[JobTable] | None = None
@@ -415,6 +420,35 @@ class JobTracker:
         state.restore_end = min(state.restore_end, high)
         if state.next_offset >= state.restore_end:
             self._finish_restore(state)
+        else:
+            # Offsets below the end may hold no record a consumer returns; the read loop asks for the position.
+            state.position_check_due = True
+
+    async def _check_position(self, state: _Followed) -> None:
+        """Finish a restore whose consumer position is at or past the end of the restore.
+
+        Called by the read loop between batches, so every record the consumer returned has been handled,
+        and never while a seek back is pending.
+        """
+        state.position_check_due = False
+        try:
+            rows = await self._consumer.position([TopicPartition(self._topic, state.partition)])
+            row = rows[0]
+            if getattr(row, 'error', None) is not None:
+                raise KafkaException(row.error)
+        except Exception as exc:
+            self._log_limited(
+                'warning',
+                f'position:{state.partition}',
+                'split_restore_position_check_failed',
+                partition=state.partition,
+                error=exc,
+            )
+            return
+        current = self._followed.get(state.partition) is state and state.restoring and not state.reposition
+        if current and row.offset >= 0 and row.offset >= state.restore_end:
+            state.next_offset = max(state.next_offset, row.offset)
+            self._finish_restore(state)
 
     def _log_restore_failure(self, partition: int, exc: BaseException, attempt: int) -> None:
         self._log_limited(
@@ -453,6 +487,10 @@ class JobTracker:
         for state in list(self._followed.values()):
             if state.reposition and state.assign_complete:
                 await self._seek_back(state)
+        for state in list(self._followed.values()):
+            ready = state.restoring and state.assign_complete and not state.reposition
+            if state.position_check_due and ready and state.partition not in seen:
+                await self._check_position(state)
         self._start_end_checks(seen)
         if had_error:
             await self._sleep(CONSUMER_ERROR_PAUSE_SECONDS)
@@ -481,8 +519,9 @@ class JobTracker:
         offset = message.offset()
         if offset < state.next_offset:
             return
-        if batch < state.first_batch:
-            # The record may belong to the new assignment, and the consumer has moved past it.
+        if batch < state.first_batch or state.reposition:
+            # The record may belong to the new assignment, and the consumer has moved past what came
+            # before it; the partition is moved back to ``next_offset`` and read again from there.
             state.reposition = True
             return
         state.next_offset = offset + 1
@@ -505,18 +544,23 @@ class JobTracker:
         self._apply_live(state, entry, offset, message)
 
     async def _seek_back(self, state: _Followed) -> None:
-        """Move the partition back to ``next_offset``; records read again below it are skipped."""
+        """Move the partition back to ``next_offset``; records read again below it are skipped.
+
+        ``reposition`` stays set until the seek worked, so no record moves ``next_offset`` meanwhile.
+        """
         if self._followed.get(state.partition) is not state or not state.assigned:
             return
-        state.reposition = False
-        target = state.next_offset
+        # A batch that started before the seek can still carry records from the old position.
+        seek_batch = self._batch
         try:
-            await self._consumer.seek(TopicPartition(self._topic, state.partition, target))
+            await self._consumer.seek(TopicPartition(self._topic, state.partition, state.next_offset))
         except Exception as exc:
-            state.reposition = True
             self._log_limited(
                 'warning', f'seek:{state.partition}', 'split_tracker_seek_failed', partition=state.partition, error=exc
             )
+            return
+        state.first_batch = max(state.first_batch, seek_batch)
+        state.reposition = False
 
     def _apply(self, state: _Followed, entry: LogEntry, offset: int, message: Any) -> Applied:
         now_ms = int(self._clock() * MS_PER_SECOND)

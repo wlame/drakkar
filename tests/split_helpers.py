@@ -9,6 +9,7 @@ methods the code calls; the consumer's methods are coroutines, as those of the a
 from __future__ import annotations
 
 import asyncio
+import bisect
 import threading
 import time
 from collections import deque
@@ -90,14 +91,23 @@ class FakeMessage:
         return (1, self._record.timestamp_ms if self._record else -1)
 
 
+def _record_offset(record: FakeRecord) -> int:
+    return record.offset
+
+
 class FakeLog:
-    """Topics held in memory. Safe to use from a thread: the producer's poll thread appends to it."""
+    """Topics held in memory. Safe to use from a thread: the producer's poll thread appends to it.
+
+    Offsets are explicit, so a partition can have offsets that hold no record a consumer returns
+    (``skip``), as transaction markers do.
+    """
 
     def __init__(self, clock: Callable[[], int] | None = None) -> None:
         self.clock = clock or FakeClock()
         self._lock = threading.Lock()
         self._records: dict[tuple[str, int], list[FakeRecord]] = {}
         self._low: dict[tuple[str, int], int] = {}
+        self._next: dict[tuple[str, int], int] = {}
         self._committed: dict[tuple[str, str, int], int] = {}
 
     def append(
@@ -106,33 +116,48 @@ class FakeLog:
         """Add a record to the end of a partition and return its offset."""
         with self._lock:
             records = self._records.setdefault((topic, partition), [])
-            offset = self._low.get((topic, partition), 0) + len(records)
+            offset = self._next.get((topic, partition), 0)
             records.append(FakeRecord(offset, self.clock(), key, value, list(headers)))
+            self._next[(topic, partition)] = offset + 1
             return offset
+
+    def skip(self, topic: str, partition: int, count: int = 1) -> None:
+        """Take ``count`` offsets at the end of a partition that hold no record a consumer returns."""
+        with self._lock:
+            self._records.setdefault((topic, partition), [])
+            self._next[(topic, partition)] = self._next.get((topic, partition), 0) + count
 
     def watermarks(self, topic: str, partition: int) -> tuple[int, int]:
         """The ``(low, high)`` offsets of a partition."""
         with self._lock:
-            low = self._low.get((topic, partition), 0)
-            return low, low + len(self._records.get((topic, partition), []))
+            return self._low.get((topic, partition), 0), self._next.get((topic, partition), 0)
 
     def raise_low(self, topic: str, partition: int, offset: int) -> None:
         """Drop the records below ``offset``, as retention does; the low watermark becomes ``offset``."""
         with self._lock:
             low = self._low.get((topic, partition), 0)
-            records = self._records.get((topic, partition), [])
-            if offset > low + len(records):
+            if offset > self._next.get((topic, partition), 0):
                 raise ValueError(f'offset {offset} is above the end of the partition')
-            self._records[(topic, partition)] = records[max(offset - low, 0) :]
+            records = self._records.get((topic, partition), [])
+            self._records[(topic, partition)] = [record for record in records if record.offset >= offset]
             self._low[(topic, partition)] = max(offset, low)
 
     def read(self, topic: str, partition: int, offset: int, count: int) -> list[FakeRecord]:
         """Up to ``count`` records from ``offset`` on; offsets below the low watermark start at the low one."""
         with self._lock:
-            low = self._low.get((topic, partition), 0)
+            start = max(offset, self._low.get((topic, partition), 0))
             records = self._records.get((topic, partition), [])
-            start = max(offset, low) - low
-            return records[start : start + count]
+            index = bisect.bisect_left(records, start, key=_record_offset)
+            return records[index : index + count]
+
+    def next_record_offset(self, topic: str, partition: int, offset: int) -> int:
+        """The offset of the first record at or after ``offset``, or the end when there is none."""
+        with self._lock:
+            records = self._records.get((topic, partition), [])
+            index = bisect.bisect_left(records, offset, key=_record_offset)
+            if index < len(records):
+                return records[index].offset
+            return max(offset, self._next.get((topic, partition), 0))
 
     def records(self, topic: str, partition: int) -> list[FakeRecord]:
         """All records a partition still holds."""
@@ -351,10 +376,23 @@ class FakeConsumerClient(FailureSwitches):
             for record in records:
                 messages.append(FakeMessage(topic=topic, partition=partition, record=record))
             if records:
-                self._positions[(topic, partition)] = records[-1].offset + 1
+                position = records[-1].offset + 1
+            # The client moves past offsets that hold no record it returns (transaction markers).
+            self._positions[(topic, partition)] = self.log.next_record_offset(topic, partition, position)
             if len(messages) >= num_messages:
                 break
         return messages
+
+    async def position(self, partitions: list[TopicPartition]) -> list[TopicPartition]:
+        """The next offset the client would fetch for each assigned partition; an unassigned one is refused."""
+        self._check_open('position')
+        found = []
+        for tp in partitions:
+            key = (tp.topic, tp.partition)
+            if key not in self._positions:
+                raise KafkaException(KafkaError(KafkaError._STATE, 'Erroneous state'))
+            found.append(TopicPartition(tp.topic, tp.partition, self._positions[key]))
+        return found
 
     async def seek(self, partition: TopicPartition) -> None:
         """Move the position of an assigned partition; an unassigned one is refused, as by the real client."""
