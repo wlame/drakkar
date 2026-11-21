@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 
+from drakkar.agent.state import counter_total
 from drakkar.metrics import split_result_write_failures
 from drakkar.split.view import build_split_state
 
@@ -53,7 +54,7 @@ def create_split_router(deps: UIDeps) -> APIRouter:
             now_ms=int(time.time() * MS_PER_SECOND),
             now_s=time.monotonic(),
             limit=limit,
-            result_write_failures=int(split_result_write_failures._value.get()),
+            result_write_failures=int(counter_total(split_result_write_failures)),
         )
 
     @router.get('/api/v1/debug/split')

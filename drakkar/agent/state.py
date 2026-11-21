@@ -487,7 +487,7 @@ async def _loop_parts(app: DrakkarApp, parts: frozenset[str], include_payloads: 
             app._config.split if runtime is not None else None,
             now_ms=int(time.time() * MS_PER_SECOND),
             now_s=time.monotonic(),
-            result_write_failures=int(split_result_write_failures._value.get()),
+            result_write_failures=int(counter_total(split_result_write_failures)),
         )
     if 'recent_failures' in parts:
         answer['recent_failures'] = await read_recent_failures(app._recorder, include_payloads=include_payloads)
