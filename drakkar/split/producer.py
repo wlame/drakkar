@@ -177,22 +177,75 @@ class SplitProducer:
 
         return on_delivery
 
+    def _started_client(self) -> tuple[asyncio.AbstractEventLoop, Any]:
+        """The loop and the client of a started producer.
+
+        Raises:
+            RuntimeError: the producer is not started, or it is closing.
+        """
+        loop, producer = self._loop, self._producer
+        if loop is None or producer is None or self._stopping.is_set():
+            raise RuntimeError('the split producer is not started')
+        return loop, producer
+
+    def _track(self, future: asyncio.Future[None]) -> asyncio.Future[None]:
+        """Keep the delivery future of a queued record until it ends, so ``close`` can fail what is left."""
+        self._unsettled.add(future)
+        future.add_done_callback(self._unsettled.discard)
+        return future
+
     async def enqueue(self, topic: str, record: WireRecord) -> asyncio.Future[None]:
         """Put ``record`` in the client queue and return its delivery future.
 
         Waits only while the client queue is full. A record the client refuses at once raises
         ``SplitProduceError``; a failed delivery ends the future with it.
         """
-        loop, producer = self._loop, self._producer
-        if loop is None or producer is None or self._stopping.is_set():
-            raise RuntimeError('the split producer is not started')
+        loop, producer = self._started_client()
         future: asyncio.Future[None] = loop.create_future()
         callback = self._delivery_callback(loop, future)
         async with self._enqueue_lock:
             await self._produce_when_room(producer, topic, record, callback)
-        self._unsettled.add(future)
-        future.add_done_callback(self._unsettled.discard)
-        return future
+        return self._track(future)
+
+    def enqueue_nowait(self, topic: str, record: WireRecord) -> asyncio.Future[None] | None:
+        """Put ``record`` in the client queue when it has room now; its delivery future, or None when it has none.
+
+        None also while another caller waits for room, so records keep their
+        order. A caller that gets None uses :meth:`enqueue`. A record the
+        client refuses for another reason raises ``SplitProduceError``.
+        """
+        loop, producer = self._started_client()
+        if self._enqueue_lock.locked():
+            return None
+        future: asyncio.Future[None] = loop.create_future()
+        try:
+            self._produce(producer, topic, record, self._delivery_callback(loop, future))
+        except BufferError:
+            return None
+        return self._track(future)
+
+    @staticmethod
+    def _produce(producer: Any, topic: str, record: WireRecord, callback: Callable[..., None]) -> None:
+        """Give the record to the client.
+
+        Raises:
+            BufferError: the client queue is full.
+            SplitProduceError: the client refuses the record.
+        """
+        try:
+            producer.produce(
+                topic=topic,
+                key=record.key,
+                value=record.value,
+                headers=list(record.headers),
+                partition=record.partition,
+                on_delivery=callback,
+            )
+        except KafkaException as exc:
+            error = exc.args[0] if exc.args else None
+            if isinstance(error, KafkaError):
+                raise _produce_error(error) from exc
+            raise SplitProduceError(str(exc), final=False) from exc
 
     async def _produce_when_room(
         self, producer: Any, topic: str, record: WireRecord, callback: Callable[..., None]
@@ -202,22 +255,10 @@ class SplitProducer:
             if self._stopping.is_set():
                 raise SplitProduceError(CLOSED_MESSAGE, final=False)
             try:
-                producer.produce(
-                    topic=topic,
-                    key=record.key,
-                    value=record.value,
-                    headers=list(record.headers),
-                    partition=record.partition,
-                    on_delivery=callback,
-                )
+                self._produce(producer, topic, record, callback)
                 return
             except BufferError:
                 await asyncio.sleep(BUFFER_FULL_WAIT_SECONDS)
-            except KafkaException as exc:
-                error = exc.args[0] if exc.args else None
-                if isinstance(error, KafkaError):
-                    raise _produce_error(error) from exc
-                raise SplitProduceError(str(exc), final=False) from exc
 
     async def publish(self, topic: str, record: WireRecord) -> None:
         """Enqueue ``record`` and wait for its delivery report."""

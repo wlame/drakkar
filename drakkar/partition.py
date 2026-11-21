@@ -661,6 +661,7 @@ class PartitionProcessor:
         down what is left of its budget instead of always paying the
         default.
         """
+        deadline = time.monotonic() + timeout
         self.signal_stop()
         if self._deliveries_suppressed:
             # Zombie path. These tasks already had the whole drain budget and
@@ -682,6 +683,11 @@ class PartitionProcessor:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        if self._owner is not None:
+            # The cancel of a split that was in progress: its generator is
+            # closed and its attempt marked as cancelled in the results log,
+            # in what is left of this stop's time. No drain waits for it.
+            await self._owner.stop(deadline - time.monotonic())
         # Cancelling ``_run`` above does not reach the task coroutines it
         # spawned — they are separate tasks. Anything still running here
         # would hold an executor slot and a subprocess with no owner left to
@@ -1383,27 +1389,17 @@ class PartitionProcessor:
     async def _begin_split(self, msg: SourceMessage, owner: SplitOwner) -> bool:
         """Let the owner decide what an accepted source message is; true for a local message, which runs here.
 
-        A job keeps its offset pending (the owner holds it). A job that the
-        results log has as closed completes its offset at once. So does one
-        whose split failed, unless the owner stalled the offset because its
-        DLQ record or its ``closed`` record could not be written. After a
-        stop no message is begun: its offset stays pending and leaves the
-        drain.
+        The owner settles the offset of every other message itself: it
+        holds the offset of a job, and completes or stalls the offset of a
+        closed job and of a failed split. After a stop no message is begun:
+        its offset stays pending and leaves the drain.
         """
         if self._stopping:
             self._abandoned_offsets.add(msg.offset)
             return False
         with self._request_ids.scope([msg.request_id]):
             outcome = await owner.begin(msg)
-        if outcome is BeginOutcome.LOCAL:
-            return True
-        completes = outcome is BeginOutcome.DONE or (
-            outcome is BeginOutcome.FAILED and msg.offset not in self._stalled_offsets
-        )
-        if completes:
-            self._offset_tracker.complete(msg.offset)
-            await self._note_commit_due()
-        return False
+        return outcome is BeginOutcome.LOCAL
 
     async def _reserve_local_messages(self, message_count: int) -> bool:
         """Wait for room in the pending budget and reserve the estimate of the local messages of a window.
@@ -1446,6 +1442,18 @@ class PartitionProcessor:
     def hold_job_offset(self, offset: int) -> None:
         """Keep the offset of an open job pending and out of every drain."""
         self._open_job_offsets.add(offset)
+
+    def complete_job_offset(self, offset: int) -> None:
+        """Complete the offset of a job that ended outside a task of this processor; the commit follows.
+
+        The commit goes through the coalescing timer, so an owner can call
+        this from a callback of the job tracker.
+        """
+        self._open_job_offsets.discard(offset)
+        self._offset_tracker.complete(offset)
+        offset_lag.labels(partition=str(self._partition_label)).set(self._offset_tracker.pending_count)
+        if not self._deliveries_suppressed and self._offset_tracker.uncommitted_advance() > 0:
+            self._schedule_commit_flush()
 
     async def stall_offset(self, offset: int) -> None:
         """Leave ``offset`` pending for the life of the process (see :meth:`_stall_offset`)."""

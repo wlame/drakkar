@@ -96,6 +96,16 @@ class LogEntry:
     body: dict[str, Any]
 
 
+def job_id(partition: int, offset: int, attempt: int) -> str:
+    """A job as log lines show it: ``<partition>:<offset>#<attempt>``."""
+    return f'{partition}:{offset}#{attempt}'
+
+
+def ref_id(ref: JobRef) -> str:
+    """The attempt ``ref`` as log lines show it."""
+    return job_id(ref.partition, ref.offset, ref.attempt)
+
+
 def new_attempt_id() -> str:
     """A fresh attempt id: 16 lower-case hex characters."""
     return secrets.token_hex(ATTEMPT_ID_BYTES)

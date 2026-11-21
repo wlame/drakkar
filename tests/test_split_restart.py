@@ -20,6 +20,7 @@ from drakkar import partition as partition_module
 from drakkar.consumer import KafkaConsumer
 from drakkar.metrics import split_jobs
 from drakkar.models import SourceMessage
+from drakkar.sources import kafka as kafka_module
 from drakkar.split.models import PartResult, SplitJob, SplitResultsUnavailable
 from drakkar.split.partmode import no_report
 from drakkar.split.records import JobRef, log_record, open_body, result_body
@@ -374,22 +375,29 @@ async def test_an_old_owner_that_reads_the_open_of_a_new_owner_cancels_its_split
     await old.stop()
 
 
-async def test_an_owner_that_waits_for_results_stands_down_for_the_attempt_of_another_owner():
+async def test_an_owner_that_waits_for_results_follows_the_attempt_of_another_instance():
     world = World()
     handler = SplittingHandler({500: items(1)}, answer=summary())
-    old = await OwnerWorker(world, handler).start(source_message(500))
+    worker = await OwnerWorker(world, handler).start(source_message(500))
     await wait_until(lambda: world.kinds() == ['open', 'split-done'])
-    await old.caught_up()
+    await worker.caught_up()
 
     world.put_open(500, SECOND, attempt=2, instance=NEW_INSTANCE)
     world.put(world.ref(500, SECOND, 2), 'split-done', {'parts': 1})
+    await worker.caught_up()
+    # A result of the attempt this owner wrote counts for nothing any more.
+    world.report_all()
+    await worker.caught_up()
+    assert handler.jobs == [] and worker.pending == 1
     world.put(world.ref(500, SECOND, 2), 'result', result_body(PartResult(index=0, worker='w', outcome='ok')))
-    await old.caught_up()
-    await asyncio.sleep(0.05)
+    await wait_until(lambda: worker.committed == 501)
 
-    # The job of the other owner is complete, and this owner does not end it.
-    assert handler.jobs == [] and world.closed() == [] and old.pending == 1
-    await old.stop()
+    # The holder of the message ends the job on the attempt that is current in the log.
+    [job] = handler.jobs
+    assert (job.job_id, job.attempt, job.received_parts) == ('3:500#2', 2, 1)
+    closed = world.entries()[-1]
+    assert (closed.kind, closed.ref.attempt_id) == ('closed', SECOND)
+    await worker.stop()
 
 
 # --- stop and revoke ---
@@ -402,7 +410,9 @@ async def test_a_stop_during_a_split_cancels_it_cleanly_and_the_offset_stays_pen
     await wait_until(lambda: world.kinds() == ['open'] and len(world.parts()) == 1)
 
     worker.processor.signal_stop()
-    await asyncio.wait_for(worker.processor.drain(), timeout=1)
+    # The drain does not wait for the cancel of the split: the stop of the processor does.
+    await asyncio.wait_for(worker.processor.drain(), timeout=0.2)
+    await asyncio.wait_for(worker.processor.stop(), timeout=1)
 
     # The generator was closed and the attempt is marked as cancelled, so it does not count as crashed.
     assert handler.closed_splits == 1
@@ -583,7 +593,7 @@ async def test_assign_revoke_assign_during_a_slow_restore_starts_the_processor_o
 
     await source.on_revoke([1])
     # The revoke dropped the partition from the tracker and the owner from the runtime.
-    assert runtime.tracker.table(1) is None and runtime._owners == {}
+    assert runtime.tracker.table(1) is None and runtime._events.owners() == {}
     await runtime.stop(deadline=0.0)
 
 
@@ -692,14 +702,15 @@ async def test_a_worker_with_the_feature_off_starts_its_processors_at_once_and_n
     await source.on_revoke([1])
 
 
-async def test_faults_of_the_source_consumer_around_a_restore_are_logged_and_the_processor_still_starts():
+async def test_faults_of_the_source_consumer_around_a_restore_are_logged_and_the_processor_still_starts(monkeypatch):
+    monkeypatch.setattr(kafka_module, 'RESTORE_RESUME_FIRST_WAIT_SECONDS', 0.01)
     app = split_app(SplittingHandler())
     runtime = await wired(app)
     source = app.kafka_source
     assert source is not None
     source.consumer.pause.side_effect = RuntimeError('pause refused')
     source.consumer.committed_offset.side_effect = RuntimeError('query refused')
-    source.consumer.resume.side_effect = RuntimeError('resume refused')
+    source.consumer.resume.side_effect = [RuntimeError('resume refused'), None]
 
     with capture_logs() as logs:
         source.on_assign([1])
@@ -713,8 +724,10 @@ async def test_faults_of_the_source_consumer_around_a_restore_are_logged_and_the
         ('split_restore_started', 'info'),
         ('split_restore_finished', 'info'),
     ]
+    # The resume that failed was tried again: a partition left paused would stop with no sign of it.
     [resume_failed] = events(logs, 'split_restore_resume_failed')
     assert (resume_failed['log_level'], resume_failed['partition']) == ('error', 1)
+    assert source.consumer.resume.await_count == 2
 
     async def broken_release(partition: int) -> None:
         raise RuntimeError('unassign refused')
@@ -724,6 +737,76 @@ async def test_faults_of_the_source_consumer_around_a_restore_are_logged_and_the
         await source.on_revoke([1])
     [release_failed] = events(logs, 'split_release_failed')
     assert (release_failed['log_level'], release_failed['partition']) == ('warning', 1)
+    await runtime.stop(deadline=0.0)
+
+
+async def test_a_revoke_cancels_the_retries_of_a_resume_after_a_restore(monkeypatch):
+    monkeypatch.setattr(kafka_module, 'RESTORE_RESUME_FIRST_WAIT_SECONDS', 30.0)
+    app = split_app(SplittingHandler())
+    runtime = await wired(app)
+    source = app.kafka_source
+    assert source is not None
+    source.consumer.resume.side_effect = RuntimeError('resume refused')
+    source.on_assign([1])
+    await wait_for(lambda: source.consumer.resume.await_count == 1, interval=0.001)
+    assert 1 in source._restore_tasks and source.restoring_partitions == set()
+
+    await asyncio.wait_for(source.on_revoke([1]), timeout=1)
+
+    assert source._restore_tasks == {} and source.processors == {}
+    await runtime.stop(deadline=0.0)
+
+
+async def test_a_failure_while_the_owner_of_a_restored_partition_is_built_takes_the_worker_out_of_rotation():
+    app = split_app(SplittingHandler())
+    runtime = await wired(app)
+    source = app.kafka_source
+    assert source is not None
+
+    def broken_owner_for(partition: int, **kwargs: Any) -> Any:
+        raise RuntimeError('no owner')
+
+    runtime.owner_for = broken_owner_for  # ty: ignore[invalid-assignment]
+    with capture_logs() as logs:
+        source.on_assign([1])
+        await wait_for(lambda: source._restore_tasks == {}, interval=0.001)
+
+    # Not left paused with no line: the partition is dead, and /readyz names it.
+    assert source.dead_partitions() == [1] and source.restoring_partitions == set()
+    assert source.processors[1]._task is None
+    [line] = events(logs, 'split_restore_task_failed')
+    assert (line['log_level'], line['error']) == ('critical', 'no owner')
+    await source.on_revoke([1])
+    await runtime.stop(deadline=0.0)
+
+
+async def test_a_revoke_waits_a_bounded_time_for_a_restore_that_does_not_end(monkeypatch):
+    monkeypatch.setattr(kafka_module, 'SPLIT_RELEASE_TIMEOUT_SECONDS', 0.05)
+    app = split_app(SplittingHandler())
+    runtime = await wired(app)
+    source = app.kafka_source
+    assert source is not None
+    stuck = asyncio.Event()
+
+    async def follow_that_ignores_its_cancel(partition: int, *, committed_source_offset: int | None) -> Any:
+        while not stuck.is_set():
+            try:
+                await stuck.wait()
+            except asyncio.CancelledError:
+                continue
+        raise asyncio.CancelledError
+
+    runtime.follow = follow_that_ignores_its_cancel  # ty: ignore[invalid-assignment]
+    source.on_assign([1])
+    await asyncio.sleep(0.01)
+
+    with capture_logs() as logs:
+        await asyncio.wait_for(source.on_revoke([1]), timeout=1)
+
+    [line] = events(logs, 'split_restore_cancel_slow')
+    assert (line['log_level'], line['partitions']) == ('warning', [1])
+    stuck.set()
+    await asyncio.sleep(0.01)
     await runtime.stop(deadline=0.0)
 
 

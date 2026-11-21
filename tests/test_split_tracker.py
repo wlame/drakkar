@@ -21,6 +21,7 @@ from drakkar.split.records import JobRef, closed_body, log_record, open_body, re
 from drakkar.split.table import JobState
 from drakkar.split.tracker import (
     CONSUMER_ERROR_PAUSE_SECONDS,
+    FOREIGN_SPLIT_GRACE_SECONDS,
     LOOP_RESTART_SECONDS,
     POSITION_COMMIT_SECONDS,
     TIMEOUT_CHECK_SECONDS,
@@ -62,6 +63,9 @@ class Writer:
         body = result_body(PartResult(index=index, worker='w2', outcome='ok'))
         return self.put(log_record(ref(offset, attempt_id), 'result', body))
 
+    def cancelled(self, offset: int, attempt_id: str = ATTEMPT_1) -> int:
+        return self.put(log_record(ref(offset, attempt_id), 'split-cancelled', {}))
+
     def closed(self, offset: int, attempt_id: str = ATTEMPT_1) -> int:
         body = closed_body(outcome='aggregated', received=1, parts=1, duration_seconds=1.0)
         return self.put(log_record(ref(offset, attempt_id), 'closed', body))
@@ -72,6 +76,8 @@ class Listener:
 
     def __init__(self, tracker_ref: Callable[[], JobTracker | None]) -> None:
         self.events: list[tuple[str, int, int, str | None]] = []
+        # What the tracker told about attempts and closes: name, partition, offset, attempt id, instance.
+        self.attempts: list[tuple[str, int, int, str, str]] = []
         self.restoring_at_event: list[bool] = []
         self._tracker_ref = tracker_ref
         self.fail = False
@@ -89,8 +95,22 @@ class Listener:
     def job_timed_out(self, partition: int, job: JobState, kind) -> None:
         self._record('timed_out', partition, job, kind)
 
-    def job_reopened_elsewhere(self, partition: int, job: JobState) -> None:
-        self._record('reopened', partition, job)
+    def _attempt(self, name: str, partition: int, job: JobState) -> None:
+        self.attempts.append((name, partition, job.offset, job.attempt_id, job.instance))
+        if self.fail:
+            raise RuntimeError('listener broke')
+
+    def attempt_opened(self, partition: int, job: JobState) -> None:
+        self._attempt('opened', partition, job)
+
+    def attempt_cancelled(self, partition: int, job: JobState) -> None:
+        self._attempt('cancelled', partition, job)
+
+    def attempt_stalled(self, partition: int, job: JobState) -> None:
+        self._attempt('stalled', partition, job)
+
+    def job_closed(self, partition: int, job: JobState) -> None:
+        self._attempt('closed', partition, job)
 
 
 class FakeSleep:
@@ -488,6 +508,7 @@ async def test_job_timed_out_once_for_each_kind():
     await h.t.start()
     try:
         h.writer.open(40)
+        h.writer.done(40, 3)
         await h.follow()
         await h.sleep.fire(TIMEOUT_CHECK_SECONDS)
         assert h.listener.events == []
@@ -510,6 +531,7 @@ async def test_a_closed_job_leaves_the_timeout_memory_and_the_gauges():
     await h.t.start()
     try:
         h.writer.open(40)
+        h.writer.done(40, 3)
         await h.follow()
         h.clock.advance(11_000)
         await h.sleep.fire(TIMEOUT_CHECK_SECONDS)
@@ -528,10 +550,12 @@ async def test_a_new_attempt_can_time_out_again():
     await h.t.start()
     try:
         h.writer.open(40)
+        h.writer.done(40, 3)
         await h.follow()
         h.clock.advance(11_000)
         await h.sleep.fire(TIMEOUT_CHECK_SECONDS)
         h.writer.open(40, attempt_id=ATTEMPT_2, attempt=2)
+        h.writer.done(40, 3, attempt_id=ATTEMPT_2)
         await settle()
         h.clock.advance(11_000)
         await h.sleep.fire(TIMEOUT_CHECK_SECONDS)
@@ -540,15 +564,59 @@ async def test_a_new_attempt_can_time_out_again():
         await h.t.stop()
 
 
-async def test_job_reopened_elsewhere_for_a_job_this_instance_had_open(harness):
+async def test_every_live_open_cancel_and_close_is_told_with_the_instance_of_the_attempt(harness):
+    harness.writer.open(39, instance=OTHER)
     await harness.follow()
     harness.writer.open(40, instance=ME)
-    harness.writer.open(41, instance=OTHER)
     harness.writer.open(40, instance=OTHER, attempt_id=ATTEMPT_2, attempt=2)
-    harness.writer.open(41, instance=ME, attempt_id=ATTEMPT_2, attempt=2)
-    await wait_until(lambda: harness.listener.events)
+    # A second open of the same attempt and a record of an old attempt change nothing.
+    harness.writer.open(40, instance=OTHER, attempt_id=ATTEMPT_2, attempt=2)
+    harness.writer.cancelled(40, attempt_id=ATTEMPT_1)
+    harness.writer.cancelled(40, attempt_id=ATTEMPT_2)
+    harness.writer.closed(40, attempt_id=ATTEMPT_2)
+    await wait_until(lambda: len(harness.listener.attempts) == 4)
     await settle()
-    assert harness.listener.events == [('reopened', PARTITION, 40, None)]
+    # Nothing is told for the open that the restore read.
+    assert harness.listener.attempts == [
+        ('opened', PARTITION, 40, ATTEMPT_1, ME),
+        ('opened', PARTITION, 40, ATTEMPT_2, OTHER),
+        ('cancelled', PARTITION, 40, ATTEMPT_2, OTHER),
+        ('closed', PARTITION, 40, ATTEMPT_2, OTHER),
+    ]
+    assert harness.listener.events == []
+
+
+async def test_a_split_of_another_instance_with_no_end_is_told_as_stalled_once_after_the_grace_time():
+    h = Harness(job_timeout=0, idle_timeout=3600)
+    await h.t.start()
+    try:
+        h.writer.open(40, instance=OTHER)
+        h.writer.open(41, instance=ME)
+        h.writer.open(42, instance=OTHER)
+        h.writer.done(42, 2)
+        h.writer.open(43, instance=OTHER)
+        h.writer.cancelled(43)
+        await h.follow()
+        h.clock.advance((FOREIGN_SPLIT_GRACE_SECONDS - 1) * 1000)
+        await h.sleep.fire(TIMEOUT_CHECK_SECONDS)
+        assert h.listener.attempts == []
+        h.clock.advance(1000)
+        await h.sleep.fire(TIMEOUT_CHECK_SECONDS)
+        await h.sleep.fire(TIMEOUT_CHECK_SECONDS)
+        # Not this instance's own split, not a split that ended, not one that was cancelled.
+        assert h.listener.attempts == [('stalled', PARTITION, 40, ATTEMPT_1, OTHER)]
+
+        # The grace time of a new attempt counts from its own open record.
+        h.writer.open(40, instance=OTHER, attempt_id=ATTEMPT_2, attempt=2)
+        await settle()
+        h.clock.advance((FOREIGN_SPLIT_GRACE_SECONDS - 1) * 1000)
+        await h.sleep.fire(TIMEOUT_CHECK_SECONDS)
+        assert [name for name, *_ in h.listener.attempts] == ['stalled', 'opened']
+        h.clock.advance(1000)
+        await h.sleep.fire(TIMEOUT_CHECK_SECONDS)
+        assert h.listener.attempts[-1] == ('stalled', PARTITION, 40, ATTEMPT_2, OTHER)
+    finally:
+        await h.t.stop()
 
 
 async def test_a_listener_that_raises_is_logged_and_the_tracker_goes_on(harness):
@@ -674,6 +742,7 @@ async def test_a_restoring_partition_is_left_out_of_commits_and_timeout_checks()
     try:
         h.log.append(TOPIC, PARTITION, key=b'x', value=b'not a record', headers=[])
         h.writer.open(40)
+        h.writer.done(40, 3)
         await h.follow()
         other = PARTITION + 1
         h.consumer.fail_next('committed', KafkaException(KafkaError(KafkaError._TRANSPORT)), times=10)

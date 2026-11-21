@@ -54,10 +54,15 @@ MIN_TEARDOWN_STEP_SECONDS = 0.5
 # How often the broker-lag gauge is refreshed from the cached watermarks.
 LAG_REFRESH_INTERVAL_SECONDS = 10.0
 
-# How long a revoke waits for the job tracker to drop one partition. The drop
-# only unassigns a partition of a consumer that reads no group; the bound
-# keeps a client that hangs from holding the rebalance callback.
+# How long a revoke waits for the job tracker to drop one partition, and for
+# cancelled restores to end. The drop only unassigns a partition of a consumer
+# that reads no group; the bound keeps a client that hangs from holding the
+# rebalance callback.
 SPLIT_RELEASE_TIMEOUT_SECONDS = 2.0
+
+# The waits between two tries to resume a restored partition whose resume failed.
+RESTORE_RESUME_FIRST_WAIT_SECONDS = 1.0
+RESTORE_RESUME_MAX_WAIT_SECONDS = 30.0
 
 # Seconds a group leave may take beyond ``executor.drain_timeout``: the revoke
 # drain has that bound, and the poll that runs the revoke needs a little more.
@@ -161,6 +166,7 @@ class KafkaSource:
         self.restoring_partitions: set[int] = set()
         # The restore of each such partition; a revoke or a stop cancels it.
         self._restore_tasks: dict[int, asyncio.Task[None]] = {}
+        self._restore_failure_log = RateLimitedLog(time.monotonic)
         self.consumer: KafkaConsumer | None = None
         self.background_tasks: set[asyncio.Task] = set()
         self._ready = False
@@ -849,12 +855,25 @@ class KafkaSource:
         the start of the processor there is no await, so a cancellation finds
         the processor either not started or started with its owner.
         """
-        consumer = self.consumer
         shown = self._shown(partition_id)
         try:
             await self._pause_for_restore(partition_id)
             committed = await self._committed_source_offset(partition_id)
             table = await runtime.follow(partition_id, committed_source_offset=committed)
+            ctx = self._context()
+            owner = runtime.owner_for(
+                partition_id,
+                table=table,
+                host=processor,
+                handler=ctx.handler,
+                sink_manager=ctx.sink_manager,
+                on_collect=ctx.on_collect,
+                on_dlq_failure=ctx.config.dlq.on_send_failure,
+                partition_label=shown,
+            )
+            processor.attach_split_owner(owner)
+            self.restoring_partitions.discard(partition_id)
+            processor.start()
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -870,34 +889,38 @@ class KafkaSource:
                 exc_info=error,
             )
             return
-        ctx = self._context()
-        owner = runtime.owner_for(
-            partition_id,
-            table=table,
-            host=processor,
-            handler=ctx.handler,
-            sink_manager=ctx.sink_manager,
-            on_collect=ctx.on_collect,
-            on_dlq_failure=ctx.config.dlq.on_send_failure,
-            partition_label=shown,
-        )
-        processor.attach_split_owner(owner)
-        self.restoring_partitions.discard(partition_id)
-        processor.start()
-        held = self.stalled_partitions | self.dead_partitions_paused
-        if consumer is None or self.paused or self._consume_pause.active or partition_id in held:
-            # Another pause still applies; whoever holds it resumes the partition.
-            return
-        try:
-            await consumer.resume([partition_id])
-        except Exception as error:
-            logger.error(
-                'split_restore_resume_failed',
-                category='split',
-                partition=shown,
-                error=describe_error(error),
-                exc_info=error,
-            )
+        await self._resume_after_restore(partition_id)
+
+    async def _resume_after_restore(self, partition_id: int) -> None:
+        """Resume the fetch of a restored partition; a resume that fails is tried again until it works.
+
+        A partition left paused with a running processor would stop with no
+        sign of it. The waits are 1, 2, 4 ... 30 seconds; a revoke or a stop
+        cancels them. When another pause applies to the partition, whoever
+        holds that pause resumes it.
+        """
+        wait = RESTORE_RESUME_FIRST_WAIT_SECONDS
+        while True:
+            held = self.stalled_partitions | self.dead_partitions_paused
+            other_pause = self.paused or self._consume_pause.active or partition_id in held
+            if self.consumer is None or other_pause or partition_id not in self.processors:
+                return
+            try:
+                await self.consumer.resume([partition_id])
+                return
+            except Exception as error:
+                suppressed = self._restore_failure_log.admit(f'resume:{partition_id}')
+                if suppressed is not None:
+                    logger.error(
+                        'split_restore_resume_failed',
+                        category='split',
+                        partition=self._shown(partition_id),
+                        error=describe_error(error),
+                        retry_seconds=wait,
+                        suppressed=suppressed,
+                    )
+            await asyncio.sleep(wait)
+            wait = min(wait * 2, RESTORE_RESUME_MAX_WAIT_SECONDS)
 
     async def _pause_for_restore(self, partition_id: int) -> None:
         """Pause the fetch of a restoring partition; a failure is logged, and what is fetched waits in its queue."""
@@ -935,13 +958,26 @@ class KafkaSource:
             return None
 
     async def _cancel_restores(self, partition_ids: list[int]) -> None:
-        """Cancel the restores of these partitions and wait for them to end."""
+        """Cancel the restores of these partitions and wait a bounded time for them to end.
+
+        A revoke calls this inside the rebalance callback, so the wait has a
+        time limit; a restore that does not end in it is logged and left to
+        end by itself.
+        """
         restores = [restore for pid in partition_ids if (restore := self._restore_tasks.pop(pid, None)) is not None]
         self.restoring_partitions.difference_update(partition_ids)
         for restore in restores:
             restore.cancel()
-        if restores:
-            await asyncio.gather(*restores, return_exceptions=True)
+        if not restores:
+            return
+        _, late = await asyncio.wait(restores, timeout=SPLIT_RELEASE_TIMEOUT_SECONDS)
+        if late:
+            logger.warning(
+                'split_restore_cancel_slow',
+                category='split',
+                partitions=[self._shown(pid) for pid in partition_ids],
+                waited_seconds=SPLIT_RELEASE_TIMEOUT_SECONDS,
+            )
 
     async def _release_split_partitions(self, partition_ids: list[int]) -> None:
         """Tell the job tracker to drop the revoked partitions and their job tables; a failure is logged."""
@@ -1014,7 +1050,7 @@ class KafkaSource:
             ctx.recorder.record_revoked([self._shown(pid) for pid in partition_ids])
         # First: a restore that ends now would start a processor of a partition that is gone.
         was_restoring = self.restoring_partitions.intersection(partition_ids)
-        if was_restoring:
+        if was_restoring or not self._restore_tasks.keys().isdisjoint(partition_ids):
             await self._cancel_restores(partition_ids)
         to_stop: list[PartitionProcessor] = []
         for pid in partition_ids:

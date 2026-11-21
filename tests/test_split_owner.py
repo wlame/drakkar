@@ -20,10 +20,10 @@ from drakkar.budget import BudgetAccount, PendingBudget
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.metrics import dlq_dropped_payloads, split_jobs, split_parts_published
 from drakkar.models import CollectResult, KafkaPayload
-from drakkar.split import owner as owner_module
 from drakkar.split import partmode
+from drakkar.split import splitting as splitting_module
+from drakkar.split.ending import MAX_RESULTS_RETRIES, RESULTS_RETRY_SECONDS
 from drakkar.split.models import JobAction, PartResult, SplitJob, SplitResultsUnavailable
-from drakkar.split.owner import MAX_RESULTS_RETRIES, RESULTS_RETRY_SECONDS
 from drakkar.split.records import LOG_HEADER_ORDER, PART_HEADER_ORDER, part_partition, result_body
 from drakkar.split.tracker import TIMEOUT_CHECK_SECONDS
 from drakkar.uiserver.runner import DebugRunner, ProbeInput
@@ -934,7 +934,7 @@ async def test_a_stop_before_the_local_messages_of_a_window_get_room_again_leave
 
 
 async def test_more_parts_than_the_log_can_number_fail_the_job(monkeypatch):
-    monkeypatch.setattr(owner_module, 'MAX_PART_INDEX', 1)
+    monkeypatch.setattr(splitting_module, 'MAX_PART_INDEX', 1)
     world = World()
     handler = SplittingHandler({500: items(3)})
     worker = await OwnerWorker(world, handler).start(source_message(500))
@@ -947,7 +947,7 @@ async def test_more_parts_than_the_log_can_number_fail_the_job(monkeypatch):
 
 
 async def test_a_split_waits_for_its_part_records_at_the_limit_of_unacknowledged_ones(monkeypatch):
-    monkeypatch.setattr(owner_module, 'MAX_UNACKED_PARTS', 2)
+    monkeypatch.setattr(splitting_module, 'MAX_UNACKED_PARTS', 2)
     world = World()
     handler = SplittingHandler({500: items(5)})
     worker = OwnerWorker(world, handler)
@@ -993,6 +993,7 @@ async def test_a_split_cancelled_record_that_cannot_be_written_is_logged_and_the
     with capture_logs() as logs:
         worker.processor.signal_stop()
         await asyncio.wait_for(worker.processor.drain(), timeout=1)
+        await worker.processor.stop()
 
     assert world.kinds() == ['open']
     [line] = [line for line in logs if line['event'] == 'split_cancel_write_failed']
@@ -1103,12 +1104,13 @@ async def test_a_stop_during_a_split_whose_client_queue_is_full_ends_within_the_
     worker = OwnerWorker(world, handler, client=client)
     await worker.start(source_message(500))
     assert worker.owner is not None
-    worker.owner._settings = dataclasses.replace(worker.owner._settings, cancel_write_seconds=0.05)
+    worker.owner._split_settings = dataclasses.replace(worker.owner._split_settings, cancel_write_seconds=0.05)
     await wait_until(lambda: client.produced == 1)
 
     with capture_logs() as logs:
         worker.processor.signal_stop()
         await asyncio.wait_for(worker.processor.drain(), timeout=1)
+        await asyncio.wait_for(worker.processor.stop(), timeout=1)
 
     # The split-cancelled record found no room in the client queue within its time limit.
     [line] = [line for line in logs if line['event'] == 'split_cancel_write_failed']
@@ -1134,6 +1136,7 @@ async def test_a_generator_that_fails_while_it_is_closed_is_logged_and_the_stop_
     with capture_logs() as logs:
         worker.processor.signal_stop()
         await asyncio.wait_for(worker.processor.drain(), timeout=1)
+        await worker.processor.stop()
 
     [line] = [line for line in logs if line['event'] == 'split_close_failed']
     assert (line['log_level'], line['error']) == ('error', 'cleanup broke')
@@ -1228,7 +1231,7 @@ async def test_nothing_is_delivered_for_a_job_once_the_processor_gave_its_partit
     await worker.stop()
 
 
-async def test_an_end_in_progress_is_cancelled_when_another_owner_opens_the_job():
+async def test_an_end_in_progress_runs_to_its_finish_when_another_instance_opens_the_job():
     world = World()
     gate = asyncio.Event()
 
@@ -1243,11 +1246,14 @@ async def test_an_end_in_progress_is_cancelled_when_another_owner_opens_the_job(
     await wait_until(lambda: len(handler.jobs) == 1)
 
     world.put_open(500, 'e' * 16, attempt=2, instance='b' * 16)
-    await wait_until(lambda: worker.processor._abandoned_offsets == {500})
+    await worker.caught_up()
     gate.set()
-    await asyncio.sleep(0.02)
+    await wait_until(lambda: worker.committed == 501)
 
-    assert worker.aggregate_sink.calls == 0 and world.closed() == [] and worker.commits == []
+    # A duplicate aggregate is allowed, a lost job is not: the end delivered, and closed the current attempt.
+    assert worker.aggregate_sink.calls == 1
+    closed = world.entries()[-1]
+    assert (closed.kind, closed.ref.attempt_id, closed.body['outcome']) == ('closed', 'e' * 16, 'aggregated')
     await worker.stop()
 
 
@@ -1280,17 +1286,16 @@ async def test_a_timeout_that_comes_with_the_last_acknowledgement_of_a_split_sti
     await worker.caught_up()
     owner, table = worker.owner, worker.table
     assert owner is not None and table is not None
-    enqueue = worker.runtime.producer.enqueue
+    enqueue_nowait = worker.runtime.producer.enqueue_nowait
 
-    async def enqueue_and_time_out(topic: str, record: Any) -> Any:
-        future = await enqueue(topic, record)
+    def enqueue_and_time_out(topic: str, record: Any) -> Any:
+        future = enqueue_nowait(topic, record)
         if dict(record.headers).get('dk-split-record') == b'split-done':
             # The tracker tells a timeout once; here it comes when no wait of the split is left to see it.
-            await future
-            owner.job_timed_out(table.job(500), 'job')
+            future.add_done_callback(lambda _: owner.job_timed_out(table.job(500), 'job'))
         return future
 
-    monkeypatch.setattr(worker.runtime.producer, 'enqueue', enqueue_and_time_out)
+    monkeypatch.setattr(worker.runtime.producer, 'enqueue_nowait', enqueue_and_time_out)
     gate.set()
     await wait_until(lambda: worker.committed == 501)
 

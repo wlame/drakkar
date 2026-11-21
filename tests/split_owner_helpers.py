@@ -303,6 +303,7 @@ class OwnerWorker:
         window_size: int = 10,
         budget: PendingBudget | None = None,
         client: FakeProducerClient | None = None,
+        executor_on_failure: str = 'skip',
     ) -> None:
         self.world = world
         self.handler = handler
@@ -363,6 +364,7 @@ class OwnerWorker:
             dlq_send=self.manager.send_parse_dlq,
             on_dlq_failure=on_send_failure,
             execute_dlq=self.manager.send_execute_dlq,
+            executor_on_failure=executor_on_failure,
             part_mode=part_mode,
             budget=budget,
         )
@@ -402,9 +404,18 @@ class OwnerWorker:
 
     async def start(self, *messages: SourceMessage) -> OwnerWorker:
         """Start the runtime, restore the partition as an assignment does, then start the processor."""
+        await self.restore()
+        return self.run(*messages)
+
+    async def restore(self) -> None:
+        """Start the runtime and restore the job table of the partition; no owner exists yet."""
         await self.runtime.start()
         committed = self.world.log.committed(GROUP, SOURCE_TOPIC, PARTITION)
         self.table = await self.runtime.follow(PARTITION, committed_source_offset=committed)
+
+    def run(self, *messages: SourceMessage) -> OwnerWorker:
+        """Build the owner on the restored table and start the processor."""
+        assert self.table is not None
         self.owner = self.runtime.owner_for(
             PARTITION,
             table=self.table,

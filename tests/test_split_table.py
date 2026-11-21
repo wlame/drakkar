@@ -366,6 +366,7 @@ def test_job_timeout_counts_from_the_first_open_also_after_a_second_attempt(log)
 
 def test_idle_timeout_counts_from_the_last_new_result(log):
     log.put(open_entry(ref()))
+    log.put(done_entry(ref(), 3))
     log.put(result_entry(ref(), 0), after_ms=1_000)
     progress = log.ms
     log.put(result_entry(ref(), 0), after_ms=4_000)
@@ -374,6 +375,34 @@ def test_idle_timeout_counts_from_the_last_new_result(log):
     assert table.due(now_ms=progress + 4_999, job_timeout=0, idle_timeout=5) == []
     due = table.due(now_ms=progress + 5_000, job_timeout=0, idle_timeout=5)
     assert [(job.offset, kind) for job, kind in due] == [(JOB, 'idle')]
+
+
+def test_idle_timeout_does_not_run_before_split_done(log):
+    log.put(open_entry(ref()))
+    log.put(result_entry(ref(), 0), after_ms=1_000)
+    # The split still publishes parts: only the job timeout can fire.
+    assert log.table.due(now_ms=log.ms + 10**6, job_timeout=0, idle_timeout=5) == []
+    assert [kind for _, kind in log.table.due(now_ms=log.ms + 10**6, job_timeout=10, idle_timeout=5)] == ['job']
+    log.put(done_entry(ref(), 2), after_ms=1_000)
+    assert log.table.due(now_ms=log.ms + 4_999, job_timeout=0, idle_timeout=5) == []
+    assert [kind for _, kind in log.table.due(now_ms=log.ms + 5_000, job_timeout=0, idle_timeout=5)] == ['idle']
+
+
+def test_a_complete_job_is_never_due(log):
+    log.put(open_entry(ref()))
+    log.put(done_entry(ref(), 1))
+    log.put(result_entry(ref(), 0))
+    assert log.table.job(JOB).is_complete
+    assert log.table.due(now_ms=log.ms + 10**9, job_timeout=10, idle_timeout=5) == []
+
+
+def test_the_open_time_of_the_current_attempt_moves_with_each_attempt(log):
+    log.put(open_entry(ref()), after_ms=0)
+    first = log.ms
+    assert log.table.job(JOB).attempt_opened_at_ms == first
+    log.put(open_entry(ref(attempt=2, attempt_id=ATTEMPT_2)), after_ms=5_000)
+    job = log.table.job(JOB)
+    assert (job.opened_at_ms, job.attempt_opened_at_ms) == (first, first + 5_000)
 
 
 def test_split_done_counts_as_progress(log):

@@ -4,7 +4,8 @@ One consumer without group membership reads, for each followed source partition,
 the results partition with the same number. After an assignment it restores the
 job table of the partition from the committed position up to the end it saw at
 that moment, and sends no event while it does; then it reads live and tells its
-listener when a job is complete, timed out, or opened again by another worker.
+listener when a job is complete, timed out or closed, and when an attempt of a
+job is opened, cancelled, or shows no end of its split for too long.
 The positions are committed under a group id that never has members. The tracker
 calls no handler hook itself.
 """
@@ -51,6 +52,14 @@ RESTORE_END_CHECK_SECONDS = 1.0
 # Kafka gives a record without a known time the timestamp -1.
 NO_TIMESTAMP = -1
 
+# How long the split of another worker instance may show no ``split-done`` and no
+# ``split-cancelled`` before the worker that holds the message of the job takes it
+# for dead. A live owner writes one of the two; one that died wrote neither, and
+# only its timeout would end the job. A constant, the same on every worker: two
+# owners that judge one attempt must agree. It is long, because a healthy split of
+# a large message takes minutes, and taking it over too early runs its parts twice.
+FOREIGN_SPLIT_GRACE_SECONDS = 300
+
 TimeoutKind = Literal['job', 'idle']
 SleepFn = Callable[[float], Awaitable[None]]
 
@@ -64,8 +73,17 @@ class JobEvents(Protocol):
     def job_timed_out(self, partition: int, job: JobState, kind: TimeoutKind) -> None:
         """``job`` passed its job timeout (``job``) or its idle timeout (``idle``)."""
 
-    def job_reopened_elsewhere(self, partition: int, job: JobState) -> None:
-        """Another worker instance started a new attempt of a job this worker had open."""
+    def attempt_opened(self, partition: int, job: JobState) -> None:
+        """An ``open`` record made a new attempt the current one of ``job``; ``job.instance`` wrote it."""
+
+    def attempt_cancelled(self, partition: int, job: JobState) -> None:
+        """The current attempt of ``job`` got ``split-cancelled``."""
+
+    def attempt_stalled(self, partition: int, job: JobState) -> None:
+        """The current attempt of ``job``, of another instance, shows no end of its split after the grace time."""
+
+    def job_closed(self, partition: int, job: JobState) -> None:
+        """``job`` got its ``closed`` record."""
 
 
 @dataclass
@@ -97,6 +115,8 @@ class _Followed:
     restore_task: asyncio.Task[JobTable] | None = None
     last_committed_position: int | None = None
     timed_out: set[tuple[int, str, TimeoutKind]] = field(default_factory=set)
+    # The attempts already reported as stalled: source offset and attempt id.
+    stalled: set[tuple[int, str]] = field(default_factory=set)
 
 
 def _timestamp_ms(message: Any, fallback_ms: int) -> int:
@@ -573,7 +593,6 @@ class JobTracker:
 
     def _apply_live(self, state: _Followed, entry: LogEntry, offset: int, message: Any) -> None:
         """Apply a live record and send the events it causes."""
-        held_here = self._held_by_this_instance(state, entry)
         applied = self._apply(state, entry, offset, message)
         if applied.ignored is not None:
             split_results_ignored.labels(reason=applied.ignored.value).inc()
@@ -582,20 +601,16 @@ class JobTracker:
         job = cast(JobState, applied.job)
         if entry.kind == 'result':
             split_results_received.inc()
+        if applied.opened:
+            self._emit('attempt_opened', state.partition, job)
+        if entry.kind == 'split-cancelled':
+            self._emit('attempt_cancelled', state.partition, job)
         if applied.completed:
             self._emit('job_complete', state.partition, job)
-        if applied.opened and held_here and job.instance != self._instance:
-            self._emit('job_reopened_elsewhere', state.partition, job)
         if applied.closed:
             self._forget_job_timeouts(state, job.offset)
+            self._emit('job_closed', state.partition, job)
             self._retire_stray_closed(state, job)
-
-    def _held_by_this_instance(self, state: _Followed, entry: LogEntry) -> bool:
-        """True when ``entry`` is an ``open`` of a job that is open under this tracker's instance."""
-        if entry.kind != 'open':
-            return False
-        job = state.table.job(entry.ref.offset)
-        return job is not None and job.closed is None and job.instance == self._instance
 
     def _retire_stray_closed(self, state: _Followed, job: JobState) -> None:
         """A ``closed`` of a job below the committed source offset must not hold the position back."""
@@ -662,7 +677,11 @@ class JobTracker:
     # --- timeouts ---
 
     async def _check_timeouts(self) -> None:
-        """Send ``job_timed_out`` once per job, attempt and kind; set the job gauges from the live tables."""
+        """Send ``job_timed_out`` once per job, attempt and kind; set the job gauges from the live tables.
+
+        The same pass sends ``attempt_stalled`` once for each attempt of
+        another instance that shows no end of its split after the grace time.
+        """
         now_ms = int(self._clock() * MS_PER_SECOND)
         open_count = 0
         oldest_ms: int | None = None
@@ -682,14 +701,27 @@ class JobTracker:
                     continue
                 state.timed_out.add(key)
                 self._emit('job_timed_out', state.partition, job, kind)
+            state.stalled &= current
+            for job in open_jobs:
+                attempt = (job.offset, job.attempt_id)
+                if attempt not in state.stalled and self._is_stalled(job, now_ms):
+                    state.stalled.add(attempt)
+                    self._emit('attempt_stalled', state.partition, job)
         split_jobs_open.set(open_count)
         split_oldest_job_age.set(0 if oldest_ms is None else max(now_ms - oldest_ms, 0) / MS_PER_SECOND)
+
+    def _is_stalled(self, job: JobState, now_ms: int) -> bool:
+        """Whether the current attempt of ``job`` is a split of another instance that is taken for dead."""
+        splitting = job.parts is None and not job.cancelled
+        waited_ms = now_ms - job.attempt_opened_at_ms
+        return splitting and job.instance != self._instance and waited_ms >= FOREIGN_SPLIT_GRACE_SECONDS * MS_PER_SECOND
 
     def _forget_job_timeouts(self, state: _Followed, offset: int) -> None:
         state.timed_out = {key for key in state.timed_out if key[0] != offset}
 
     def _forget_retired_timeouts(self, state: _Followed) -> None:
         state.timed_out = {key for key in state.timed_out if state.table.job(key[0]) is not None}
+        state.stalled = {key for key in state.stalled if state.table.job(key[0]) is not None}
 
     # --- helpers ---
 

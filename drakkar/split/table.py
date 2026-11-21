@@ -63,6 +63,8 @@ class JobState:
     first_open_offset: int
     opened_at_ms: int
     last_progress_ms: int
+    # The time of the ``open`` record of the current attempt; ``opened_at_ms`` is that of the first attempt.
+    attempt_opened_at_ms: int = 0
     parts: int | None = None
     received_count: int = 0
     failed_parts: int = 0
@@ -124,6 +126,7 @@ class JobState:
         self.instance = instance
         self.request_id = request_id
         self.last_progress_ms = timestamp_ms
+        self.attempt_opened_at_ms = timestamp_ms
         self.parts = None
         self.received_count = 0
         self.failed_parts = 0
@@ -236,12 +239,24 @@ class JobTable:
         return min((job.first_open_offset for job in self._jobs.values()), default=next_offset)
 
     def due(self, *, now_ms: int, job_timeout: int, idle_timeout: int) -> list[tuple[JobState, DueKind]]:
-        """The open jobs past a timeout, in seconds (``0`` is off); the job timeout wins over the idle one."""
+        """The open jobs past a timeout, in seconds (``0`` is off); the job timeout wins over the idle one.
+
+        A job whose every part has a result is never due: it only waits for
+        its owner to end it. The idle timeout counts from ``split-done`` and
+        from each new result, so it does not run while the split still
+        publishes parts.
+        """
         found: list[tuple[JobState, DueKind]] = []
         for job in self.open_jobs():
+            if job.is_complete:
+                continue
             if job_timeout > 0 and now_ms - job.opened_at_ms >= job_timeout * MS_PER_SECOND:
                 found.append((job, 'job'))
-            elif idle_timeout > 0 and now_ms - job.last_progress_ms >= idle_timeout * MS_PER_SECOND:
+            elif (
+                idle_timeout > 0
+                and job.parts is not None
+                and now_ms - job.last_progress_ms >= idle_timeout * MS_PER_SECOND
+            ):
                 found.append((job, 'idle'))
         return found
 
@@ -266,6 +281,7 @@ class JobTable:
                 first_open_offset=offset,
                 opened_at_ms=timestamp_ms,
                 last_progress_ms=timestamp_ms,
+                attempt_opened_at_ms=timestamp_ms,
             )
             self._jobs[job.offset] = job
         else:
