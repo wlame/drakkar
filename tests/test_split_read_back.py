@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import gc
 
 import pytest
 from confluent_kafka import KafkaError, KafkaException
@@ -211,12 +212,20 @@ async def test_a_split_cancelled_record_whose_report_names_no_offset_is_still_wa
     await worker.stop()
 
 
-async def complete_job_with_a_held_tracker(worker: OwnerWorker) -> asyncio.Event:
-    """Split message 500, report its part, and hold the tracker back just as the end of the job starts."""
+async def complete_job_with_a_held_tracker(worker: OwnerWorker, *, end_read_failures: int = 0) -> asyncio.Event:
+    """Split message 500, report its part, and hold the tracker back just as the end of the job starts.
+
+    The next ``end_read_failures`` reads of the end of the results log fail.
+    """
     world = worker.world
     await worker.start(source_message(500))
     await wait_until(lambda: world.kinds() == ['open', 'split-done'])
     await worker.caught_up()
+    if end_read_failures:
+        # In place before the job can end: the owner reads the end right after its closed record.
+        [consumer] = worker.tracker_consumers
+        failure = KafkaException(KafkaError(KafkaError._TRANSPORT))
+        consumer.fail_next('get_watermark_offsets', failure, times=end_read_failures)
     world.report_all()
     await worker.caught_up()
     return worker.hold_tracker_reads()
@@ -291,11 +300,10 @@ async def test_a_failed_read_of_the_end_of_the_log_is_tried_again():
     handler = SplittingHandler({500: items(1)}, answer=summary())
     worker = OwnerWorker(world, handler)
     worker.hide_offsets_of('closed')
-    released = await complete_job_with_a_held_tracker(worker)
-    [consumer] = worker.tracker_consumers
-    consumer.fail_next('get_watermark_offsets', KafkaException(KafkaError(KafkaError._TRANSPORT)), times=2)
 
+    # The first read can fail as soon as the closed record is acknowledged.
     with capture_logs() as logs:
+        released = await complete_job_with_a_held_tracker(worker, end_read_failures=2)
         await worker.sleep.fire(owner_module.END_OFFSET_RETRY_FIRST_SECONDS)
         await worker.sleep.fire(owner_module.END_OFFSET_RETRY_FIRST_SECONDS * 2)
         released.set()
@@ -314,9 +322,8 @@ async def test_a_stop_while_the_end_of_the_log_cannot_be_read_leaves_the_offset_
     handler = SplittingHandler({500: items(1)}, answer=summary())
     worker = OwnerWorker(world, handler)
     worker.hide_offsets_of('closed')
-    await complete_job_with_a_held_tracker(worker)
+    await complete_job_with_a_held_tracker(worker, end_read_failures=50)
     [consumer] = worker.tracker_consumers
-    consumer.fail_next('get_watermark_offsets', KafkaException(KafkaError(KafkaError._TRANSPORT)), times=50)
     await wait_until(lambda: worker.sleep.waiting(owner_module.END_OFFSET_RETRY_FIRST_SECONDS))
 
     await asyncio.wait_for(worker.stop(), timeout=2)
@@ -324,6 +331,110 @@ async def test_a_stop_while_the_end_of_the_log_cannot_be_read_leaves_the_offset_
     assert worker.owner is not None and worker.owner._jobs[500].own_unplaced
     assert worker.commits == [] and worker.pending == 1 and len(handler.jobs) == 1
     assert consumer._failures['get_watermark_offsets']
+
+
+def hold_end_reads(worker: OwnerWorker) -> asyncio.Event:
+    """Make every read of the end of the results log by the owner wait until the returned event is set."""
+    owner = worker.owner
+    assert owner is not None
+    read_end = owner._settings.end_offset
+    released = asyncio.Event()
+
+    async def held_end(partition: int) -> int | None:
+        await released.wait()
+        return await read_end(partition)
+
+    owner._settings = dataclasses.replace(owner._settings, end_offset=held_end)
+    return released
+
+
+@pytest.mark.parametrize('event', ['timeout', 'cancelled'])
+async def test_nothing_is_decided_while_the_end_of_the_log_is_read_for_records_without_an_offset(event):
+    world = World()
+    world.put_open(500, FIRST, instance=NEW_INSTANCE)
+    world.put(world.ref(500, FIRST), 'split-cancelled', {})
+    world.clock.advance(30_000)
+    handler = SplittingHandler({500: items(1)}, answer=summary())
+    worker = OwnerWorker(world, handler, config=owner_config(job_timeout='1m'))
+    worker.hide_offsets_of('open', 'split-done')
+    await worker.restore()
+    tracker_released = worker.hold_tracker_reads()
+    worker.run(source_message(500))
+    end_released = hold_end_reads(worker)
+    assert worker.owner is not None and worker.table is not None
+    await wait_until(lambda: world.kinds()[-1] == 'split-done')
+    await wait_until(lambda: 500 in worker.owner._jobs and worker.owner._jobs[500].catching_up)
+    held = worker.owner._jobs[500]
+    # No offset of the own attempt is known, and the end of the log is not read yet.
+    assert held.own_written_through == -1 and held.own_unplaced == 1
+    assert not worker.owner._table_has_own_records(held)
+
+    # The table still ends at the cancelled attempt of the other instance. An event about it must
+    # start neither the end of the job on that attempt nor a second split.
+    if event == 'timeout':
+        world.clock.advance(40_000)
+        await worker.sleep.fire(TIMEOUT_CHECK_SECONDS)
+    else:
+        worker.owner.attempt_cancelled(worker.table.job(500))
+    await asyncio.sleep(0.1)
+    assert handler.timeouts == [] and closed_records(world) == []
+    assert handler.split_calls == [500] and world.kinds().count('open') == 2
+
+    end_released.set()
+    tracker_released.set()
+    await worker.caught_up()
+    if event == 'timeout':
+        await worker.sleep.fire(TIMEOUT_CHECK_SECONDS)
+    else:
+        world.report_all(world.parts(attempt=2))
+    await wait_until(lambda: worker.committed == 501)
+    assert handler.split_calls == [500] and world.kinds().count('open') == 2
+    hooks = [(job.attempt, 'timeout') for job in handler.timeouts] + [(job.attempt, 'ok') for job in handler.jobs]
+    assert hooks == [(2, 'timeout' if event == 'timeout' else 'ok')]
+    [closed] = closed_records(world)
+    assert closed.ref.attempt == 2 and held.own_unplaced == 0
+    await worker.stop()
+
+
+async def test_an_error_of_the_wait_between_two_reads_of_the_end_is_raised_and_the_job_stays_gated():
+    world = World()
+    gate = asyncio.Event()
+    handler = SplittingHandler({500: [Item(n=0), gate]}, answer=summary())
+    worker = OwnerWorker(world, handler)
+    worker.hide_offsets_of('split-done')
+    await worker.start(source_message(500))
+    await wait_until(lambda: world.kinds() == ['open'] and len(world.parts()) == 1)
+    await worker.caught_up()
+    assert worker.owner is not None
+    [consumer] = worker.tracker_consumers
+    consumer.fail_next('get_watermark_offsets', KafkaException(KafkaError(KafkaError._TRANSPORT)))
+
+    async def broken_sleep(seconds: float) -> None:
+        raise RuntimeError('no timer')
+
+    worker.owner._settings = dataclasses.replace(worker.owner._settings, sleep=broken_sleep)
+    unread: list[dict] = []
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(lambda _, context: unread.append(context))
+
+    with capture_logs() as logs:
+        gate.set()
+        await wait_until(lambda: len(events(logs, 'split_owner_task_failed')) == 1)
+        gc.collect()
+        await asyncio.sleep(0.05)
+
+    # The error ended the task that waited, and it was read there.
+    [failed] = events(logs, 'split_owner_task_failed')
+    assert 'no timer' in failed['error'] and unread == []
+    held = worker.owner._jobs[500]
+    assert held.own_unplaced == 1 and not held.catching_up and not worker.owner._table_has_own_records(held)
+
+    # The next event of the job reads the end again, and the job goes on.
+    worker.owner._settings = dataclasses.replace(worker.owner._settings, sleep=worker.sleep)
+    world.report_all()
+    await wait_until(lambda: worker.committed == 501)
+    assert handler.split_calls == [500] and len(handler.jobs) == 1
+    await worker.stop()
 
 
 # --- the wait for the tracker ---

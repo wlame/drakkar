@@ -195,9 +195,9 @@ class _HeldJob:
     # acknowledged (``open``, ``split-done``, ``split-cancelled``, ``closed``); -1 for none. The owner
     # decides about the job only on a table that has read past it.
     own_written_through: int = -1
-    # Whether the log holds a record of this owner for the job whose delivery report named no offset,
-    # and that ``own_written_through`` does not cover yet.
-    own_unplaced: bool = False
+    # How many acknowledgements of this owner for the job named no offset and are not covered by
+    # ``own_written_through`` yet. While it is above 0 the owner decides nothing about the job.
+    own_unplaced: int = 0
     # Whether a task waits for the job tracker to read past ``own_written_through``.
     catching_up: bool = False
     # What this owner does for the job now; at most one of the three.
@@ -512,19 +512,19 @@ class SplitOwner:
         offset before it stands for the record: once the tracker has read
         past it, the table has the record. False when the owner stopped
         before the end could be read; the records are then still unplaced.
+
+        The count goes down only after the bound is stored, so the rules of
+        a holder stay off for the job during the read and its retries. A
+        record that is acknowledged during a read may lie above the end
+        that was read; it is counted on top, and the end is read once more.
         """
         while held.own_unplaced:
-            # Cleared first: a record that is acknowledged during the read sets it again.
-            held.own_unplaced = False
-            end: int | None = None
-            try:
-                end = await self._end_of_log()
-            finally:
-                if end is None:
-                    held.own_unplaced = True
+            waiting = held.own_unplaced
+            end = await self._end_of_log()
             if end is None:
                 return False
             held.own_written_through = max(held.own_written_through, end - 1)
+            held.own_unplaced -= waiting
         return True
 
     async def _end_of_log(self) -> int | None:
@@ -553,7 +553,10 @@ class SplitOwner:
                     suppressed=suppressed,
                     hint='the end of the results log is read again; the jobs of the partition wait for it',
                 )
-            await self._unless_stopped(self._settings.sleep(wait))
+            slept = await self._unless_stopped(self._settings.sleep(wait))
+            if slept is not None:
+                # An error of the wait is raised here; it is never left unread in its task.
+                slept.result()
             wait = min(wait * 2, END_OFFSET_RETRY_MAX_SECONDS)
         return None
 
@@ -798,7 +801,9 @@ class SplitOwner:
             held.run = None
             self._runs.discard(run)
         held.own_written_through = max(held.own_written_through, result.written_through)
-        held.own_unplaced = held.own_unplaced or result.unplaced_record
+        if result.unplaced_record:
+            # One bound covers every record of the run: they were all acknowledged before it is read.
+            held.own_unplaced += 1
         is_held = self._jobs.get(offset) is held
         if result.end is SplitEnd.LOCAL and held.base_ref is None:
             return BeginOutcome.LOCAL
@@ -1011,7 +1016,7 @@ class SplitOwner:
         offset = held.message.offset
         if record is not None:
             if record.offset == NO_OFFSET:
-                held.own_unplaced = True
+                held.own_unplaced += 1
                 if not await self._place_own_records(held):
                     return _Settled.STOPPED
             else:

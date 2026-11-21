@@ -100,7 +100,8 @@ second. The same holds for every record the owner writes for a job: it
 decides the next step of the job only when its job tracker has read that
 record back. When a delivery report names no offset for a record, the owner
 reads the end of the results topic after the report and waits until its job
-tracker has read up to that end. A wait that lasts 30 seconds is logged
+tracker has read up to that end; it decides nothing about the job while that
+read is in progress. A wait that lasts 30 seconds is logged
 (`split_read_back_waiting`), then at most once a minute for each partition.
 The partition does not wait with the owner: after a split that failed, the
 owner writes the DLQ record and the `closed` record, the partition takes its

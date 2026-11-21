@@ -247,7 +247,9 @@ parametrize).
     rule that ran before would take the owner's own new attempt for missing.
     A delivery report with no offset is never read as "nothing to wait for":
     the owner reads the end of the log after the report
-    (`JobTracker.end_offset`) and waits for the table to reach it. The
+    (`JobTracker.end_offset`) and waits for the table to reach it, and it
+    decides nothing about the job from the report until that end is stored
+    (the read can take seconds and is tried again when it fails). The
     partition loop never waits for the tracker: `begin` returns once the
     records of a failed job are written, and a task of the owner settles
     the offset.
