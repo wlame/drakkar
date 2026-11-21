@@ -379,6 +379,70 @@ attach_total = Counter(
     ['cause'],
 )
 
+# --- Split: messages cut into parts that run on many workers ---
+# These series exist for a worker with ``split.enabled`` only; the ``outcome``
+# and ``reason`` values are listed in the agent registry.
+
+split_jobs_open = Gauge(
+    'drakkar_split_jobs_open',
+    'Split jobs this worker owns that are not closed',
+)
+
+split_oldest_job_age = Gauge(
+    'drakkar_split_oldest_job_age_seconds',
+    'Age in seconds of the oldest open split job this worker owns, 0 when there is none',
+)
+
+split_restoring_partitions = Gauge(
+    'drakkar_split_restoring_partitions',
+    'Source partitions that wait for the restore of their split jobs',
+)
+
+split_jobs = Counter(
+    'drakkar_split_jobs_total',
+    'Split jobs ended, by outcome',
+    ['outcome'],
+)
+
+split_job_duration = Histogram(
+    'drakkar_split_job_duration_seconds',
+    'Seconds from the open record of a split job to its end',
+    buckets=(1, 5, 15, 60, 300, 900, 3600, 14400, 43200, 86400),
+)
+
+split_parts_published = Counter(
+    'drakkar_split_parts_published_total',
+    'Parts published to the parts topic',
+)
+
+split_parts_processed = Counter(
+    'drakkar_split_parts_processed_total',
+    'Parts this worker ran, by outcome',
+    ['outcome'],
+)
+
+split_results_received = Counter(
+    'drakkar_split_results_received_total',
+    'Part results counted by the job tracker',
+)
+
+split_results_ignored = Counter(
+    'drakkar_split_results_ignored_total',
+    'Records of the results topic the job tracker ignored, by reason',
+    ['reason'],
+)
+
+split_result_write_failures = Counter(
+    'drakkar_split_result_write_failures_total',
+    'Failed attempts to write a part result',
+)
+
+split_restore_duration = Histogram(
+    'drakkar_split_restore_duration_seconds',
+    'Seconds to restore the split jobs of one source partition',
+    buckets=(0.05, 0.25, 1, 5, 15, 60, 300),
+)
+
 total_queued = Gauge(
     'drakkar_total_queued',
     'Total messages buffered in partition queues plus in-flight tasks',

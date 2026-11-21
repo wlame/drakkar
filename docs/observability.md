@@ -173,6 +173,24 @@ Prometheus needed for a quick read.
 | `drakkar_executor_idle_slot_seconds_total` | Counter | -- | Accumulated slot-seconds of executor idle time while messages are waiting in queues. If 2 slots sit idle for 3 seconds while messages are queued, this increments by 6. Only counts when messages are in queues (not yet dispatched), not when the worker has nothing to do. |
 | `drakkar_consumer_idle_seconds_total` | Counter | -- | Accumulated seconds with no messages available from Kafka and nothing in queues. Measures time the worker has genuinely nothing to do (consumer lag is zero). Does not count time when the consumer is paused due to backpressure, or time out of the consumer group after a [detach](detach.md). |
 
+#### Split
+
+These metrics exist only for a worker with `split.enabled`.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `drakkar_split_jobs_open` | Gauge | -- | Split jobs this worker owns that are not closed |
+| `drakkar_split_oldest_job_age_seconds` | Gauge | -- | Age in seconds of the oldest open split job this worker owns, `0` when there is none |
+| `drakkar_split_restoring_partitions` | Gauge | -- | Source partitions that wait for the restore of their split jobs |
+| `drakkar_split_jobs_total` | Counter | `outcome` | Split jobs ended, by outcome: `aggregated`, `dlq`, `timeout`, `split_failed`, `attempts_spent`, `orphaned`, `superseded`, `local` |
+| `drakkar_split_job_duration_seconds` | Histogram | -- | Seconds from the open record of a split job to its end. Buckets 1, 5, 15, 60, 300, 900, 3600, 14400, 43200, 86400 |
+| `drakkar_split_parts_published_total` | Counter | -- | Parts published to the parts topic |
+| `drakkar_split_parts_processed_total` | Counter | `outcome` | Parts this worker ran, by outcome: `ok`, `failed` |
+| `drakkar_split_results_received_total` | Counter | -- | Part results counted by the job tracker |
+| `drakkar_split_results_ignored_total` | Counter | `reason` | Records of the results topic the job tracker ignored, by reason: `duplicate`, `old_attempt`, `closed_job`, `unknown_job`, `foreign_group` |
+| `drakkar_split_result_write_failures_total` | Counter | -- | Failed attempts to write a part result |
+| `drakkar_split_restore_duration_seconds` | Histogram | -- | Seconds to restore the split jobs of one source partition. Buckets 0.05, 0.25, 1, 5, 15, 60, 300 |
+
 #### Consumer
 
 | Metric | Type | Labels | Description |

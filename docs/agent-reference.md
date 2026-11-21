@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `f7c86eadf0b78db0`.
+Registry version: `9e03d6d1138ba068`.
 
 ## Concepts
 
@@ -514,6 +514,46 @@ The longest time between two polls before Kafka evicts the consumer.
 **Advice:** Keep it larger than executor.drain_timeout, because a revoke waits for the drain inside the rebalance.
 
 **Related:** `concept:at-least-once`
+
+### `config:split.enabled`
+
+Whether messages of the Kafka source may be cut into parts that run on every worker and are put together again.
+
+**Advice:** Turn it on only with the Kafka source on; the parts and results topics must exist and live longer than the longest job.
+
+**Related:** `config:split.aggregate_sinks`, `config:split.job_timeout`
+
+### `config:split.aggregate_sinks`
+
+The sinks of the aggregate stage, each written type/name; every other sink is a part sink.
+
+**Advice:** Name the sinks that receive the one result of a whole message; a sink depends only on sinks of its own stage.
+
+**Related:** `config:split.enabled`
+
+### `config:split.job_timeout`
+
+The longest time a job may run, from 1m to 30d; 0 means no limit.
+
+**Advice:** Set it above the longest expected job; with 0 the idle_timeout must be set.
+
+**Related:** `config:split.idle_timeout`, `metric:drakkar_split_oldest_job_age_seconds`
+
+### `config:split.idle_timeout`
+
+The longest time a job may go without a new part result, from 1m to 30d; 0 means no limit.
+
+**Advice:** Set it above the longest time one part needs; it must be below job_timeout when both are set.
+
+**Related:** `config:split.job_timeout`
+
+### `config:split.max_attempts`
+
+How many times a job may be split, from 1 to 10, the first attempt included.
+
+**Advice:** Keep it low; each new attempt publishes the parts again.
+
+**Related:** `metric:drakkar_split_jobs_total`, `metric:drakkar_split_parts_published_total`
 
 ### `config:sources.kafka.detach.enabled`
 
@@ -1037,6 +1077,116 @@ Returns to the consumer group after a detach, by cause.
 
 **Related:** `concept:detach`, `config:sources.kafka.detach.lease`, `event:worker_attached`
 
+### `metric:drakkar_split_jobs_open`
+
+Split jobs this worker owns that are not closed.
+
+**Meaning:** A job is open from its open record until it ends; offsets of its source partition stay uncommitted meanwhile.
+
+**Healthy:** Small, and falling after each large message.
+
+**Related:** `config:split.enabled`, `config:split.job_timeout`
+
+### `metric:drakkar_split_oldest_job_age_seconds`
+
+Age in seconds of the oldest open split job this worker owns, 0 when there is none.
+
+**Meaning:** A value close to split.job_timeout means a job is about to end by timeout.
+
+**Healthy:** Below the usual run time of a large message.
+
+**Related:** `config:split.job_timeout`, `config:split.idle_timeout`
+
+### `metric:drakkar_split_restoring_partitions`
+
+Source partitions that wait for the restore of their split jobs.
+
+**Meaning:** A partition does not start before its jobs are read back from the results log.
+
+**Healthy:** 0, except for a short time after an assignment.
+
+**Related:** `metric:drakkar_split_restore_duration_seconds`
+
+### `metric:drakkar_split_jobs_total`
+
+Split jobs ended, by outcome.
+
+**Meaning:** The outcomes are aggregated, dlq, timeout, split_failed, attempts_spent, orphaned, superseded and local (a message that was not split).
+
+**Healthy:** Mostly aggregated and local.
+
+**Related:** `config:split.max_attempts`, `config:split.job_timeout`
+
+### `metric:drakkar_split_job_duration_seconds`
+
+Seconds from the open record of a split job to its end.
+
+**Meaning:** Local messages are not counted.
+
+**Healthy:** Stable for the same kind of message.
+
+**Related:** `metric:drakkar_split_jobs_total`
+
+### `metric:drakkar_split_parts_published_total`
+
+Parts published to the parts topic.
+
+**Meaning:** Grows by the number of parts of each attempt; a rise without new jobs means attempts are repeated.
+
+**Healthy:** Proportional to the number of split jobs.
+
+**Related:** `config:split.max_attempts`
+
+### `metric:drakkar_split_parts_processed_total`
+
+Parts this worker ran, by outcome.
+
+**Meaning:** The outcome is ok or failed; a failed part follows the failure policy of the sinks of the part stage.
+
+**Healthy:** Failed stays near 0.
+
+**Related:** `metric:drakkar_split_parts_published_total`
+
+### `metric:drakkar_split_results_received_total`
+
+Part results counted by the job tracker.
+
+**Meaning:** Counts each result of a part once for a job this worker owns.
+
+**Healthy:** Equal to the parts that ended, over time.
+
+**Related:** `metric:drakkar_split_results_ignored_total`
+
+### `metric:drakkar_split_results_ignored_total`
+
+Records of the results topic the job tracker ignored, by reason.
+
+**Meaning:** The reasons are duplicate, old_attempt, closed_job, unknown_job and foreign_group; repeats are normal after a restart.
+
+**Healthy:** Low; a steady rise of unknown_job or foreign_group needs a look at the topic names.
+
+**Related:** `config:split.enabled`
+
+### `metric:drakkar_split_result_write_failures_total`
+
+Failed attempts to write a part result.
+
+**Meaning:** The part runs again when its result cannot be written; the job waits for it.
+
+**Healthy:** 0; alert on any rate.
+
+**Related:** `metric:drakkar_split_parts_processed_total`
+
+### `metric:drakkar_split_restore_duration_seconds`
+
+Seconds to restore the split jobs of one source partition.
+
+**Meaning:** The time to read the results log of the partition after an assignment.
+
+**Healthy:** Seconds, not minutes.
+
+**Related:** `metric:drakkar_split_restoring_partitions`
+
 ### `metric:drakkar_total_queued`
 
 Messages in all partition queues plus tasks in flight.
@@ -1377,7 +1527,7 @@ The time of one window, from arrange to the end of its last task.
 
 The time of each handler hook, by hook.
 
-**Meaning:** Hooks run on the event loop; a slow hook slows every partition.
+**Meaning:** Hooks run on the event loop; a slow hook slows every partition. With split.enabled the hooks split, part_data, aggregate and on_job_timeout are timed too.
 
 **Healthy:** Milliseconds for each hook.
 
