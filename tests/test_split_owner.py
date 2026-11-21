@@ -1302,6 +1302,10 @@ async def test_a_timeout_that_comes_with_the_last_acknowledgement_of_a_split_sti
     assert world.kinds() == ['open', 'split-done', 'closed']
     assert [job.timed_out for job in handler.timeouts] == ['job']
     assert world.closed()[0]['outcome'] == 'timeout'
+    # The owner wrote split-done itself, so it knows the number of parts before the tracker read the record.
+    assert handler.timeouts[0].total_parts == 1 and handler.timeouts[0].missing_parts() == [0]
+    [record] = worker.dlq_records()
+    assert record.error.endswith(': 0 of 1 parts')
     await worker.stop()
 
 

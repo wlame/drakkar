@@ -19,7 +19,7 @@ from drakkar.budget import PendingBudget
 from drakkar.config import DrakkarConfig
 from drakkar.config.sinks import DEFAULT_SINK_POLICY
 from drakkar.executor import ExecutorPool
-from drakkar.models import CollectResult, KafkaPayload, PostgresPayload, SourceMessage, SplitPart
+from drakkar.models import CollectResult, ErrorAction, KafkaPayload, PostgresPayload, SourceMessage, SplitPart
 from drakkar.partition import PartitionProcessor
 from drakkar.sinks.manager import SinkManager
 from drakkar.split.models import JobAction, PartResult, SplitJob
@@ -307,6 +307,8 @@ class OwnerWorker:
     ) -> None:
         self.world = world
         self.handler = handler
+        # The app tells the handler what its default ``on_error`` answers.
+        handler._executor_on_failure = ErrorAction(executor_on_failure)
         self.config = config or owner_config()
         self.sleep = ManualSleep()
         self.client = client if client is not None else FakeProducerClient(world.log)

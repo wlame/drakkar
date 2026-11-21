@@ -282,3 +282,42 @@ async def test_repeated_poll_failures_are_logged_once_in_the_interval(log, monke
     await producer.publish(TOPIC, record(1))
     await producer.close(1.0)
     assert len(lines) == 1
+
+
+async def test_enqueue_nowait_gives_the_delivery_future_while_the_queue_has_room(producer, log):
+    future = producer.enqueue_nowait(TOPIC, record(7, partition=2))
+    assert future is not None
+    await asyncio.wait_for(future, 2)
+    assert [stored.value for stored in log.records(TOPIC, 2)] == [b'7']
+
+
+async def test_enqueue_nowait_gives_none_for_a_full_queue_and_behind_a_waiting_caller(log):
+    client = FakeProducerClient(log, queue_capacity=1)
+    producer = SplitProducer(KafkaConnectionConfig(), producer_factory=lambda config: client)
+    await producer.start()
+    client.hold_deliveries = True
+    first = producer.enqueue_nowait(TOPIC, record(1))
+    assert first is not None
+    # The queue is full: nothing is given to the client, and the caller is told so at once.
+    assert producer.enqueue_nowait(TOPIC, record(2)) is None
+    waiter = asyncio.create_task(producer.enqueue(TOPIC, record(2)))
+    await asyncio.sleep(0.02)
+    client.queue_capacity = 5
+    # Room again, but another caller waits for it: records keep their order.
+    assert producer.enqueue_nowait(TOPIC, record(3)) is None
+    client.release_deliveries()
+    await asyncio.wait_for(await asyncio.wait_for(waiter, 2), 2)
+    third = producer.enqueue_nowait(TOPIC, record(3))
+    assert third is not None
+    await asyncio.wait_for(third, 2)
+    assert [stored.value for stored in log.records(TOPIC, 0)] == [b'1', b'2', b'3']
+    await producer.close(1.0)
+
+
+async def test_enqueue_nowait_raises_for_a_record_the_client_refuses_and_before_start(producer, client):
+    client.fail_next('produce', KafkaException(KafkaError(KafkaError.MSG_SIZE_TOO_LARGE)))
+    with pytest.raises(SplitProduceError) as raised:
+        producer.enqueue_nowait(TOPIC, record())
+    assert raised.value.final
+    with pytest.raises(RuntimeError, match='not started'):
+        SplitProducer(KafkaConnectionConfig()).enqueue_nowait(TOPIC, record())
