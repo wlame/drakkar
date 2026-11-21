@@ -74,6 +74,24 @@ InputT = TypeVar('InputT', bound=BaseModel)
 OutputT = TypeVar('OutputT', bound=BaseModel)
 
 
+class SplitPart(BaseModel):
+    """Where a part came from; set on ``SourceMessage.split`` of a message of the parts topic."""
+
+    group: str = Field(description='The consumer group of the source the original message was read in.')
+    source_topic: str = Field(description='The topic of the original message.')
+    source_partition: int = Field(description='The partition of the original message.')
+    source_offset: int = Field(description='The offset of the original message.')
+    attempt: int = Field(description='The number of the attempt of the job, from 1.')
+    attempt_id: str = Field(description='The unique id of the attempt: 16 hex characters.')
+    index: int = Field(description='The part number inside its job, from 0.')
+    origin: Literal['kafka', 'http'] = Field(default='kafka', description='Where the original message came from.')
+
+    @property
+    def job_id(self) -> str:
+        """The job as shown in logs: ``<partition>:<offset>#<attempt>``."""
+        return f'{self.source_partition}:{self.source_offset}#{self.attempt}'
+
+
 class SourceMessage(BaseModel):
     """A message consumed from the Kafka source topic."""
 
@@ -111,6 +129,11 @@ class SourceMessage(BaseModel):
             'every log line written while the message is processed, in its tasks, its recorder '
             'rows and its DLQ record. None only before the framework sets it.'
         ),
+    )
+    split: SplitPart | None = Field(
+        default=None,
+        exclude=True,
+        description='Where the message came from when it is a part of a split job; None for an ordinary message.',
     )
 
 

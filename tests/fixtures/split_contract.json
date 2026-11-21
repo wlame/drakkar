@@ -1,0 +1,220 @@
+{
+  "_comment": "Split wire contract, shared byte for byte by every implementation. A results-log record has the key \"<partition>:<offset>\" (UTF-8) and goes to the results partition with the number of the source partition; its headers are log_header_order, each value ASCII text. Its value is compact JSON with sorted keys, raw UTF-8. A part record has the key and the value of the part, the source headers of the original message in their order minus every header whose name starts with \"dk-\", then the headers of part_header_order; dk-request-id is not written when the request id is null. Part i goes to partition (offset mod N + i) mod N of the parts topic. Encoding of bytes in this file: a JSON string is its UTF-8 bytes, {\"base64\": \"...\"} is the decoded bytes, null is no value.",
+  "version": "1",
+  "parts_partition_base": 1000000,
+  "log_header_order": [
+    "dk-split-version",
+    "dk-split-record",
+    "dk-split-group",
+    "dk-split-partition",
+    "dk-split-offset",
+    "dk-split-attempt",
+    "dk-split-attempt-id"
+  ],
+  "part_header_order": [
+    "dk-split-version",
+    "dk-split-group",
+    "dk-split-topic",
+    "dk-split-partition",
+    "dk-split-offset",
+    "dk-split-attempt",
+    "dk-split-attempt-id",
+    "dk-split-index",
+    "dk-split-origin",
+    "dk-request-id"
+  ],
+  "record_kinds": ["open", "split-done", "split-cancelled", "result", "closed"],
+  "closed_outcomes": ["aggregated", "dlq", "timeout", "split_failed", "attempts_spent", "orphaned"],
+  "job_actions": ["done", "dlq"],
+  "ignore_reasons": ["duplicate", "old_attempt", "closed_job", "unknown_job", "foreign_group"],
+  "partition_cases": [
+    {"offset": 500, "partition_count": 6, "index": 0, "partition": 2},
+    {"offset": 500, "partition_count": 6, "index": 1, "partition": 3},
+    {"offset": 500, "partition_count": 6, "index": 5, "partition": 1},
+    {"offset": 500, "partition_count": 6, "index": 6, "partition": 2}
+  ],
+  "log_cases": [
+    {
+      "name": "open",
+      "ref": {"group": "orders-group", "partition": 7, "offset": 500, "attempt": 1, "attempt_id": "0123456789abcdef"},
+      "kind": "open",
+      "input": {"worker": "w1", "instance": "i-1a2b", "request_id": "req_1"},
+      "key": "7:500",
+      "value": "{\"instance\":\"i-1a2b\",\"origin\":\"kafka\",\"request_id\":\"req_1\",\"worker\":\"w1\"}",
+      "headers": [
+        ["dk-split-version", "1"],
+        ["dk-split-record", "open"],
+        ["dk-split-group", "orders-group"],
+        ["dk-split-partition", "7"],
+        ["dk-split-offset", "500"],
+        ["dk-split-attempt", "1"],
+        ["dk-split-attempt-id", "0123456789abcdef"]
+      ],
+      "partition": 7
+    },
+    {
+      "name": "split-cancelled",
+      "ref": {"group": "orders-group", "partition": 7, "offset": 500, "attempt": 1, "attempt_id": "0123456789abcdef"},
+      "kind": "split-cancelled",
+      "input": {},
+      "key": "7:500",
+      "value": "{}",
+      "headers": [
+        ["dk-split-version", "1"],
+        ["dk-split-record", "split-cancelled"],
+        ["dk-split-group", "orders-group"],
+        ["dk-split-partition", "7"],
+        ["dk-split-offset", "500"],
+        ["dk-split-attempt", "1"],
+        ["dk-split-attempt-id", "0123456789abcdef"]
+      ],
+      "partition": 7
+    },
+    {
+      "name": "split-done",
+      "ref": {"group": "orders-group", "partition": 7, "offset": 500, "attempt": 2, "attempt_id": "fedcba9876543210"},
+      "kind": "split-done",
+      "input": {"parts": 6},
+      "key": "7:500",
+      "value": "{\"parts\":6}",
+      "headers": [
+        ["dk-split-version", "1"],
+        ["dk-split-record", "split-done"],
+        ["dk-split-group", "orders-group"],
+        ["dk-split-partition", "7"],
+        ["dk-split-offset", "500"],
+        ["dk-split-attempt", "2"],
+        ["dk-split-attempt-id", "fedcba9876543210"]
+      ],
+      "partition": 7
+    },
+    {
+      "name": "result",
+      "ref": {"group": "orders-group", "partition": 7, "offset": 500, "attempt": 1, "attempt_id": "0123456789abcdef"},
+      "kind": "result",
+      "input": {
+        "index": 2,
+        "worker": "w2",
+        "outcome": "failed",
+        "tasks_succeeded": 3,
+        "tasks_failed": 1,
+        "tasks_replaced": 0,
+        "deliveries": {"kafka/results": {"delivered": 2, "skipped": 0, "failed": 1}},
+        "dlq": {"stage": "sink", "sink": "kafka/results", "task_id": "t-1", "error": "boom", "attempts": 3},
+        "error": null,
+        "data": {"matches": 4},
+        "data_error": null,
+        "duration_seconds": 1.5,
+        "finished_at": 1700000000.25
+      },
+      "key": "7:500",
+      "value": "{\"data\":{\"matches\":4},\"data_error\":null,\"deliveries\":{\"kafka/results\":{\"delivered\":2,\"failed\":1,\"skipped\":0}},\"dlq\":{\"attempts\":3,\"error\":\"boom\",\"sink\":\"kafka/results\",\"stage\":\"sink\",\"task_id\":\"t-1\"},\"duration_seconds\":1.5,\"error\":null,\"finished_at\":1700000000.25,\"outcome\":\"failed\",\"part\":2,\"tasks_failed\":1,\"tasks_replaced\":0,\"tasks_succeeded\":3,\"worker\":\"w2\"}",
+      "headers": [
+        ["dk-split-version", "1"],
+        ["dk-split-record", "result"],
+        ["dk-split-group", "orders-group"],
+        ["dk-split-partition", "7"],
+        ["dk-split-offset", "500"],
+        ["dk-split-attempt", "1"],
+        ["dk-split-attempt-id", "0123456789abcdef"]
+      ],
+      "partition": 7
+    },
+    {
+      "name": "closed",
+      "ref": {"group": "orders-group", "partition": 7, "offset": 500, "attempt": 1, "attempt_id": "0123456789abcdef"},
+      "kind": "closed",
+      "input": {"outcome": "aggregated", "received": 6, "parts": 6, "duration_seconds": 2.5},
+      "key": "7:500",
+      "value": "{\"duration_seconds\":2.5,\"outcome\":\"aggregated\",\"parts\":6,\"received\":6}",
+      "headers": [
+        ["dk-split-version", "1"],
+        ["dk-split-record", "closed"],
+        ["dk-split-group", "orders-group"],
+        ["dk-split-partition", "7"],
+        ["dk-split-offset", "500"],
+        ["dk-split-attempt", "1"],
+        ["dk-split-attempt-id", "0123456789abcdef"]
+      ],
+      "partition": 7
+    }
+  ],
+  "part_cases": [
+    {
+      "name": "with_request_id",
+      "ref": {"group": "orders-group", "partition": 7, "offset": 500, "attempt": 1, "attempt_id": "0123456789abcdef"},
+      "input": {
+        "source_topic": "orders",
+        "index": 1,
+        "request_id": "req_1",
+        "key": "order-17",
+        "value": "{\"items\":[1,2]}",
+        "source_headers": [["traceparent", "00-4bf92f3577b34da6-01"]],
+        "partition_count": 6
+      },
+      "key": "order-17",
+      "headers": [
+        ["traceparent", "00-4bf92f3577b34da6-01"],
+        ["dk-split-version", "1"],
+        ["dk-split-group", "orders-group"],
+        ["dk-split-topic", "orders"],
+        ["dk-split-partition", "7"],
+        ["dk-split-offset", "500"],
+        ["dk-split-attempt", "1"],
+        ["dk-split-attempt-id", "0123456789abcdef"],
+        ["dk-split-index", "1"],
+        ["dk-split-origin", "kafka"],
+        ["dk-request-id", "req_1"]
+      ],
+      "partition": 3,
+      "parsed": {
+        "group": "orders-group",
+        "source_topic": "orders",
+        "source_partition": 7,
+        "source_offset": 500,
+        "attempt": 1,
+        "attempt_id": "0123456789abcdef",
+        "index": 1,
+        "origin": "kafka"
+      }
+    },
+    {
+      "name": "null_key_null_header_and_dropped_dk_header",
+      "ref": {"group": "orders-group", "partition": 7, "offset": 500, "attempt": 2, "attempt_id": "fedcba9876543210"},
+      "input": {
+        "source_topic": "orders",
+        "index": 0,
+        "request_id": null,
+        "key": null,
+        "value": {"base64": "//57ImlkIjogMTc="},
+        "source_headers": [["nullish", null], ["dk-old", "dropped"], ["empty", ""]],
+        "partition_count": 6
+      },
+      "key": null,
+      "headers": [
+        ["nullish", null],
+        ["empty", ""],
+        ["dk-split-version", "1"],
+        ["dk-split-group", "orders-group"],
+        ["dk-split-topic", "orders"],
+        ["dk-split-partition", "7"],
+        ["dk-split-offset", "500"],
+        ["dk-split-attempt", "2"],
+        ["dk-split-attempt-id", "fedcba9876543210"],
+        ["dk-split-index", "0"],
+        ["dk-split-origin", "kafka"]
+      ],
+      "partition": 2,
+      "parsed": {
+        "group": "orders-group",
+        "source_topic": "orders",
+        "source_partition": 7,
+        "source_offset": 500,
+        "attempt": 2,
+        "attempt_id": "fedcba9876543210",
+        "index": 0,
+        "origin": "kafka"
+      }
+    }
+  ]
+}
