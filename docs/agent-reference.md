@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `52949b870e339cbd`.
+Registry version: `f8d8989584fc56ba`.
 
 ## Concepts
 
@@ -325,7 +325,7 @@ With split on, one large source message becomes parts that every worker of the c
 
 A handler's `split(message)` turns one source message into parts. The parts go through an internal parts topic to every worker of the group; each worker runs them as tasks. The results go to an internal results log. The worker that owns the source partition follows the log with a job tracker, calls `aggregate(job)` when every part has a result, delivers the aggregate sinks, and writes a `closed` record. Only then does the source offset commit.
 
-The state of a job is the uncommitted source offset plus the results log, so any owner rebuilds it after a restart. While a partition rebuilds its jobs it is `restoring`, and the offset of that partition does not commit. A job ends by timeout (`split.job_timeout`, or `split.idle_timeout` after the split finished); the source message then goes to the DLQ.
+The state of a job is the uncommitted source offset plus the results log, so any owner rebuilds it after a restart. While a partition rebuilds its jobs it is `restoring`, and the offset of that partition does not commit. A job ends by timeout (`split.job_timeout`, or `split.idle_timeout` after the split finished); by default the source message then goes to the DLQ (`on_job_timeout` can choose otherwise).
 
 The state part `split` and `GET /api/v1/debug/split` show the open jobs, their age and time left, and the restoring partitions.
 
@@ -4295,7 +4295,7 @@ An open split job has less time left than 10 percent of its timeout, or less tha
 
 **Explain:** `concept:split`
 
-**Suggestion:** Read seconds_left and timeout_seconds, then look at the job on the split page (GET /api/v1/debug/split) to see how many parts are missing; check that the workers of the consumer group run parts and are not detached or stalled. A job that times out is closed and its source message goes to the DLQ.
+**Suggestion:** Read seconds_left and timeout_seconds, then look at the job on the split page (GET /api/v1/debug/split) to see how many parts are missing; check that the workers of the consumer group run parts and are not detached or stalled. A job that times out is closed, and by default its source message goes to the DLQ (`on_job_timeout` can choose otherwise).
 
 **Inputs:**
 - `split.nearest_timeout_seconds_left`

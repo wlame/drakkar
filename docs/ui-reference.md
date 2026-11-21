@@ -112,6 +112,26 @@ this worker no longer holds.
 | Pending | Offsets taken and not yet committed. | `drakkar_offset_lag{partition}` |
 | Consumed, Completed, Failed | Counts of the `consumed`, `task_completed` and `task_failed` rows that the recorder holds for the partition. With a recorder file, the rows of the live file; with the recorder off or on `postgres`, the rows of the memory window. See [what reads memory](recent-events.md#what-reads-memory-and-what-reads-the-file). | Partial: `drakkar_messages_consumed_total{partition}` (since start) |
 
+### Split jobs panel
+
+Shown when this worker, or a worker of the same cluster, runs the
+[split feature](split.md). Source: `GET /api/v1/debug/split` of each worker,
+every 5 seconds. The panel has:
+
+- A summary line: open jobs, parts left over all jobs, the age of the oldest
+  job, restoring partitions, and the workers that did not answer.
+- One row for each job: the job (`<partition>:<offset>`), the owner worker,
+  the phase, the progress (parts with a result of all parts), failed parts,
+  the age, the time left before the timeout, and the request id.
+- A **Trace** link that opens the Trace tab with the label search
+  `split_job=<partition>:<offset>`, and a **Kafka** link to the source message
+  when a Kafka UI is configured.
+
+A worker that does not have the route (an older release) is listed as not
+available. A worker with the feature on has a `split` tag in the worker
+switcher. A partition of the parts topic shows as `parts <n>`, and the
+timeline shows the tasks of parts and of local messages in two own looks.
+
 ### Sinks
 
 One row per configured sink.

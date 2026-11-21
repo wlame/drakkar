@@ -866,6 +866,8 @@ worker-level gauges without a partition label (`drakkar_assigned_partitions`,
 |---|---|---|---|
 | `drakkar_split_jobs_open` | Gauge | -- | Split jobs this worker owns that are not closed. |
 | `drakkar_split_oldest_job_age_seconds` | Gauge | -- | Age of the oldest open job this worker owns, `0` when there is none. A value close to `split.job_timeout` means a job is about to time out. |
+| `drakkar_split_parts_expected` | Gauge | -- | Parts of the open jobs this worker owns whose split has finished. A job that is still splitting adds nothing. |
+| `drakkar_split_parts_received` | Gauge | -- | Parts of those jobs that have a result. The gap to `drakkar_split_parts_expected` is the parts still running or waiting. |
 | `drakkar_split_restoring_partitions` | Gauge | -- | Source partitions that wait for the restore of their jobs. |
 | `drakkar_split_jobs_total` | Counter | `outcome` | Jobs ended, by outcome: `aggregated`, `dlq`, `timeout`, `split_failed`, `attempts_spent`, `orphaned`, `local` (a local message that did not go to the DLQ), and `superseded` (an attempt of this worker that another worker's newer attempt replaced; the job goes on). |
 | `drakkar_split_job_duration_seconds` | Histogram | -- | Seconds from the first `open` record of a job to its end. Local messages are not counted. |
@@ -997,15 +999,48 @@ The split producer and the reader:
 | A rate of `drakkar_split_jobs_total` with the outcome `timeout`, `attempts_spent`, `split_failed`, `dlq` or `orphaned` | Requests end without their aggregate result. Each of them has a DLQ record, except `orphaned`. |
 | `drakkar_split_results_ignored_total` with the reason `foreign_group` or `malformed` | Another fleet or another program writes to the results topic of this fleet. |
 
-**The progress of one job.** No view shows one job. Use these:
+**The progress of one job.** The Dashboard panel "Split jobs" of the
+[operator UI](ui-reference.md#split-jobs-panel) and the route
+`GET /api/v1/debug/split` show every open job. You can also use these:
 
 - The log lines `split_job_opened`, `split_job_done` and `split_job_closed`
   of the owner. Each has the job id `<partition>:<offset>#<attempt>`, and
   the log context has the request id of the original message.
 - The gauges `drakkar_split_jobs_open` and
   `drakkar_split_oldest_job_age_seconds` of the owner.
-- The Trace page, by the request id, on each worker: every part keeps the
-  request id of its original message, so each worker shows the parts it ran.
+- The Trace page, by the request id or by the task label (see below), on
+  each worker: every part keeps the request id of its original message, so
+  each worker shows the parts it ran.
+
+**Task labels.** A task of a part has the labels `split_job` (the job,
+`<partition>:<offset>`, the same text as the job row) and `split_part` (the
+number of the part). A task of a local message has `split_part=local`. The
+Trace page finds all the tasks of one job with the label search
+`split_job=<partition>:<offset>`.
+
+**PromQL examples.**
+
+```promql
+# Parts still running or waiting, over the fleet
+sum(drakkar_split_parts_expected) - sum(drakkar_split_parts_received)
+
+# Open jobs
+sum(drakkar_split_jobs_open)
+
+# Age of the oldest open job, in seconds
+max(drakkar_split_oldest_job_age_seconds)
+
+# Jobs ended per second, by outcome
+sum by (outcome) (rate(drakkar_split_jobs_total[5m]))
+```
+
+**The route.** `GET /api/v1/debug/split` answers for this worker: the
+settings, the followed source partitions (`live` or `restoring`), and the
+open jobs it follows (`limit` from 1 to 500, default 100; 422 for another
+value; 503 when the main loop does not answer). With `split.enabled: false`
+it answers `enabled: false` and no jobs. The agent surface has the state part
+`split` and the diagnose rules `split-job-near-timeout` and
+`split-partition-restoring`.
 
 **A replay of a DLQ record.** The replay tool publishes the original
 message to the source topic again. It gets a new offset, so it is a new
@@ -1022,8 +1057,6 @@ the parts, and leave the heavy work to the parts.
 ## What is not there yet {#what-is-not-there-yet}
 
 - HTTP requests are not split. They keep their usual path.
-- The operator UI has no view of jobs. A part shows as an ordinary message
-  of its worker, under `1000000 + n`.
 - The Message Probe runs a message of a splitting handler as an ordinary
   message: it calls neither `split` nor `aggregate`.
 - Queued parts of a job that has ended are not cancelled.

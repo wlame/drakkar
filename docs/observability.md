@@ -191,6 +191,8 @@ describe the source topic only. `drakkar_handler_duration_seconds` has the
 |--------|------|--------|-------------|
 | `drakkar_split_jobs_open` | Gauge | -- | Split jobs this worker owns that are not closed |
 | `drakkar_split_oldest_job_age_seconds` | Gauge | -- | Age in seconds of the oldest open split job this worker owns, `0` when there is none |
+| `drakkar_split_parts_expected` | Gauge | -- | Parts of the open jobs this worker owns whose split has finished. A job still splitting adds nothing |
+| `drakkar_split_parts_received` | Gauge | -- | Parts of those jobs that have a result. The gap to `drakkar_split_parts_expected` is the parts still running or waiting |
 | `drakkar_split_restoring_partitions` | Gauge | -- | Source partitions that wait for the restore of their split jobs |
 | `drakkar_split_jobs_total` | Counter | `outcome` | Split jobs ended, by outcome: `aggregated`, `dlq`, `timeout`, `split_failed`, `attempts_spent`, `orphaned`, `superseded`, `local`. `local` is a local message that did not go to the DLQ (a local message that did counts as `dlq`); `superseded` is an attempt of this worker that a newer attempt of another worker replaced, and its job goes on |
 | `drakkar_split_job_duration_seconds` | Histogram | -- | Seconds from the open record of a split job to its end; local messages are not counted. Buckets 1, 5, 15, 60, 300, 900, 3600, 14400, 43200, 86400 |

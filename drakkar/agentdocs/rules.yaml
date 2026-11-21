@@ -146,7 +146,7 @@
   severity: warning
   title: A split job is close to its timeout
   explain: concept:split
-  suggestion: Read seconds_left and timeout_seconds, then look at the job on the split page (GET /api/v1/debug/split) to see how many parts are missing; check that the workers of the consumer group run parts and are not detached or stalled. A job that times out is closed and its source message goes to the DLQ.
+  suggestion: Read seconds_left and timeout_seconds, then look at the job on the split page (GET /api/v1/debug/split) to see how many parts are missing; check that the workers of the consumer group run parts and are not detached or stalled. A job that times out is closed, and by default its source message goes to the DLQ (`on_job_timeout` can choose otherwise).
   inputs:
     - split.nearest_timeout_seconds_left
     - split.nearest_timeout_seconds

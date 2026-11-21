@@ -396,7 +396,7 @@
   body: |-
     A handler's `split(message)` turns one source message into parts. The parts go through an internal parts topic to every worker of the group; each worker runs them as tasks. The results go to an internal results log. The worker that owns the source partition follows the log with a job tracker, calls `aggregate(job)` when every part has a result, delivers the aggregate sinks, and writes a `closed` record. Only then does the source offset commit.
 
-    The state of a job is the uncommitted source offset plus the results log, so any owner rebuilds it after a restart. While a partition rebuilds its jobs it is `restoring`, and the offset of that partition does not commit. A job ends by timeout (`split.job_timeout`, or `split.idle_timeout` after the split finished); the source message then goes to the DLQ.
+    The state of a job is the uncommitted source offset plus the results log, so any owner rebuilds it after a restart. While a partition rebuilds its jobs it is `restoring`, and the offset of that partition does not commit. A job ends by timeout (`split.job_timeout`, or `split.idle_timeout` after the split finished); by default the source message then goes to the DLQ (`on_job_timeout` can choose otherwise).
 
     The state part `split` and `GET /api/v1/debug/split` show the open jobs, their age and time left, and the restoring partitions.
   principles:
