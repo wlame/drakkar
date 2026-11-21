@@ -163,6 +163,22 @@
     - config:split.job_timeout
     - config:split.idle_timeout
 
+- key: drakkar_split_parts_expected
+  summary: Parts of the open split jobs this worker owns whose split has finished.
+  meaning: A job counts here once its split-done record gives its number of parts; jobs still splitting are left out.
+  healthy: Falls as jobs end; read it together with drakkar_split_parts_received.
+  related:
+    - metric:drakkar_split_parts_received
+    - metric:drakkar_split_jobs_open
+
+- key: drakkar_split_parts_received
+  summary: Parts with a result in the open split jobs this worker owns whose split has finished.
+  meaning: The gap to drakkar_split_parts_expected is the parts still running or waiting in the parts topic.
+  healthy: Rises toward drakkar_split_parts_expected while jobs run.
+  related:
+    - metric:drakkar_split_parts_expected
+    - config:split.idle_timeout
+
 - key: drakkar_split_restoring_partitions
   summary: Source partitions that wait for the restore of their split jobs.
   meaning: A partition does not start before its jobs are read back from the results log.

@@ -1608,3 +1608,45 @@ async def test_a_split_that_stops_while_it_waits_for_its_part_records_leaves_no_
     assert unread == []
     worker.client.release_deliveries()
     await worker.runtime.stop(deadline=0.0)
+
+
+# --- the phases the operator view reads ---
+
+
+async def test_phase_of_is_ending_while_the_end_of_a_job_runs_and_none_while_parts_run():
+    world = World()
+    release = asyncio.Event()
+
+    async def answer(job: SplitJob) -> Any:
+        await release.wait()
+        return summary(job.received_parts)
+
+    handler = SplittingHandler({500: items(2)}, answer=answer)
+    worker = await OwnerWorker(world, handler).start(source_message(500))
+    await wait_until(lambda: world.kinds() == ['open', 'split-done'])
+    assert worker.owner is not None
+    assert worker.runtime.owners() == {PARTITION: worker.owner}
+    await wait_until(lambda: worker.owner is not None and not worker.owner._jobs[500].busy)
+    assert worker.owner.phase_of(500) is None
+    assert worker.owner.phase_of(999) is None
+
+    world.report_all()
+    await wait_until(lambda: len(handler.jobs) == 1)
+    assert worker.owner.phase_of(500) == 'ending'
+    release.set()
+    await wait_until(lambda: worker.committed == 501)
+    await worker.stop()
+
+
+async def test_phase_of_is_waiting_message_for_a_restored_job_whose_message_has_not_come():
+    world = World()
+    first = await OwnerWorker(world, SplittingHandler({500: items(2)})).start(source_message(500))
+    await wait_until(lambda: world.kinds() == ['open', 'split-done'])
+    await first.stop()
+
+    second = OwnerWorker(world, SplittingHandler({500: items(2)}))
+    await second.restore()
+    second.run()
+    assert second.owner is not None
+    assert second.owner.phase_of(500) == 'waiting_message'
+    await second.stop()

@@ -192,6 +192,10 @@ class SplitRuntime:
             results_group=self.results_group,
         )
 
+    def owners(self) -> dict[int, SplitOwner]:
+        """The owners of the split jobs, by source partition; a copy, read-only."""
+        return self._events.owners()
+
     async def follow(self, partition: int, *, committed_source_offset: int | None) -> JobTable:
         """Restore the split jobs of a source partition this worker now owns; the table when it is ready.
 

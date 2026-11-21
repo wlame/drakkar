@@ -1343,3 +1343,24 @@ async def test_the_end_offset_is_the_end_of_the_log_now_whatever_the_tracker_has
         assert await h.t.end_offset(PARTITION) is None
     finally:
         await h.t.stop()
+
+
+async def test_followed_reports_restoring_then_live_with_state_since(harness):
+    harness.consumer.fail_next('committed', KafkaException(KafkaError(KafkaError._TRANSPORT)), times=1)
+    harness.writer.open(10)
+    follow = asyncio.create_task(harness.t.follow(PARTITION, committed_source_offset=None))
+    await wait_until(lambda: harness.sleep.waiting(1.0))
+    [restoring] = harness.t.followed()
+    assert (restoring.partition, restoring.restoring, restoring.table, restoring.read_position) == (
+        PARTITION,
+        True,
+        None,
+        None,
+    )
+    await harness.sleep.fire(1.0)
+    table = await asyncio.wait_for(follow, timeout=10)
+    [live] = harness.t.followed()
+    assert live.restoring is False
+    assert live.table is table
+    assert live.read_position == harness.t.read_position(PARTITION)
+    assert live.state_since >= restoring.state_since

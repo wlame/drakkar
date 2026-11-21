@@ -23,7 +23,7 @@ import time
 from collections.abc import Awaitable, Callable, Coroutine, Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import structlog
 
@@ -56,6 +56,9 @@ END_OFFSET_RETRY_FIRST_SECONDS = 0.5
 END_OFFSET_RETRY_MAX_SECONDS = 5.0
 
 SleepFn = Callable[[float], Awaitable[None]]
+# The phase of an open job as the operator UI shows it. The owner knows ``ending`` and
+# ``waiting_message``; the other two come from the job table.
+JobPhase = Literal['splitting', 'waiting', 'waiting_message', 'ending']
 
 
 # How many offsets of records that the job tracker could not apply an owner remembers; the oldest go first.
@@ -305,6 +308,20 @@ class SplitOwner:
             task.cancel()
         if late:
             await asyncio.gather(*late, return_exceptions=True)
+
+    def phase_of(self, offset: int) -> JobPhase | None:
+        """What this owner does now for the job at ``offset``, when it is one of the phases it alone knows.
+
+        ``ending`` while the end of the job runs or a failure is written,
+        ``waiting_message`` for a restored job whose message the source has
+        not given yet, else None. Read-only: it changes nothing.
+        """
+        held = self._jobs.get(offset)
+        if held is not None and (held.end_task is not None or held.settling):
+            return 'ending'
+        if offset in self._restored_waiting:
+            return 'waiting_message'
+        return None
 
     def note_delivered(self, offsets: Iterable[int]) -> None:
         """The source gave the processor the messages of these offsets: their jobs can never be orphans.

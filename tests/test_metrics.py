@@ -1080,3 +1080,53 @@ def test_detach_metrics_have_their_names_types_labels_and_help():
     assert attach_total._name == 'drakkar_attach'
     assert attach_total._labelnames == ('cause',)
     assert attach_total._documentation == 'Returns to the consumer group after a detach, by cause'
+
+
+# === Split metrics ===
+
+
+def test_split_parts_gauges_have_their_names_and_help():
+    from drakkar.metrics import split_parts_expected, split_parts_received
+
+    assert split_parts_expected._name == 'drakkar_split_parts_expected'
+    assert split_parts_expected._documentation == (
+        'Parts of the open split jobs this worker owns whose split has finished'
+    )
+    assert split_parts_received._name == 'drakkar_split_parts_received'
+    assert split_parts_received._documentation == (
+        'Parts with a result in the open split jobs this worker owns whose split has finished'
+    )
+
+
+async def test_split_parts_gauges_sum_known_parts_of_live_partitions():
+    from confluent_kafka import KafkaException as RawKafkaException
+
+    from drakkar.metrics import split_parts_expected, split_parts_received
+    from tests.split_helpers import wait_until
+    from tests.test_split_tracker import PARTITION, TIMEOUT_CHECK_SECONDS, Harness
+
+    h = Harness(job_timeout=3600)
+    await h.t.start()
+    try:
+        h.writer.open(40)
+        h.writer.done(40, 10)
+        for index in range(4):
+            h.writer.result(40, index)
+        # A job whose split has not finished has no known parts and is left out.
+        h.writer.open(50)
+        h.writer.result(50, 0)
+        await h.follow()
+        # A partition that is still restoring is left out.
+        h.consumer.fail_next('committed', RawKafkaException(KafkaError(KafkaError._TRANSPORT)), times=10)
+        other = asyncio.create_task(h.t.follow(PARTITION + 1, committed_source_offset=None))
+        await wait_until(lambda: h.sleep.waiting(1.0))
+        await h.sleep.fire(TIMEOUT_CHECK_SECONDS)
+        assert split_parts_expected._value.get() == 10
+        assert split_parts_received._value.get() == 4
+        await h.t.release(PARTITION + 1)
+        with pytest.raises(asyncio.CancelledError):
+            await other
+    finally:
+        await h.t.stop()
+    assert split_parts_expected._value.get() == 0
+    assert split_parts_received._value.get() == 0

@@ -393,6 +393,16 @@ split_oldest_job_age = Gauge(
     'Age in seconds of the oldest open split job this worker owns, 0 when there is none',
 )
 
+split_parts_expected = Gauge(
+    'drakkar_split_parts_expected',
+    'Parts of the open split jobs this worker owns whose split has finished',
+)
+
+split_parts_received = Gauge(
+    'drakkar_split_parts_received',
+    'Parts with a result in the open split jobs this worker owns whose split has finished',
+)
+
 split_restoring_partitions = Gauge(
     'drakkar_split_restoring_partitions',
     'Source partitions that wait for the restore of their split jobs',

@@ -27,6 +27,8 @@ from drakkar.kafka_security import merge_client_config
 from drakkar.metrics import (
     split_jobs_open,
     split_oldest_job_age,
+    split_parts_expected,
+    split_parts_received,
     split_restore_duration,
     split_restoring_partitions,
     split_results_ignored,
@@ -90,6 +92,24 @@ class JobEvents(Protocol):
         """The live record at ``offset`` could not be applied and was passed: the table will never show it."""
 
 
+@dataclass(frozen=True)
+class FollowedPartition:
+    """A read-only view of one followed partition, for the operator UI.
+
+    ``state_since`` is a ``time.monotonic()`` time: the start of the restore
+    while ``restoring``, else the end of the restore. ``read_position`` and
+    ``table`` are None while the partition restores, as
+    :meth:`JobTracker.read_position` and :meth:`JobTracker.table` answer.
+    The table is the live one; a reader must not change it.
+    """
+
+    partition: int
+    restoring: bool
+    state_since: float
+    read_position: int | None
+    table: JobTable | None
+
+
 @dataclass
 class _Followed:
     """What the tracker knows about one followed partition."""
@@ -99,6 +119,8 @@ class _Followed:
     committed_source: int | None
     started_at: float
     restoring: bool = True
+    # The ``time.monotonic()`` time the restore ended; read only once ``restoring`` is false.
+    live_since: float = 0.0
     assigned: bool = False
     assign_complete: bool = False
     # A batch of the read loop that started before the assignment may carry records of an older
@@ -214,8 +236,33 @@ class JobTracker:
         split_restoring_partitions.set(0)
         split_jobs_open.set(0)
         split_oldest_job_age.set(0)
+        split_parts_expected.set(0)
+        split_parts_received.set(0)
 
     # --- public queries ---
+
+    def followed(self) -> list[FollowedPartition]:
+        """Every followed partition with its state, sorted by partition; changes nothing."""
+        return [self._view_of(self._followed[partition]) for partition in sorted(self._followed)]
+
+    @staticmethod
+    def _view_of(state: _Followed) -> FollowedPartition:
+        """The read-only view of one followed partition."""
+        if state.restoring:
+            return FollowedPartition(
+                partition=state.partition,
+                restoring=True,
+                state_since=state.started_at,
+                read_position=None,
+                table=None,
+            )
+        return FollowedPartition(
+            partition=state.partition,
+            restoring=False,
+            state_since=state.live_since,
+            read_position=state.next_offset,
+            table=state.table,
+        )
 
     def table(self, partition: int) -> JobTable | None:
         """The job table of a followed partition, or None while it restores or when it is not followed."""
@@ -414,7 +461,8 @@ class JobTracker:
         if state.committed_source is not None:
             state.table.retire_through(state.committed_source)
         state.restoring = False
-        seconds = time.monotonic() - state.started_at
+        state.live_since = time.monotonic()
+        seconds = state.live_since - state.started_at
         split_restore_duration.observe(seconds)
         self._update_restoring_gauge()
         logger.info(
@@ -733,6 +781,8 @@ class JobTracker:
         now_ms = int(self._clock() * MS_PER_SECOND)
         open_count = 0
         oldest_ms: int | None = None
+        parts_expected = 0
+        parts_received = 0
         for state in list(self._followed.values()):
             if state.restoring:
                 continue
@@ -740,6 +790,9 @@ class JobTracker:
             open_count += len(open_jobs)
             for job in open_jobs:
                 oldest_ms = job.opened_at_ms if oldest_ms is None else min(oldest_ms, job.opened_at_ms)
+                if job.parts is not None:
+                    parts_expected += job.parts
+                    parts_received += job.received_count
             current = {(job.offset, job.attempt_id) for job in open_jobs}
             due = state.table.due(now_ms=now_ms, job_timeout=self._job_timeout, idle_timeout=self._idle_timeout)
             # A timeout is told once for as long as it lasts. A job that got a new result is not
@@ -759,6 +812,8 @@ class JobTracker:
                     self._emit('attempt_stalled', state.partition, job)
         split_jobs_open.set(open_count)
         split_oldest_job_age.set(0 if oldest_ms is None else max(now_ms - oldest_ms, 0) / MS_PER_SECOND)
+        split_parts_expected.set(parts_expected)
+        split_parts_received.set(parts_received)
 
     def _is_stalled(self, job: JobState, now_ms: int) -> bool:
         """Whether the current attempt of ``job`` is a split of another instance that is taken for dead."""

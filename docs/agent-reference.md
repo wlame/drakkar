@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `bc7df8f23c535be7`.
+Registry version: `82e4516cfd1f09d7`.
 
 ## Concepts
 
@@ -1096,6 +1096,26 @@ Age in seconds of the oldest open split job this worker owns, 0 when there is no
 **Healthy:** Below the usual run time of a large message.
 
 **Related:** `config:split.job_timeout`, `config:split.idle_timeout`
+
+### `metric:drakkar_split_parts_expected`
+
+Parts of the open split jobs this worker owns whose split has finished.
+
+**Meaning:** A job counts here once its split-done record gives its number of parts; jobs still splitting are left out.
+
+**Healthy:** Falls as jobs end; read it together with drakkar_split_parts_received.
+
+**Related:** `metric:drakkar_split_parts_received`, `metric:drakkar_split_jobs_open`
+
+### `metric:drakkar_split_parts_received`
+
+Parts with a result in the open split jobs this worker owns whose split has finished.
+
+**Meaning:** The gap to drakkar_split_parts_expected is the parts still running or waiting in the parts topic.
+
+**Healthy:** Rises toward drakkar_split_parts_expected while jobs run.
+
+**Related:** `metric:drakkar_split_parts_expected`, `config:split.idle_timeout`
 
 ### `metric:drakkar_split_restoring_partitions`
 
