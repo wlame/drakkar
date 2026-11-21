@@ -66,6 +66,9 @@
 #
 # Usage: HARNESS_PROVIDER=filesystem integration/scenario-split.sh
 #        SPLIT_CHECKS="4 5" integration/scenario-split.sh   (only these checks)
+#        SPLIT_BUILD=0 integration/scenario-split.sh        (use the image
+#        drakkar-harness-split-worker:local as it is, for example one built
+#        from a clean export of a commit)
 #
 # The scenario removes the split worker containers when it ends; the topics
 # and the committed offsets stay, and a second run needs none of them.
@@ -101,6 +104,8 @@ CONSUMER_IDLE_MS=4000
 RUN_TOKEN="$(date +%s)-$$"
 # The numbers of the checks to run, separated by spaces; empty runs all ten.
 SPLIT_CHECKS="${SPLIT_CHECKS:-}"
+# 0: do not build the worker image; use the one that exists.
+SPLIT_BUILD="${SPLIT_BUILD:-1}"
 PASSED=0
 FAILED=0
 FAILED_CHECKS=""
@@ -836,7 +841,9 @@ check_broker_pause() {
 
 step "Scenario: split jobs on ${SPLIT_SERVICES[*]}"
 cleanup
-"${SPLIT[@]}" build split-worker-1 >/dev/null 2>&1 || fail "docker compose could not build split-worker-1 (profile split)"
+if [ "$SPLIT_BUILD" != 0 ]; then
+    "${SPLIT[@]}" build split-worker-1 >/dev/null 2>&1 || fail "docker compose could not build split-worker-1 (profile split)"
+fi
 start_workers "" || fail "docker compose could not start the split workers (profile split)"
 wait_until "$READY_LIMIT_SECONDS" all_ready \
     || fail "split workers not ready within ${READY_LIMIT_SECONDS}s: $(unready_workers)"
