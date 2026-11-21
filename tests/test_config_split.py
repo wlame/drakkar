@@ -101,9 +101,27 @@ def test_enabled_split_gives_its_connection(tmp_path, monkeypatch):
 
 
 def test_aggregate_sink_that_is_not_configured_fails(tmp_path, monkeypatch):
-    message = _fails_with(tmp_path, monkeypatch, _document({'aggregate_sinks': ['kafka/missing']}))
+    document = _document({'enabled': True, 'aggregate_sinks': ['kafka/missing']})
+
+    message = _fails_with(tmp_path, monkeypatch, document)
 
     assert "split.aggregate_sinks: 'kafka/missing' is not a configured sink; write '<type>/<name>'" in message
+
+
+def test_disabled_split_does_not_look_an_aggregate_sink_up(tmp_path, monkeypatch):
+    config = _load(tmp_path, monkeypatch, _document({'aggregate_sinks': ['kafka/missing']}))
+
+    assert config.split.aggregate_sinks == ['kafka/missing']
+
+
+@pytest.mark.parametrize('entry', ['missing', 'kafka/', '/final', 'kafka/a/b', ''])
+@pytest.mark.parametrize('enabled', [True, False])
+def test_aggregate_sink_entry_of_a_wrong_form_fails_also_with_the_feature_off(entry, enabled, tmp_path, monkeypatch):
+    document = _document({'enabled': enabled, 'aggregate_sinks': [entry]}, sinks=_sinks())
+
+    message = _fails_with(tmp_path, monkeypatch, document)
+
+    assert f"split.aggregate_sinks: '{entry}' is not a configured sink; write '<type>/<name>'" in message
 
 
 def test_aggregate_sinks_come_back_as_type_and_name_pairs(tmp_path, monkeypatch):
@@ -156,11 +174,29 @@ def test_a_value_out_of_its_range_fails_the_load(split, expected, tmp_path, monk
 @pytest.mark.parametrize(
     ('split', 'dlq', 'first', 'second', 'topic'),
     [
-        ({'parts_topic': 'input-events'}, {}, 'sources.kafka.topic', 'split.parts_topic', 'input-events'),
-        ({'results_topic': 'input-events'}, {}, 'sources.kafka.topic', 'split.results_topic', 'input-events'),
-        ({'parts_topic': 'same', 'results_topic': 'same'}, {}, 'split.parts_topic', 'split.results_topic', 'same'),
-        ({'parts_topic': 'late'}, {'topic': 'late'}, 'split.parts_topic', 'dlq.topic', 'late'),
-        ({}, {'topic': 'input-events'}, 'sources.kafka.topic', 'dlq.topic', 'input-events'),
+        (
+            {'enabled': True, 'parts_topic': 'input-events'},
+            {},
+            'sources.kafka.topic',
+            'split.parts_topic',
+            'input-events',
+        ),
+        (
+            {'enabled': True, 'results_topic': 'input-events'},
+            {},
+            'sources.kafka.topic',
+            'split.results_topic',
+            'input-events',
+        ),
+        (
+            {'enabled': True, 'parts_topic': 'same', 'results_topic': 'same'},
+            {},
+            'split.parts_topic',
+            'split.results_topic',
+            'same',
+        ),
+        ({'enabled': True, 'parts_topic': 'late'}, {'topic': 'late'}, 'split.parts_topic', 'dlq.topic', 'late'),
+        ({'enabled': True}, {'topic': 'input-events'}, 'sources.kafka.topic', 'dlq.topic', 'input-events'),
     ],
 )
 def test_the_four_topics_must_differ(split, dlq, first, second, topic, tmp_path, monkeypatch):
@@ -169,10 +205,33 @@ def test_the_four_topics_must_differ(split, dlq, first, second, topic, tmp_path,
     assert f"split: {first} and {second} name the same topic '{topic}'" in message
 
 
-def test_topic_check_runs_with_the_feature_off(tmp_path, monkeypatch):
-    message = _fails_with(tmp_path, monkeypatch, _document({'enabled': False, 'parts_topic': 'input-events'}))
+@pytest.mark.parametrize(
+    ('split', 'dlq'),
+    [
+        ({}, {'topic': 'input-events'}),
+        ({'parts_topic': 'input-events'}, {}),
+        ({'parts_topic': 'same', 'results_topic': 'same'}, {}),
+    ],
+)
+def test_topic_check_does_not_run_with_the_feature_off(split, dlq, tmp_path, monkeypatch):
+    config = _load(tmp_path, monkeypatch, _document(split, dlq=dlq))
 
-    assert 'split: sources.kafka.topic and split.parts_topic name the same topic' in message
+    assert config.split.enabled is False
+
+
+def test_http_only_worker_with_a_leftover_kafka_topic_equal_to_its_dlq_topic_loads(tmp_path, monkeypatch):
+    document = _document(dlq={'topic': 'events'})
+    document['sources'] = {'kafka': {'enabled': False, 'topic': 'events'}, 'http': {'enabled': True}}
+
+    assert _load(tmp_path, monkeypatch, document).dlq.topic == 'events'
+
+
+@pytest.mark.parametrize('max_attempts', [0, 11])
+def test_max_attempts_out_of_range_names_the_key_and_the_bound(max_attempts, tmp_path, monkeypatch):
+    message = _fails_with(tmp_path, monkeypatch, _document({'max_attempts': max_attempts}))
+
+    bound = 'greater than or equal to 1' if max_attempts == 0 else 'less than or equal to 10'
+    assert 'split.max_attempts' in message and bound in message
 
 
 def test_resolved_names_with_empty_keys():
@@ -284,3 +343,28 @@ def test_check_split_runs_again_after_on_startup():
 
     with pytest.raises(ValueError, match=SPLIT_WITHOUT_KAFKA_SOURCE_MESSAGE):
         app._lifecycle._check_config_after_startup()
+
+
+class SplitHandler(KafkaOnlyHandler):
+    async def split(self, message):
+        yield b''
+
+
+def test_a_worker_that_reads_parts_is_checked_as_one_when_on_startup_turns_the_key_off():
+    config = DrakkarConfig(
+        connections=kafka_connections(),
+        sources={'kafka': {'enabled': True}},
+        split={'enabled': True},
+        ui={'release': {'enabled': False}},
+        recorder={'enabled': False},
+    )
+    app = DrakkarApp(handler=SplitHandler(), config=config, worker_id='w-1')
+    assert app.parts_source is not None
+    # What ``on_startup`` did: the change of ``split.enabled`` is ignored, the other one is not.
+    app._config.split.enabled = False
+    app._config.split.connection = 'gone'
+
+    with pytest.raises(ValueError) as raised:
+        app._lifecycle._check_config_after_startup()
+
+    assert "split.connection 'gone' is not defined under connections.kafka" in str(raised.value)

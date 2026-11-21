@@ -238,6 +238,13 @@ parametrize).
     log (`drakkar/split/owner.py`): the latest `open` is the current attempt
     whichever instance wrote it, so two owners of a short overlap agree; it
     never forgets a job whose message it holds while it owns the partition.
+    A restored job is closed as `orphaned` only when the source never gave
+    its message to the processor: every message that enters the queue or a
+    window is reported to the owner first (`SplitOwner.note_delivered`), and
+    every offset of a window is tracked before the first await, because a
+    message can miss `begin` (a parse failure, a loop that died in its
+    window, a stop) and an orphan `closed` would let the next owner commit
+    the request with no hook.
     Its rules read the job table and the clock; an event of the tracker only
     wakes them, so an event that came before the message is never needed.
     The owner decides about a job only on a table that has read every record

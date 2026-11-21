@@ -407,8 +407,9 @@ an instance (`handler.arrange_stream = ...`) is not seen.
 
 The four hooks of this section, and `part_data_model`, are used only when
 `split.enabled` is true. With `split.enabled` false a handler that overrides
-`split()` starts, never calls it, and logs `split_disabled` once. A handler
-may override `part_data()`, `aggregate()`, `on_job_timeout()` or set
+`split()` starts, never calls it, and logs `split_disabled` once; no hook of
+this section is checked then. With `split.enabled` true a handler may
+override `part_data()`, `aggregate()`, `on_job_timeout()` or set
 `part_data_model` only together with `split()`. The [Split](split.md) page
 explains the whole feature: the topics, restarts, failures and what to know
 before you turn it on.
@@ -533,9 +534,9 @@ when the records of the job are gone (handled as a raise of the hook). See
 | Condition | Result |
 |---|---|
 | `split.enabled` is true and the handler does not override `split()` | startup fails |
-| the handler overrides `part_data()`, `aggregate()` or `on_job_timeout()`, or sets `part_data_model`, without `split()` | startup fails |
-| `split()` is not an async generator function (whatever `split.enabled` says) | startup fails |
-| the handler overrides `split()` and `split.enabled` is false | the worker starts, never calls `split()`, and logs `split_disabled` once |
+| `split.enabled` is true and the handler overrides `part_data()`, `aggregate()` or `on_job_timeout()`, or sets `part_data_model`, without `split()` | startup fails |
+| `split.enabled` is true and `split()` is not an async generator function | startup fails |
+| `split.enabled` is false | no split hook is checked: the worker starts and never calls them. A handler that has a `split()` method logs `split_disabled` once |
 
 ### on_task_complete
 

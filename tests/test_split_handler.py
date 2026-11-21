@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 import drakkar as dk
 from drakkar.config import SourcesConfig
-from drakkar.handler import handler_splits
+from drakkar.handler import _handler_splits
 from drakkar.models import ConfigurationError, SourceMessage
 from drakkar.sources.validation import validate_handler_for_sources
 from drakkar.split.models import SplitJob
@@ -118,25 +118,25 @@ def _job(failed_parts: int) -> SplitJob:
         ),
         (
             PartDataOnly,
-            False,
+            True,
             'PartDataOnly overrides part_data() without split(); it is called only for a handler that splits',
         ),
         (
             AggregateOnly,
-            False,
+            True,
             'AggregateOnly overrides aggregate() without split(); it is called only for a handler that splits',
         ),
         (
             JobTimeoutOnly,
-            False,
+            True,
             'JobTimeoutOnly overrides on_job_timeout() without split(); it is called only for a handler that splits',
         ),
         (
             ModelOnly,
-            False,
+            True,
             'ModelOnly sets part_data_model without split(); it is read only for a handler that splits',
         ),
-        (SyncSplitHandler, False, 'SyncSplitHandler.split must be an async generator function'),
+        (SyncSplitHandler, True, 'SyncSplitHandler.split must be an async generator function'),
         (CoroutineSplitHandler, True, 'CoroutineSplitHandler.split must be an async generator function'),
         (ModelOnly, True, 'ModelOnly sets part_data_model without split()'),
     ],
@@ -149,15 +149,27 @@ def test_split_startup_check_refuses_with_message(handler_cls, enabled, message)
 
 @pytest.mark.parametrize(
     ('handler_cls', 'enabled'),
-    [(PlainHandler, False), (SplitHandler, True), (SplitHandler, False), (AllSplitHooks, True)],
+    [
+        (PlainHandler, False),
+        (SplitHandler, True),
+        (SplitHandler, False),
+        (AllSplitHooks, True),
+        # With the feature off no split hook is checked: these names may be the handler's own.
+        (PartDataOnly, False),
+        (AggregateOnly, False),
+        (JobTimeoutOnly, False),
+        (ModelOnly, False),
+        (SyncSplitHandler, False),
+        (CoroutineSplitHandler, False),
+    ],
 )
 def test_split_startup_check_passes(handler_cls, enabled):
     validate_handler_for_sources(handler_cls(), _sources(), split_enabled=enabled)
 
 
 def test_handler_splits_detects_override_on_class():
-    assert handler_splits(SplitHandler())
-    assert not handler_splits(PlainHandler())
+    assert _handler_splits(SplitHandler())
+    assert not _handler_splits(PlainHandler())
 
 
 async def test_default_aggregate_sends_failed_job_to_dlq():

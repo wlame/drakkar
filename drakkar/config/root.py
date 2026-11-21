@@ -440,34 +440,54 @@ class DrakkarConfig(BaseSettings):
         if self.ui.detach_enabled and not detach.enabled:
             raise ValueError(UI_DETACH_WITHOUT_FEATURE_MESSAGE)
 
-    def check_split(self) -> None:
+    def check_split(self, *, enabled: bool | None = None) -> None:
         """Refuse a ``split`` section that cannot run.
 
-        With ``split.enabled`` false the section is still checked, except for the
-        rules that need the feature itself: the Kafka source, the connection and the
-        sink stages. The load calls this, and so does the startup after ``on_startup``,
-        which may have changed the keys: both give the same messages.
+        ``enabled`` is whether the feature is on in this worker; None reads
+        ``split.enabled``. The startup passes the value the worker was built
+        with, because a change of ``split.enabled`` in ``on_startup`` is ignored:
+        a worker that reads the parts topic is checked as one, whatever the hook
+        wrote into the key.
+
+
+        With ``split.enabled`` false only the values of the section itself are
+        checked: the timeouts and the form of the ``aggregate_sinks`` entries. No
+        rule that reads a key outside the section can then fail the load, so a
+        config that loaded before the section existed still loads. The load calls
+        this, and so does the startup after ``on_startup``, which may have changed
+        the keys: both give the same messages.
 
         Raises:
             ValueError: with the pinned message of the first broken rule.
         """
         split = self.split
-        if split.enabled:
-            if not self.sources.kafka.enabled:
-                raise ValueError(SPLIT_WITHOUT_KAFKA_SOURCE_MESSAGE)
-            _require_declared_connection('split.connection', 'kafka', split.connection, self.connections)
+        if enabled is None:
+            enabled = split.enabled
+        if not enabled:
+            self._check_split_aggregate_sink_form()
+            split.check_timeouts()
+            return
+        if not self.sources.kafka.enabled:
+            raise ValueError(SPLIT_WITHOUT_KAFKA_SOURCE_MESSAGE)
+        _require_declared_connection('split.connection', 'kafka', split.connection, self.connections)
         self._check_split_aggregate_sinks()
         split.check_timeouts()
         self._check_split_topics_differ()
-        if split.enabled:
-            self._check_split_stages()
+        self._check_split_stages()
+
+    def _check_split_aggregate_sink_form(self) -> None:
+        """Every ``split.aggregate_sinks`` entry is written ``<type>/<name>``; the sink itself is not looked up."""
+        for ref in self.split.aggregate_sinks:
+            sink_type, slash, name = ref.partition('/')
+            if not (sink_type and slash and name) or '/' in name:
+                raise ValueError(_aggregate_sink_message(ref))
 
     def _check_split_aggregate_sinks(self) -> None:
         """Every ``split.aggregate_sinks`` entry names a configured sink."""
         configured = self.sinks.policies()
         for ref in self.split.aggregate_sinks:
             if ref not in configured:
-                raise ValueError(f"split.aggregate_sinks: '{ref}' is not a configured sink; write '<type>/<name>'")
+                raise ValueError(_aggregate_sink_message(ref))
 
     def _check_split_topics_differ(self) -> None:
         """The source topic, the parts topic, the results topic and the DLQ topic are four different topics."""
@@ -542,7 +562,12 @@ class DrakkarConfig(BaseSettings):
 
     @property
     def split_connection(self) -> KafkaConnectionConfig | None:
-        """The connection of the split topics; ``None`` when ``split.enabled`` is false."""
+        """The connection of the split topics; ``None`` when ``split.enabled`` is false.
+
+        A view of the config as it is written. The split runtime does not read
+        it: it resolves ``split.connection`` itself, so a change of
+        ``split.enabled`` that the worker ignores cannot take its connection away.
+        """
         if not self.split.enabled:
             return None
         return self.declared_connection('split.connection', 'kafka', self.split.connection)
@@ -690,6 +715,11 @@ def own_storage_dir(storage_dir: str, cluster: str, worker: str) -> str:
     if not storage_dir:
         return ''
     return os.path.normpath(os.path.join(storage_dir, sanitize_cluster(cluster), worker))
+
+
+def _aggregate_sink_message(ref: str) -> str:
+    """The load message for a ``split.aggregate_sinks`` entry that is no sink of this config."""
+    return f"split.aggregate_sinks: '{ref}' is not a configured sink; write '<type>/<name>'"
 
 
 def _require_declared_connection(path: str, kind: str, name: str, connections: ConnectionsConfig) -> Any:

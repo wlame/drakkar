@@ -75,10 +75,10 @@
       "name": "non_ascii_key_counts_characters",
       "yaml": {
         "metrics": {
-          "p\u00f6rt": 9090
+          "pört": 9090
         }
       },
-      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  metrics.p\u00f6rt (did you mean 'port'?)"
+      "message": "config has unknown keys (YAML paths; as env vars they are DK_ plus the path with \"__\"; see docs/config-reference.md):\n  metrics.pört (did you mean 'port'?)"
     },
     {
       "name": "long_key_no_suggestion_at_distance_3",
@@ -927,7 +927,7 @@
           }
         }
       },
-      "message": "cache.exchange.cycle_deadline (10s) must be strictly less than cache.exchange.interval (10s) \u2014 otherwise the deadline can never fire before the next cycle schedules."
+      "message": "cache.exchange.cycle_deadline (10s) must be strictly less than cache.exchange.interval (10s) — otherwise the deadline can never fire before the next cycle schedules."
     },
     {
       "name": "deadline_fractional_values",
@@ -939,7 +939,7 @@
           }
         }
       },
-      "message": "cache.exchange.cycle_deadline (3s500ms) must be strictly less than cache.exchange.interval (2s500ms) \u2014 otherwise the deadline can never fire before the next cycle schedules."
+      "message": "cache.exchange.cycle_deadline (3s500ms) must be strictly less than cache.exchange.interval (2s500ms) — otherwise the deadline can never fire before the next cycle schedules."
     },
     {
       "name": "page_size_over_limit",
@@ -2918,6 +2918,7 @@
       "name": "split_aggregate_sink_not_configured",
       "yaml": {
         "split": {
+          "enabled": true,
           "aggregate_sinks": [
             "kafka/missing"
           ]
@@ -2949,10 +2950,62 @@
       "name": "split_topics_must_differ",
       "yaml": {
         "split": {
+          "enabled": true,
           "parts_topic": "input-events"
         }
       },
       "message": "split: sources.kafka.topic and split.parts_topic name the same topic 'input-events'"
+    },
+    {
+      "name": "split_dlq_topic_equals_the_source_topic",
+      "yaml": {
+        "split": {
+          "enabled": true
+        },
+        "dlq": {
+          "topic": "input-events"
+        }
+      },
+      "message": "split: sources.kafka.topic and dlq.topic name the same topic 'input-events'"
+    },
+    {
+      "name": "split_off_aggregate_sink_of_a_wrong_form",
+      "yaml": {
+        "split": {
+          "aggregate_sinks": [
+            "missing"
+          ]
+        }
+      },
+      "message": "split.aggregate_sinks: 'missing' is not a configured sink; write '<type>/<name>'"
+    },
+    {
+      "name": "split_idle_timeout_range",
+      "yaml": {
+        "split": {
+          "idle_timeout": "30s"
+        }
+      },
+      "message": "split.idle_timeout must be 0 or from 1m to 30d, got 30s",
+      "path": "split.idle_timeout"
+    },
+    {
+      "name": "split_max_attempts_below_its_bound",
+      "yaml": {
+        "split": {
+          "max_attempts": 0
+        }
+      },
+      "path": "split.max_attempts"
+    },
+    {
+      "name": "split_max_attempts_above_its_bound",
+      "yaml": {
+        "split": {
+          "max_attempts": 11
+        }
+      },
+      "path": "split.max_attempts"
     },
     {
       "name": "split_job_timeout_range",
@@ -4573,6 +4626,40 @@
       "yaml": {},
       "path": "split.max_part_data",
       "value": 65536
+    },
+    {
+      "name": "split_off_dlq_topic_equal_to_the_source_topic_loads",
+      "yaml": {
+        "dlq": {
+          "topic": "input-events"
+        }
+      },
+      "path": "dlq.topic",
+      "value": "input-events"
+    },
+    {
+      "name": "split_off_parts_topic_equal_to_the_source_topic_loads",
+      "yaml": {
+        "split": {
+          "parts_topic": "input-events"
+        }
+      },
+      "path": "split.parts_topic",
+      "value": "input-events"
+    },
+    {
+      "name": "split_off_aggregate_sink_not_configured_loads",
+      "yaml": {
+        "split": {
+          "aggregate_sinks": [
+            "kafka/missing"
+          ]
+        }
+      },
+      "path": "split.aggregate_sinks",
+      "value": [
+        "kafka/missing"
+      ]
     }
   ],
   "sink_policies": [

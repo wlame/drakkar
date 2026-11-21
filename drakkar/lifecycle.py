@@ -74,7 +74,7 @@ from drakkar.detach_group import kafka_card_feature
 from drakkar.executor import ExecutorPool
 from drakkar.fleet.providers import BUILTIN_PROVIDERS
 from drakkar.fleet.service import FleetRegistry, PeerView
-from drakkar.handler import handler_splits
+from drakkar.handler import _handler_splits
 from drakkar.hostinfo import effective_cpu_count
 from drakkar.kafka_security import describe_mixed_security
 from drakkar.logging import close_logging
@@ -806,7 +806,9 @@ class AppLifecycle:
         app._config.check_recorder_provider()
         app._config.check_autodiscover()
         app._config.check_detach()
-        app._config.check_split()
+        # The feature is on when the parts source was built; a change of ``split.enabled`` in
+        # ``on_startup`` is ignored, so the section is checked for what the worker really runs.
+        app._config.check_split(enabled=app._config.split.enabled or app.parts_source is not None)
         app._config.check_sink_waits()
         if app._config.autodiscover.enabled and not app._cluster_name:
             logger.warning(
@@ -1262,7 +1264,7 @@ class AppLifecycle:
         """
         app = self._app
         if app.parts_source is None:
-            if handler_splits(app._handler):
+            if _handler_splits(app._handler):
                 await logger.bind(worker_id=app._worker_id).ainfo(
                     'split_disabled',
                     category='split',

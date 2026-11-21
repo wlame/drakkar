@@ -29,7 +29,13 @@ from drakkar.models import (
 )
 from drakkar.sinks.base import BaseSink
 from drakkar.sinks.dlq_record import render_headers
-from drakkar.sinks.manager import DeliveryOutcome, MessageContext, MessageDLQState, SinkManager
+from drakkar.sinks.manager import (
+    DeliveryOutcome,
+    MessageContext,
+    MessageDLQState,
+    SinkDeliveryFailedError,
+    SinkManager,
+)
 from drakkar.split.models import PartDLQ, SinkCounts
 from tests.test_sink_delivery_policy import CollectingRecorder, RecordingDLQ, policy
 
@@ -219,7 +225,7 @@ async def test_counts_record_a_delivered_a_skipped_and_a_failed_delivery():
         (ScriptedSink('cache', 'redis', fail=True), 'dlq'),
         dlq=RecordingDLQ(),
     )
-    context = plain_context()
+    context = capture_context()
     result = CollectResult(
         postgres=[PostgresPayload(table='t', data=Data()), PostgresPayload(table='t', data=Data())],
         kafka=[KafkaPayload(data=Data())],
@@ -249,7 +255,7 @@ async def test_counts_record_a_delivered_a_skipped_and_a_failed_delivery():
 async def test_counts_leave_out_a_delivery_that_did_not_start():
     manager, _ = build_manager((ScriptedSink('main', 'postgres', fail=True), 'dlq'), dlq=RecordingDLQ())
     manager.register(ScriptedSink('results', 'kafka'), policy=policy(depends_on=('postgres/main',)))
-    context = plain_context()
+    context = capture_context()
 
     await manager.deliver_all(
         CollectResult(postgres=[PostgresPayload(table='t', data=Data())], kafka=[KafkaPayload(data=Data())]),
@@ -263,7 +269,7 @@ async def test_counts_leave_out_a_delivery_that_did_not_start():
 
 async def test_a_hook_skip_counts_as_skipped():
     manager, _ = build_manager((ScriptedSink('main', 'postgres', fail=True), 'dlq'), dlq=RecordingDLQ())
-    context = plain_context()
+    context = capture_context()
 
     async def skip(error):
         return DeliveryAction.SKIP
@@ -276,6 +282,86 @@ async def test_a_hook_skip_counts_as_skipped():
     )
 
     assert context.states[0].counts == {'postgres/main': SinkCounts(skipped=1)}
+
+
+async def test_a_message_that_is_not_in_capture_mode_counts_nothing():
+    manager, _ = build_manager(
+        (ScriptedSink('main', 'postgres', fail=True), 'skip'), (ScriptedSink('results', 'kafka'), 'dlq'), dlq=None
+    )
+    context = plain_context()
+    result = CollectResult(postgres=[PostgresPayload(table='t', data=Data())], kafka=[KafkaPayload(data=Data())])
+
+    await manager.deliver_all(result, on_delivery_error=declared, partition_id=2, message_context=context)
+
+    assert context.states[0].counts == {}
+
+
+def stalling_manager(sink: ScriptedSink, *, max_retries: int = 0) -> tuple[SinkManager, RecordingDLQ]:
+    """A manager under ``dlq.on_send_failure: stall`` whose DLQ write fails."""
+    dlq = RecordingDLQ(ok=False)
+    manager = SinkManager()
+    manager.register(sink, policy=policy(on_failure='dlq', max_retries=max_retries))
+    manager.attach_runtime(
+        recorder=CollectingRecorder(),  # ty: ignore[invalid-argument-type]
+        dlq_sink=dlq,  # ty: ignore[invalid-argument-type]
+        dlq_on_send_failure='stall',
+    )
+    return manager, dlq
+
+
+async def test_a_stall_policy_in_capture_mode_gives_a_dlq_outcome_and_does_not_raise():
+    manager, dlq = stalling_manager(ScriptedSink('main', 'postgres', fail=True))
+    context = capture_context()
+
+    outcomes = await manager.deliver_all(
+        CollectResult(postgres=[PostgresPayload(table='t', data=Data())]),
+        on_delivery_error=declared,
+        partition_id=2,
+        message_context=context,
+    )
+
+    assert outcomes[('postgres', 'main')] == DeliveryOutcome.DLQ
+    assert dlq.sent == []
+    assert context.states[0].captured is not None
+    assert context.states[0].counts == {'postgres/main': SinkCounts(failed=1)}
+
+
+async def test_a_stall_of_a_message_that_is_not_in_capture_mode_raises_and_counts_nothing():
+    manager, _ = stalling_manager(ScriptedSink('main', 'postgres', fail=True))
+    context = plain_context()
+
+    with pytest.raises(SinkDeliveryFailedError):
+        await manager.deliver_all(
+            CollectResult(postgres=[PostgresPayload(table='t', data=Data())]),
+            on_delivery_error=declared,
+            partition_id=2,
+            message_context=context,
+        )
+
+    assert context.states[0].counts == {}
+
+
+async def test_a_hook_retry_and_then_dlq_in_capture_mode_captures_the_second_attempt():
+    manager, _ = build_manager(dlq=RecordingDLQ())
+    manager.register(ScriptedSink('main', 'postgres', fail=True), policy=policy(on_failure='dlq', max_retries=1))
+    context = capture_context()
+    answers = [DeliveryAction.RETRY, DeliveryAction.DLQ]
+
+    async def retry_then_dlq(error):
+        return answers.pop(0)
+
+    outcomes = await manager.deliver_all(
+        CollectResult(postgres=[PostgresPayload(table='t', data=Data())]),
+        on_delivery_error=retry_then_dlq,
+        partition_id=2,
+        message_context=context,
+    )
+
+    assert outcomes[('postgres', 'main')] == DeliveryOutcome.DLQ and answers == []
+    assert context.states[0].captured == PartDLQ(
+        stage='sink', sink='postgres/main', error='postgres is down', attempts=2
+    )
+    assert context.states[0].counts == {'postgres/main': SinkCounts(failed=1)}
 
 
 # --- Job records ---
@@ -396,6 +482,35 @@ async def test_send_job_dlq_with_an_unconfigured_dlq_counts_a_drop():
 
     assert written is False
     assert [line['event'] for line in logs] == ['dlq_send_dropped_unconfigured']
+
+
+async def test_send_job_dlq_answers_true_after_a_sink_failure_wrote_the_record_of_the_message():
+    dlq = RecordingDLQ()
+    manager, _ = build_manager((ScriptedSink('main', 'postgres', fail=True), 'dlq'), dlq=dlq)
+    context = plain_context()
+    await manager.deliver_all(
+        CollectResult(postgres=[PostgresPayload(table='t', data=Data())]),
+        on_delivery_error=declared,
+        partition_id=2,
+        message_context=context,
+    )
+    assert len(dlq.sent) == 1
+
+    written = await manager.send_job_dlq(
+        context, stage='aggregate', error='e', sink=None, task_id=None, attempts=None, partition_id=2
+    )
+
+    assert written is True
+    assert len(dlq.sent) == 1
+
+
+async def test_send_job_dlq_refuses_a_window_context():
+    manager, _ = build_manager(dlq=RecordingDLQ())
+
+    with pytest.raises(ValueError, match='send_job_dlq needs a source message; a window context has none'):
+        await manager.send_job_dlq(
+            MessageContext.window(), stage='split', error='e', sink=None, task_id=None, attempts=1, partition_id=2
+        )
 
 
 async def test_send_job_dlq_refuses_a_message_in_capture_mode():

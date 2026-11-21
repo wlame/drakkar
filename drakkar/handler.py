@@ -1082,13 +1082,13 @@ def uses_arrange_stream(handler: object) -> bool:
     return _overrides(handler, 'arrange_stream')
 
 
-def overrides_hook(handler: object, hook_name: str) -> bool:
-    """Whether the handler's class overrides the hook of that name; the public form of the class-level check."""
+def _overrides_hook(handler: object, hook_name: str) -> bool:
+    """Whether the handler's class overrides the hook of that name. For the framework only, not for handler code."""
     return _overrides(handler, hook_name)
 
 
-def handler_splits(handler: object) -> bool:
-    """Whether the handler overrides ``split``, so it can turn a message into parts."""
+def _handler_splits(handler: object) -> bool:
+    """Whether the handler overrides ``split``, so it can turn a message into parts. For the framework only."""
     return _overrides(handler, 'split')
 
 

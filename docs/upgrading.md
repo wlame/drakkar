@@ -16,7 +16,9 @@ this release. Use the second first when you come from a release older than
 
 ## Upgrading from 3.1.0 to this release {#from-3-1-0}
 
-Nothing changes for a worker that does not turn the new features on.
+A worker that does not turn the new features on works as before. What is
+new for it is listed under item 3: one token in the config summary line,
+new metric families at 0, and a new config section.
 
 1. **`BaseDrakkarHandler` has four new members:** `detach`, `attach`,
    `detach_state` and `request_stop` (see [Detach](detach.md)). A handler
@@ -26,21 +28,33 @@ Nothing changes for a worker that does not turn the new features on.
    `autodiscover` and `sources.kafka.detach.enabled`; to give operators the
    Live-page control, also `ui.detach_enabled`.
 3. **The split feature is off by default.** A worker with `split.enabled:
-   false` behaves as before, also when its handler defines `split`; it then
-   logs `split_disabled` once. `BaseDrakkarHandler` has the new hooks
-   `split`, `part_data`, `aggregate` and `on_job_timeout` and the class
-   attribute `part_data_model`. A handler class that already defines its own
-   `part_data`, `aggregate`, `on_job_timeout` or `part_data_model` without
-   `split` now fails the start, and a method named `split` that is not an
-   async generator fails the start even with `split.enabled: false`: rename
-   yours. The
-   DLQ record has two new values of `dk-stage`, `split` and `aggregate`;
-   check consumers of the DLQ topic that read that header. Before you set
-   `split.enabled: true`, create the parts topic and the results topic (the
-   results topic with the partition count of the source topic), give the
-   worker the rights on them and on the two new consumer groups, set
-   `split.aggregate_sinks`, and make your sinks accept repeats. See
-   [Split](split.md#the-two-topics).
+   false` behaves as before. Its handler is not checked for the new hook
+   names: a handler that already has its own `split`, `part_data`,
+   `aggregate`, `on_job_timeout` or `part_data_model` starts as before, and
+   the framework never calls them. A handler with a method named `split`
+   logs `split_disabled` once (level info). Three things are new for such a
+   worker:
+    - The config summary line of the start has one more token,
+      ` split=off`, after `sources=[...]`. Change a parser of that line.
+    - The eleven `drakkar_split_*` metric families exist, with the value 0.
+    - The root config accepts a `split` section. With `split.enabled: false`
+      only its own values are checked (the ranges, the two timeouts, the
+      form of the `aggregate_sinks` entries); no other key of your config is
+      read by these checks.
+
+   Before you set `split.enabled: true`: `BaseDrakkarHandler` has the new
+   hooks `split`, `part_data`, `aggregate` and `on_job_timeout` and the class
+   attribute `part_data_model`, so rename a member of your handler that has
+   one of these names for another purpose (with the feature on, the start
+   fails when the handler has one of them without `split`, and when `split`
+   is not an async generator). The DLQ record gets two new values of
+   `dk-stage`, `split` and `aggregate`; check consumers of the DLQ topic
+   that read that header. The source topic, the parts topic, the results
+   topic and the DLQ topic must be four different topics. Create the parts
+   topic and the results topic (the results topic with the partition count
+   of the source topic), give the worker the rights on them and on the two
+   new consumer groups, set `split.aggregate_sinks`, and make your sinks
+   accept repeats. See [Split](split.md#the-two-topics).
 
 ## Upgrading from 3.0.3 to 3.1.0 {#from-3-0-3}
 

@@ -28,8 +28,8 @@ from drakkar.groups import (
 )
 from drakkar.handler import (
     BaseDrakkarHandler,
+    _overrides_hook,
     overridden_completion_hooks,
-    overrides_hook,
     task_run_seconds_hook,
     uses_arrange_stream,
 )
@@ -470,7 +470,7 @@ class PartitionProcessor:
         # never keeps tasks, results or errors; its groups do, for
         # on_group_complete only, and only until that hook has run.
         # A part's ``part_data`` hook reads the same group as on_message_complete.
-        self._calls_part_data = part_mode is not None and overrides_hook(handler, 'part_data')
+        self._calls_part_data = part_mode is not None and _overrides_hook(handler, 'part_data')
         reads_message_details = implemented['message_complete'] or self._calls_part_data
         self._keep_message_details = reads_message_details and not self._stream_mode
         self._keep_group_results = self._stream_mode and implemented['group_complete']

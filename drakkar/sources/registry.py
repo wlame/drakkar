@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from drakkar.handler import handler_splits
+from drakkar.handler import _handler_splits
 from drakkar.sources.base import Source
 from drakkar.sources.http import HttpSource
 from drakkar.sources.kafka import KafkaSource
@@ -35,7 +35,7 @@ KAFKA_SOURCE_NAME = 'kafka'
 
 def reads_parts(app: DrakkarApp) -> bool:
     """Whether the worker reads the parts topic: ``split.enabled`` is true and the handler splits."""
-    return app._config.split.enabled and handler_splits(app._handler)
+    return app._config.split.enabled and _handler_splits(app._handler)
 
 
 def build_sources(app: DrakkarApp) -> list[Source]:

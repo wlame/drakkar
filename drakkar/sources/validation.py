@@ -67,17 +67,24 @@ def validate_stream_hooks(handler: Any) -> None:
 
 
 def validate_split_hooks(handler: Any, *, split_enabled: bool) -> None:
-    """Raise ``ConfigurationError`` when the split hooks of the handler do not fit each other or ``split.enabled``."""
-    from drakkar.handler import handler_splits, overrides_hook
+    """Raise ``ConfigurationError`` when the split hooks of the handler do not fit each other.
 
+    With ``split.enabled`` false nothing is checked: no split hook is ever
+    called, so a handler whose methods or attributes have these names for
+    its own use starts as it did before the feature existed.
+    """
+    from drakkar.handler import _handler_splits, _overrides_hook
+
+    if not split_enabled:
+        return
     handler_cls = type(handler)
     name = handler_cls.__name__
-    if handler_splits(handler):
+    if _handler_splits(handler):
         if not inspect.isasyncgenfunction(handler_cls.split):
             raise ConfigurationError(f'{name}.split must be an async generator function')
         return
     for hook in _SPLIT_ONLY_HOOKS:
-        if overrides_hook(handler, hook):
+        if _overrides_hook(handler, hook):
             raise ConfigurationError(
                 f'{name} overrides {hook}() without split(); it is called only for a handler that splits'
             )
@@ -85,10 +92,9 @@ def validate_split_hooks(handler: Any, *, split_enabled: bool) -> None:
         raise ConfigurationError(
             f'{name} sets part_data_model without split(); it is read only for a handler that splits'
         )
-    if split_enabled:
-        raise ConfigurationError(
-            f'split.enabled=true but {name} does not override split() — implement it or set split.enabled to false'
-        )
+    raise ConfigurationError(
+        f'split.enabled=true but {name} does not override split() — implement it or set split.enabled to false'
+    )
 
 
 def _is_set(group_labels: object) -> bool:

@@ -71,7 +71,10 @@ An environment variable takes the same text: `DK_EXECUTOR__TASK_TIMEOUT=5m`. Som
 <path> must be from 16MiB to 512MiB, got 600MiB
 <path> must be at least 1s, got 0
 <path> must be at most 1d, got 2d
+<path> must be 0 or from 1m to 30d, got 30s
 ```
+
+The last form is for a key where `0` means "off" or "no limit" and every other value has a range, such as `split.job_timeout` and `split.idle_timeout`.
 
 The config summary, the `worker_config` table and the reference pages show a value in its canonical form: a duration in descending terms with no zero term (`2h45m`, `500ms`), a size in the unit that gives the smallest whole number (`256MiB`). `ui.prometheus.rate_interval` stays a PromQL text. The code APIs keep their numbers: `@periodic(interval=..., lease_seconds=...)`.
 
@@ -666,7 +669,7 @@ A root section, after `sources` and before `executor`. It lets a handler cut a l
 | `split.max_attempts` | `int` | `3` | How many attempts of one job may die during their split (no `split-done` and no `split-cancelled`) before the job goes to the DLQ, 1 to 10. An attempt that a stop or a revoke cancelled is not counted. |
 | `split.max_part_data` | size | `64KiB` | The largest data of one part, `1KiB` to `512KiB`. |
 
-The load fails when: `split.enabled` is on and the Kafka source is off; `split.connection` is not defined under `connections.kafka` (checked only with the feature on); an `aggregate_sinks` entry is not a configured sink; both timeouts are `0`; `idle_timeout` is not below `job_timeout`; the source topic, the parts topic, the results topic and the DLQ topic are not four different topics; or, with the feature on, a sink depends on a sink of the other stage. The checks run again after `on_startup`; a change of `split.enabled` there is ignored and logged. The config summary has the token `split=on` or `split=off` after `sources=[...]`.
+With `split.enabled: false` the load checks only the values of the section itself: the ranges, both timeouts `0`, `idle_timeout` not below `job_timeout`, and an `aggregate_sinks` entry that is not written `<type>/<name>`. No key outside the section is read then, so a config that loaded before the section existed still loads. With `split.enabled: true` the load also fails when: the Kafka source is off; `split.connection` is not defined under `connections.kafka`; an `aggregate_sinks` entry is not a configured sink; the source topic, the parts topic, the results topic and the DLQ topic are not four different topics; or a sink depends on a sink of the other stage. The checks run again after `on_startup`; a change of `split.enabled` there is ignored and logged, and a worker that was built with the feature on is checked with the feature on. The config summary has the token `split=on` or `split=off` after `sources=[...]`.
 
 The load messages:
 

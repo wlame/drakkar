@@ -230,12 +230,19 @@ class MessageContext:
         return zip(self.source_messages, self.states, strict=True)
 
     def count_delivery(self, key: SinkKey, outcome: DeliveryOutcome) -> None:
-        """Add one decided delivery group of sink ``key`` to the counts of every source message."""
+        """Add one decided delivery group of sink ``key`` to the counts of every source message in capture mode.
+
+        Only the result of a part reads the counts, and a part is always in
+        capture mode. For any other message nothing is counted, so its
+        delivery does no work for a feature it does not use.
+        """
         counted_field = _COUNTED_FIELD.get(outcome)
-        if counted_field is None:
+        if counted_field is None or not any(state.capture for state in self.states):
             return
         ref = sink_ref(key)
         for state in self.states:
+            if not state.capture:
+                continue
             counts = state.counts.get(ref)
             if counts is None:
                 counts = state.counts[ref] = SinkCounts()
@@ -1206,10 +1213,12 @@ class SinkManager:
     ) -> DeliveryOutcome:
         """End a failed delivery by ``action`` and record ``sink_error`` with what really came of it.
 
-        The recorded action is the outcome, not the request: ``dlq`` only
-        when a record exists, ``skip`` for a skip and for a window result
-        (where ``dlq`` acts as ``skip``), and ``failed`` when no record could
-        be written (a lost write, no context, a stall).
+        The recorded action is the outcome, not the request: ``dlq`` when a
+        record exists, and for a message in capture mode when its outcome
+        was kept in its state (no record is written for it, and no stall
+        applies); ``skip`` for a skip and for a window result (where ``dlq``
+        acts as ``skip``); and ``failed`` when no record could be written (a
+        lost write, no context, a stall).
         """
         outcome = DeliveryOutcome.FAILED
         try:
@@ -1433,7 +1442,13 @@ class SinkManager:
         and row. Returns True when every message has a record, written now or
         earlier; False when one could not be written, and the caller then
         applies ``dlq.on_send_failure``, as for a ``parse`` record.
+
+        Raises:
+            ValueError: the context is a window context, which names no source
+                message, or one of its messages is in capture mode.
         """
+        if message_context.is_window:
+            raise ValueError('send_job_dlq needs a source message; a window context has none')
         if any(state.capture for state in message_context.states):
             raise ValueError('send_job_dlq needs a message that is not in capture mode')
         if self._dlq_sink is None:

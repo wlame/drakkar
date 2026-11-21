@@ -350,9 +350,9 @@ hook answered.
 | Condition | Result |
 |---|---|
 | `split.enabled` is true and the handler does not override `split()` | the start fails |
-| the handler overrides `part_data()`, `aggregate()` or `on_job_timeout()`, or sets `part_data_model`, without `split()` | the start fails |
-| `split()` is not an async generator function (whatever `split.enabled` says) | the start fails |
-| the handler overrides `split()` and `split.enabled` is false | the worker starts, never calls `split()`, and logs `split_disabled` once |
+| `split.enabled` is true and the handler overrides `part_data()`, `aggregate()` or `on_job_timeout()`, or sets `part_data_model`, without `split()` | the start fails |
+| `split.enabled` is true and `split()` is not an async generator function | the start fails |
+| `split.enabled` is false | no split hook is checked: the worker starts and never calls them. A handler that has a `split()` method logs `split_disabled` once |
 
 ## `SplitJob` and `PartResult` {#splitjob-and-partresult}
 
@@ -556,11 +556,15 @@ The root section `split`, after `sources` and before `executor`:
 - Each key has an environment form: `DK_SPLIT__` and the key in upper case,
   for example `DK_SPLIT__ENABLED=true` or `DK_SPLIT__JOB_TIMEOUT=6h`. No key
   is secret.
-- With `enabled: false` the section loads, is checked, and does nothing.
+- With `enabled: false` the section loads and does nothing. Only its own
+  values are checked then: the ranges, the two timeouts, and the form
+  `<type>/<name>` of the `aggregate_sinks` entries. The rules that read
+  other keys (the Kafka source, the connection, the configured sinks, the
+  four topics, the sink stages) apply only with `enabled: true`.
 - The parts consumer takes its poll and session settings from
   `sources.kafka`.
-- The source topic, the parts topic, the results topic and the DLQ topic
-  must be four different topics.
+- With `enabled: true` the source topic, the parts topic, the results topic
+  and the DLQ topic must be four different topics.
 - The checks run again after `on_startup`. A change of `split.enabled` in
   `on_startup` is ignored and logged, like the other settings that are read
   before `on_startup`.
