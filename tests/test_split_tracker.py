@@ -5,7 +5,7 @@ import dataclasses
 from collections.abc import Callable
 
 import pytest
-from confluent_kafka import KafkaError, KafkaException
+from confluent_kafka import OFFSET_INVALID, KafkaError, KafkaException, TopicPartition
 from structlog.testing import capture_logs
 
 from drakkar.config.connections import KafkaConnectionConfig
@@ -774,29 +774,101 @@ async def test_a_failed_position_check_is_logged_and_tried_again(monkeypatch):
 
 async def test_the_position_is_not_used_while_a_seek_back_is_pending(monkeypatch):
     monkeypatch.setattr('drakkar.split.tracker.RESTORE_END_CHECK_SECONDS', 0)
+    monkeypatch.setattr('drakkar.split.tracker.POLL_TIMEOUT_SECONDS', 0.02)
     h = Harness()
-    gate = asyncio.Event()
-    h.consumer_class = GatedConsumer
     await h.t.start()
     try:
-        h.consumer.gate = gate
+        h.consumer.wait_for_records = True
+        h.consumer.fail_next('seek', KafkaException(KafkaError(KafkaError._STATE)), times=3)
         h.writer.open(10)
         h.log.skip(TOPIC, PARTITION, 2)
-        follow = asyncio.create_task(h.t.follow(PARTITION, committed_source_offset=None))
-        await wait_until(lambda: (TOPIC, PARTITION) in h.consumer._positions and h.consumer.gated > 0)
-        state = h.t._followed[PARTITION]
-        # The client stands past the end, and a seek back is pending: the restore must not end on it.
-        h.consumer._positions[(TOPIC, PARTITION)] = 3
-        state.reposition = True
-        await h.t._check_position(state)
-        assert h.t.is_restoring(PARTITION) and state.next_offset == 0
-        state.reposition = False
-        h.consumer._positions[(TOPIC, PARTITION)] = 0
-        gate.set()
-        table = await asyncio.wait_for(follow, timeout=2)
+        await wait_until(lambda: h.consumer.consumes_waiting > 0)
+        # The batch in flight returns job 10 and is dropped; the client then reports the end of the
+        # partition as its position, but the seeks back fail three times, so the position must wait.
+        positions = []
+        original = h.consumer.position
+
+        async def position(partitions):
+            rows = await original(partitions)
+            positions.append((h.t._followed[PARTITION].reposition, rows[0].offset))
+            return rows
+
+        h.consumer.position = position
+        table = await h.follow()
         assert [job.offset for job in table.open_jobs()] == [10]
+        assert all(not pending for pending, _offset in positions)
     finally:
         await h.t.stop()
+
+
+async def test_a_pending_seek_back_keeps_a_known_position_from_ending_the_restore(harness):
+    harness.writer.open(10)
+    harness.log.skip(TOPIC, PARTITION, 2)
+    gate = asyncio.Event()
+
+    async def held_watermarks(partition, timeout=None, cached=False):
+        await gate.wait()
+        return harness.log.watermarks(partition.topic, partition.partition)
+
+    original = harness.consumer.get_watermark_offsets
+    harness.consumer.get_watermark_offsets = held_watermarks
+    follow = asyncio.create_task(harness.t.follow(PARTITION, committed_source_offset=None))
+    await wait_until(lambda: PARTITION in harness.t._followed)
+    state = harness.t._followed[PARTITION]
+    harness.consumer.get_watermark_offsets = original
+    state.restore_end = 3
+    state.reposition = True
+    harness.consumer._positions[(TOPIC, PARTITION)] = 3
+    harness.consumer._reported[(TOPIC, PARTITION)] = 3
+    await harness.t._check_position(state)
+    assert harness.t.is_restoring(PARTITION) and state.next_offset == 0
+    state.reposition = False
+    gate.set()
+    table = await asyncio.wait_for(follow, timeout=2)
+    assert [job.offset for job in table.open_jobs()] == [10]
+
+
+async def test_an_unknown_position_does_not_end_a_restore(monkeypatch):
+    monkeypatch.setattr('drakkar.split.tracker.RESTORE_END_CHECK_SECONDS', 0)
+    h = Harness()
+    await h.t.start()
+    try:
+        # The remaining range holds no record a consumer returns: the client never knows a position.
+        h.log.skip(TOPIC, PARTITION, 3)
+        answers = []
+        original = h.consumer.position
+
+        async def position(partitions):
+            rows = await original(partitions)
+            answers.append(rows[0].offset)
+            return rows
+
+        h.consumer.position = position
+        follow = asyncio.create_task(h.t.follow(PARTITION, committed_source_offset=None))
+        await wait_until(lambda: len(answers) >= 3)
+        assert set(answers) == {OFFSET_INVALID}
+        assert h.t.is_restoring(PARTITION)
+        await h.t.release(PARTITION)
+        with pytest.raises(asyncio.CancelledError):
+            await follow
+    finally:
+        await h.t.stop()
+
+
+async def test_the_position_is_unknown_after_an_assignment_and_after_a_seek(harness):
+    consumer = harness.consumer
+    harness.writer.open(10)
+    harness.log.skip(TOPIC, PARTITION, 2)
+    tp = TopicPartition(TOPIC, 9)
+    harness.log.append(TOPIC, 9, key=None, value=b'x')
+    await consumer.incremental_assign([TopicPartition(TOPIC, 9, 0)])
+    assert (await consumer.position([tp]))[0].offset == OFFSET_INVALID
+    await wait_until(lambda: consumer._reported[(TOPIC, 9)] == 1)
+    await consumer.seek(TopicPartition(TOPIC, 9, 0))
+    assert (await consumer.position([tp]))[0].offset == OFFSET_INVALID
+    await consumer.incremental_unassign([tp])
+    with pytest.raises(KafkaException):
+        await consumer.position([tp])
 
 
 async def test_an_error_while_handling_a_record_is_logged_and_reading_goes_on(harness, monkeypatch):

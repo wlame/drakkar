@@ -445,8 +445,13 @@ class JobTracker:
                 error=exc,
             )
             return
+        if row.offset < 0:
+            # The client knows no position from an assignment or a seek until it has returned a record of
+            # the partition. So a restore whose whole remaining range holds no record a consumer returns
+            # still waits; a producer that is not transactional writes no such offsets.
+            return
         current = self._followed.get(state.partition) is state and state.restoring and not state.reposition
-        if current and row.offset >= 0 and row.offset >= state.restore_end:
+        if current and row.offset >= state.restore_end:
             state.next_offset = max(state.next_offset, row.offset)
             self._finish_restore(state)
 

@@ -298,7 +298,10 @@ class FakeConsumerClient(FailureSwitches):
         # Where a position below the low watermark goes: 'earliest', 'latest', or 'error' (an error message).
         self.auto_offset_reset = auto_offset_reset
         self.closed = False
+        # The next offset to fetch, and the position the client reports: unknown (OFFSET_INVALID) from an
+        # assignment or a seek until a ``consume`` has returned a record of the partition.
         self._positions: dict[tuple[str, int], int] = {}
+        self._reported: dict[tuple[str, int], int] = {}
         self.error_messages: deque[FakeMessage] = deque()
         # With ``wait_for_records`` a ``consume`` with nothing to give waits up to its timeout, as the real
         # client does, and returns the records that arrive meanwhile, also those of a partition assigned
@@ -326,16 +329,19 @@ class FakeConsumerClient(FailureSwitches):
     async def assign(self, partitions: list[TopicPartition]) -> None:
         self._check_open('assign')
         self._positions = {(tp.topic, tp.partition): self._start_offset(tp) for tp in partitions}
+        self._reported = {key: OFFSET_INVALID for key in self._positions}
 
     async def incremental_assign(self, partitions: list[TopicPartition]) -> None:
         self._check_open('incremental_assign')
         for tp in partitions:
             self._positions[(tp.topic, tp.partition)] = self._start_offset(tp)
+            self._reported[(tp.topic, tp.partition)] = OFFSET_INVALID
 
     async def incremental_unassign(self, partitions: list[TopicPartition]) -> None:
         self._check_open('incremental_unassign')
         for tp in partitions:
             self._positions.pop((tp.topic, tp.partition), None)
+            self._reported.pop((tp.topic, tp.partition), None)
 
     def inject_error(self, error: KafkaError) -> None:
         """Make the next ``consume`` return a message that carries ``error``."""
@@ -379,19 +385,26 @@ class FakeConsumerClient(FailureSwitches):
                 position = records[-1].offset + 1
             # The client moves past offsets that hold no record it returns (transaction markers).
             self._positions[(topic, partition)] = self.log.next_record_offset(topic, partition, position)
+            if records or self._reported.get((topic, partition), OFFSET_INVALID) >= 0:
+                self._reported[(topic, partition)] = self._positions[(topic, partition)]
             if len(messages) >= num_messages:
                 break
         return messages
 
     async def position(self, partitions: list[TopicPartition]) -> list[TopicPartition]:
-        """The next offset the client would fetch for each assigned partition; an unassigned one is refused."""
+        """The position the client reports for each assigned partition; an unassigned one is refused.
+
+        It is ``OFFSET_INVALID`` from an assignment or a seek until a ``consume`` returned a record of the
+        partition; then the offset after the last record returned, moved past offsets with no record that a
+        later read passed.
+        """
         self._check_open('position')
         found = []
         for tp in partitions:
             key = (tp.topic, tp.partition)
             if key not in self._positions:
                 raise KafkaException(KafkaError(KafkaError._STATE, 'Erroneous state'))
-            found.append(TopicPartition(tp.topic, tp.partition, self._positions[key]))
+            found.append(TopicPartition(tp.topic, tp.partition, self._reported[key]))
         return found
 
     async def seek(self, partition: TopicPartition) -> None:
@@ -401,6 +414,7 @@ class FakeConsumerClient(FailureSwitches):
         if key not in self._positions:
             raise KafkaException(KafkaError(KafkaError._STATE, 'Erroneous state'))
         self._positions[key] = partition.offset
+        self._reported[key] = OFFSET_INVALID
 
     async def commit(
         self, message: Any = None, offsets: list[TopicPartition] | None = None, asynchronous: bool = False
