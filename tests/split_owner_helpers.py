@@ -37,7 +37,7 @@ from drakkar.split.records import (
 )
 from drakkar.split.runtime import SplitRuntime
 from drakkar.split.table import JobTable
-from tests.split_helpers import FakeClock, FakeConsumerClient, FakeLog, FakeProducerClient, FakeRecord
+from tests.split_helpers import FakeClock, FakeConsumerClient, FakeLog, FakeMessage, FakeProducerClient, FakeRecord
 from tests.test_message_dlq import CountingSink, FanOutHandler, ScriptedPool
 from tests.test_sink_delivery_policy import CollectingRecorder, RecordingDLQ
 
@@ -466,6 +466,24 @@ class OwnerWorker:
         collect = consumer._collect
         consumer._collect = lambda num_messages: collect(num_messages) if released.is_set() else []
         return released
+
+    def hide_offsets_of(self, *kinds: str) -> None:
+        """Make the delivery report of every record of ``kinds`` of the results log name no offset.
+
+        The record is written as usual; only its report differs.
+        """
+        deliver = self.client._deliver
+
+        def deliver_without_offset(item: Any) -> None:
+            entry = parse_log_record(item.headers, item.value) if item.topic == RESULTS_TOPIC else None
+            if entry is None or entry.kind not in kinds or item.on_delivery is None:
+                deliver(item)
+                return
+            report, item.on_delivery = item.on_delivery, None
+            deliver(item)
+            report(None, FakeMessage(topic=item.topic, partition=item.partition))
+
+        self.client._deliver = deliver_without_offset  # ty: ignore[invalid-assignment]
 
     async def stop(self) -> None:
         """A clean stop: the processor first, then the runtime."""

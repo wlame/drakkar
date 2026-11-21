@@ -245,10 +245,19 @@ parametrize).
     record, `JobTracker.read_position` says how far the table is): the
     tracker reads a record about a second after its acknowledgement, and a
     rule that ran before would take the owner's own new attempt for missing.
+    A delivery report with no offset is never read as "nothing to wait for":
+    the owner reads the end of the log after the report
+    (`JobTracker.end_offset`) and waits for the table to reach it. The
+    partition loop never waits for the tracker: `begin` returns once the
+    records of a failed job are written, and a task of the owner settles
+    the offset.
     The end of a job works on a snapshot of one attempt. Every `closed` the
     owner writes for a held job (an end, a failed split, spent attempts) names
     the attempt that was judged, and the offset completes only when the table
     shows `closed`: every reader ignores a `closed` record of an older attempt.
+    The owner takes its record for ignored only when the table shows another
+    attempt id as current; the same attempt still open means the record is
+    not read yet, so an end can never start again for the owner's own record.
     The offset of an open job is not drainable, and a stop or revoke cancels
     a split outside the drain, because a job can last hours. A part's offset
     completes only after its `result` record is acknowledged

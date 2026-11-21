@@ -231,6 +231,24 @@ class JobTracker:
             return None
         return state.next_offset
 
+    async def end_offset(self, partition: int) -> int | None:
+        """The end of the results log of ``partition`` as the broker has it now: the offset its next record gets.
+
+        Every record that was acknowledged before the call lies below it. So
+        a writer whose delivery report named no offset can still tell when
+        the table has its record: once the tracker has read up to this end.
+        None for a partition that is not followed.
+
+        Raises:
+            KafkaException: the broker did not answer.
+        """
+        if partition not in self._followed:
+            return None
+        _low, high = await self._consumer.get_watermark_offsets(
+            TopicPartition(self._topic, partition), timeout=QUERY_TIMEOUT_SECONDS
+        )
+        return high
+
     def is_restoring(self, partition: int) -> bool:
         """True while the job table of ``partition`` is being restored."""
         state = self._followed.get(partition)

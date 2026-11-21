@@ -29,7 +29,7 @@ from drakkar.providers.resilience import RateLimitedLog
 from drakkar.request_ids import RequestIdResolver, reset_request_id
 from drakkar.sinks.dlq_record import cut_error
 from drakkar.split.partmode import RETRY_FIRST_WAIT_SECONDS, RETRY_MAX_WAIT_SECONDS
-from drakkar.split.producer import SplitProduceError, SplitProducer
+from drakkar.split.producer import NO_OFFSET, SplitProduceError, SplitProducer
 from drakkar.split.records import JobRef, WireRecord, log_record, open_body, part_record, part_value, ref_id
 from drakkar.split.table import MAX_PART_INDEX
 
@@ -85,14 +85,18 @@ class SplitResult:
     ``reason`` is the interrupt of an ``INTERRUPTED`` run; a ``DONE`` run
     carries one that came together with its last acknowledgement, when no
     wait of the split was left to see it. ``open_enqueued`` says whether the
-    ``open`` record may have reached the log.
+    ``open`` record may have reached the log, ``open_acknowledged`` whether
+    the log has it.
     """
 
     end: SplitEnd
     parts: int = 0
     open_enqueued: bool = False
+    open_acknowledged: bool = False
     # The highest offset of a record of the results log that this run wrote and that was acknowledged; -1 for none.
     written_through: int = -1
+    # Whether the delivery report of an acknowledged record of the results log named no offset.
+    unplaced_record: bool = False
     reason: InterruptReason | None = None
     failure: str = ''
     cause: BaseException | None = None
@@ -164,8 +168,11 @@ class SplitRun:
         self._left_scope: PipelineHookScope | None = None
         self._in_flight: dict[asyncio.Future[int], WireRecord] = {}
         self.open_enqueued = False
+        self.open_acknowledged = False
         # The highest acknowledged offset of a record this run wrote to the results log; -1 for none.
         self.written_through = -1
+        # Whether the delivery report of an acknowledged record of the results log named no offset.
+        self.unplaced_record = False
         self.parts = 0
         # Set by the owner when the job tracker read the ``open`` record of this attempt.
         self.own_open_seen = False
@@ -225,7 +232,9 @@ class SplitRun:
             end=end,
             parts=self.parts,
             open_enqueued=self.open_enqueued,
+            open_acknowledged=self.open_acknowledged,
             written_through=self.written_through,
+            unplaced_record=self.unplaced_record,
             reason=reason,
             failure=failure,
             cause=cause,
@@ -360,6 +369,7 @@ class SplitRun:
         # From here on the record may reach the log, also when its delivery report never comes.
         self.open_enqueued = True
         await self._write_to_log(log_record(ref, 'open', body))
+        self.open_acknowledged = True
         logger.info(
             'split_job_opened',
             category='split',
@@ -482,8 +492,14 @@ class SplitRun:
             _SplitFailed: the record can never be delivered.
             _SplitInterrupted: the split must stop.
         """
-        offset = await self._deliver_record(self._settings.results_topic, record)
-        self.written_through = max(self.written_through, offset)
+        self._note_written(await self._deliver_record(self._settings.results_topic, record))
+
+    def _note_written(self, offset: int) -> None:
+        """Note an acknowledged record of the results log: its offset, or that its delivery report named none."""
+        if offset == NO_OFFSET:
+            self.unplaced_record = True
+        else:
+            self.written_through = max(self.written_through, offset)
 
     async def _deliver_record(self, topic: str, record: WireRecord, *, failed: SplitProduceError | None = None) -> int:
         """Produce one record and wait for its acknowledgement; a failure a retry can fix is tried again.
@@ -558,7 +574,7 @@ class SplitRun:
                 self._settings.producer.publish(self._settings.results_topic, record),
                 timeout=self._settings.cancel_write_seconds,
             )
-            self.written_through = max(self.written_through, offset)
+            self._note_written(offset)
         except (TimeoutError, SplitProduceError, RuntimeError) as error:
             logger.warning(
                 'split_cancel_write_failed',

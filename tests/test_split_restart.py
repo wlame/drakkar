@@ -1908,26 +1908,32 @@ async def test_the_closed_record_of_spent_attempts_names_the_attempt_that_was_ju
 
 async def test_a_wait_for_the_tracker_to_read_an_own_record_is_logged_while_it_lasts(monkeypatch):
     monkeypatch.setattr(owner_module, 'READ_BACK_WARN_FIRST_SECONDS', 0.05)
-    monkeypatch.setattr(owner_module, 'READ_BACK_WARN_NEXT_SECONDS', 0.1)
+    monkeypatch.setattr(owner_module, 'READ_BACK_WARN_NEXT_SECONDS', 0.05)
     world = World()
-    handler = SplittingHandler({500: items(1)}, answer=summary())
+    handler = SplittingHandler({500: items(1), 501: items(1)}, answer=summary())
     worker = OwnerWorker(world, handler)
     await worker.restore()
     released = worker.hold_tracker_reads()
 
     with capture_logs() as logs:
-        worker.run(source_message(500))
+        worker.run(source_message(500), source_message(501))
+        assert worker.owner is not None
+        # One line for the partition in each interval, however many jobs wait.
+        worker.owner._log_limit._interval_seconds = 0.3
         await wait_until(lambda: len(events(logs, 'split_read_back_waiting')) == 2)
         released.set()
         await worker.caught_up()
-        await asyncio.sleep(0.15)
+        await asyncio.sleep(0.1)
 
-    # The owner waits for its split-done record: logged after the first time, then after each next time.
-    waiting = events(logs, 'split_read_back_waiting')
-    assert [(line['job'], line['offset'], line['log_level']) for line in waiting] == [('3:500', 1, 'warning')] * 2
-    assert [line['seconds'] for line in waiting] == [pytest.approx(0.05), pytest.approx(0.15)]
+    # Both jobs wait for their split-done record and both ask every 0.05 s; the partition logs one line
+    # at once and the next one an interval later, with the lines it held back.
+    first, second = events(logs, 'split_read_back_waiting')
+    assert (first['job'], first['offset'], first['log_level'], first['suppressed']) == ('3:500', 1, 'warning', 0)
+    assert first['seconds'] == pytest.approx(0.05)
+    assert second['job'] in ('3:500', '3:501') and second['suppressed'] >= 4
+    assert second['seconds'] >= 0.3
     world.report_all()
-    await wait_until(lambda: worker.committed == 501)
+    await wait_until(lambda: worker.committed == 502)
     await worker.stop()
 
 

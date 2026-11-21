@@ -36,7 +36,7 @@ from drakkar.sinks.manager import CollectCallback, MessageDLQState, SinkManager
 from drakkar.split import partmode
 from drakkar.split.ending import ClosedRecord, EndFacts, EndSettings, JobEnder, local_facts
 from drakkar.split.models import PartResult, TimedOutKind
-from drakkar.split.producer import SplitProducer
+from drakkar.split.producer import NO_OFFSET, SplitProducer
 from drakkar.split.records import ClosedOutcome, JobRef, job_id, new_attempt_id, ref_id
 from drakkar.split.splitting import CANCEL_WRITE_SECONDS, SplitEnd, SplitResult, SplitRun, SplitSettings
 from drakkar.split.table import MS_PER_SECOND, JobState, JobTable
@@ -51,6 +51,9 @@ NO_PART_FAILURE = 'the split yielded no part for a job that has parts in the log
 # lasts means the tracker reads nothing, and the jobs of the partition do not move.
 READ_BACK_WARN_FIRST_SECONDS = 30.0
 READ_BACK_WARN_NEXT_SECONDS = 60.0
+# The waits between two tries to read the end of the results log, after a try that failed.
+END_OFFSET_RETRY_FIRST_SECONDS = 0.5
+END_OFFSET_RETRY_MAX_SECONDS = 5.0
 
 SleepFn = Callable[[float], Awaitable[None]]
 
@@ -60,7 +63,7 @@ class _Settled(StrEnum):
 
     # The job is closed: the offset completes.
     CLOSED = 'closed'
-    # A newer attempt is current, so every reader ignored the record: the job is still open.
+    # Another attempt is the current one, so every reader ignored the record: the job is still open.
     OPEN = 'open'
     # The owner stopped before the table had read the record.
     STOPPED = 'stopped'
@@ -71,11 +74,12 @@ class BeginOutcome(StrEnum):
 
     # The split yielded nothing: the message runs on this worker.
     LOCAL = 'local'
-    # The message is a job; its offset stays pending until the job ends.
+    # The message is a job; its offset stays pending until the results log shows the job closed. Also a
+    # job whose split failed, from the write of its ``closed`` record until the log shows it.
     JOB = 'job'
     # The results log says the job is closed: the owner completed the offset.
     DONE = 'done'
-    # The split failed or its attempts are spent: the owner completed the offset, or stalled it.
+    # The split failed or its attempts are spent, and no record could say so: the owner stalled the offset.
     FAILED = 'failed'
 
 
@@ -133,6 +137,9 @@ class OwnerSettings:
     # The next offset the job tracker reads in the results log of a source partition; None while it
     # does not follow the partition (``JobTracker.read_position``).
     read_position: Callable[[int], int | None]
+    # The end of the results log of a source partition as the broker has it now (the offset its next
+    # record gets); None while the job tracker does not follow the partition (``JobTracker.end_offset``).
+    end_offset: Callable[[int], Awaitable[int | None]]
     # ``split.job_timeout`` and ``split.idle_timeout`` in seconds; 0 is off.
     job_timeout: int = 0
     idle_timeout: int = 0
@@ -188,6 +195,9 @@ class _HeldJob:
     # acknowledged (``open``, ``split-done``, ``split-cancelled``, ``closed``); -1 for none. The owner
     # decides about the job only on a table that has read past it.
     own_written_through: int = -1
+    # Whether the log holds a record of this owner for the job whose delivery report named no offset,
+    # and that ``own_written_through`` does not cover yet.
+    own_unplaced: bool = False
     # Whether a task waits for the job tracker to read past ``own_written_through``.
     catching_up: bool = False
     # What this owner does for the job now; at most one of the three.
@@ -232,8 +242,9 @@ class SplitOwner:
         self._handler = handler
         self._stopping = False
         self._stopped = asyncio.Event()
-        # Set each time the job tracker has read on in the results log of this partition.
-        self._log_advanced = asyncio.Event()
+        # One future for each wait for the next read of the job tracker in the results log of this
+        # partition; a read resolves them all, so no waiter can take the wake of another.
+        self._read_waiters: set[asyncio.Future[None]] = set()
         self._log_limit = RateLimitedLog(time.monotonic)
         self._ender = JobEnder(
             settings.end_settings(),
@@ -307,6 +318,13 @@ class SplitOwner:
             held = _HeldJob(message=message, opened_at=self._settings.clock())
             return await self._until_stop(held, self._start_attempt(held, None))
         if job.closed is not None:
+            logger.info(
+                'split_job_already_closed',
+                category='split',
+                partition=self._label,
+                job=job_id(self._partition, job.offset, job.attempt),
+                outcome=job.closed,
+            )
             self._host.complete_job_offset(offset)
             return BeginOutcome.DONE
         held = _HeldJob(message=message, opened_at=job.opened_at_ms / MS_PER_SECOND)
@@ -392,7 +410,10 @@ class SplitOwner:
 
     def log_read(self) -> None:
         """The job tracker read on in the results log of this partition: who waits for a record looks again."""
-        self._log_advanced.set()
+        waiters, self._read_waiters = self._read_waiters, set()
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
 
     def _job_changed(self, job: JobState) -> None:
         """The results log said something new about ``job``: let the rules of a holder act, if it is held."""
@@ -458,10 +479,14 @@ class SplitOwner:
 
     def _table_has_own_records(self, held: _HeldJob) -> bool:
         """Whether the job tracker has read every record this owner wrote for the job."""
-        if held.own_written_through < 0:
-            return True
+        if held.own_unplaced:
+            return False
+        return held.own_written_through < 0 or self._has_read(held.own_written_through)
+
+    def _has_read(self, offset: int) -> bool:
+        """Whether the job table holds the record at ``offset`` of the results log and every record before it."""
         position = self._settings.read_position(self._partition)
-        return position is not None and position > held.own_written_through
+        return position is not None and position > offset
 
     def _reconcile_when_read(self, held: _HeldJob) -> None:
         """Let the rules of a holder act once the job tracker has read the records of this owner; one task for a job."""
@@ -471,58 +496,144 @@ class SplitOwner:
 
     async def _catch_up(self, held: _HeldJob) -> None:
         try:
-            read = await self._read_past(held, held.own_written_through, stop_grace=0.0)
+            read = await self._place_own_records(held) and await self._wait_for_table(
+                held, lambda: self._has_read(held.own_written_through), stop_grace=0.0
+            )
         finally:
             held.catching_up = False
         if read:
             self._reconcile(held)
 
-    async def _read_past(self, held: _HeldJob, offset: int, *, stop_grace: float) -> bool:
-        """Wait until the job tracker has read past ``offset`` of the results log; false when the owner stopped first.
+    async def _place_own_records(self, held: _HeldJob) -> bool:
+        """Find how far the log holds the records of this owner whose delivery report named no offset.
 
-        True means the job table holds the record at ``offset`` and every
-        record before it. After a stop the wait gets ``stop_grace`` seconds
-        more, then it ends, so a tracker that reads nothing holds no drain.
-        Outside a stop it lasts as long as it takes, and a wait that lasts
-        is logged.
+        Such a record was acknowledged, so it lies below the end the log has
+        afterwards. The end is read after the acknowledgement, and the last
+        offset before it stands for the record: once the tracker has read
+        past it, the table has the record. False when the owner stopped
+        before the end could be read; the records are then still unplaced.
+        """
+        while held.own_unplaced:
+            # Cleared first: a record that is acknowledged during the read sets it again.
+            held.own_unplaced = False
+            end: int | None = None
+            try:
+                end = await self._end_of_log()
+            finally:
+                if end is None:
+                    held.own_unplaced = True
+            if end is None:
+                return False
+            held.own_written_through = max(held.own_written_through, end - 1)
+        return True
+
+    async def _end_of_log(self) -> int | None:
+        """The end of the results log of this partition as the broker has it now; None when the owner stopped first.
+
+        A read that fails is tried again after 0.5, 1, 2 ... 5 seconds, for
+        as long as it takes: without the end the owner could not tell when
+        the table has a record, and it never decides without that.
+        """
+        wait = END_OFFSET_RETRY_FIRST_SECONDS
+        while not self._stopped.is_set():
+            read = await self._unless_stopped(self._settings.end_offset(self._partition))
+            if read is None:
+                break
+            error = read.exception()
+            end = None if error is not None else read.result()
+            if end is not None and end > 0:
+                return end
+            suppressed = self._log_limit.admit('end_offset')
+            if suppressed is not None:
+                logger.warning(
+                    'split_end_offset_read_failed',
+                    category='split',
+                    partition=self._label,
+                    error=describe_error(error) if error is not None else 'the job tracker gave no end of the log',
+                    suppressed=suppressed,
+                    hint='the end of the results log is read again; the jobs of the partition wait for it',
+                )
+            await self._unless_stopped(self._settings.sleep(wait))
+            wait = min(wait * 2, END_OFFSET_RETRY_MAX_SECONDS)
+        return None
+
+    async def _unless_stopped(self, work: Awaitable[Any]) -> asyncio.Future[Any] | None:
+        """Wait for ``work`` or for a stop; the finished work, or None when the stop came first.
+
+        Work that the stop overtook is cancelled. An error of the work stays
+        in the returned future.
+        """
+        task = asyncio.ensure_future(work)
+        stop = asyncio.ensure_future(self._stopped.wait())
+        try:
+            await asyncio.wait({task, stop}, return_when=asyncio.FIRST_COMPLETED)
+            return task if task.done() else None
+        finally:
+            stop.cancel()
+            if not task.done():
+                task.cancel()
+
+    async def _wait_for_table(self, held: _HeldJob, ready: Callable[[], bool], *, stop_grace: float) -> bool:
+        """Wait until ``ready`` holds for the job table; false when the owner stopped first.
+
+        ``ready`` is asked again after every read of the job tracker in the
+        results log of this partition. After a stop the wait gets
+        ``stop_grace`` seconds more, then it ends, so a tracker that reads
+        nothing holds no drain. Outside a stop it lasts as long as it takes,
+        and a wait that lasts is logged.
         """
         waited = 0.0
         next_warning = READ_BACK_WARN_FIRST_SECONDS
         grace_ends: float | None = None
         while True:
-            position = self._settings.read_position(self._partition)
-            if position is not None and position > offset:
+            if ready():
                 return True
-            self._log_advanced.clear()
             if self._stopped.is_set():
                 if grace_ends is None:
                     grace_ends = time.monotonic() + stop_grace
                 left = grace_ends - time.monotonic()
                 if left <= 0:
                     return False
-                await self._read_or_stop(left, watch_stop=False)
-            elif await self._read_or_stop(next_warning, watch_stop=True):
+                await self._next_read(left, watch_stop=False)
+            elif await self._next_read(next_warning, watch_stop=True):
                 waited += next_warning
                 next_warning = READ_BACK_WARN_NEXT_SECONDS
-                logger.warning(
-                    'split_read_back_waiting',
-                    category='split',
-                    partition=self._label,
-                    job=f'{self._partition}:{held.message.offset}',
-                    offset=offset,
-                    seconds=waited,
-                    hint='the job tracker has not read a record this worker wrote; the job waits for it',
-                )
+                self._warn_read_back(held, waited)
 
-    async def _read_or_stop(self, seconds: float, *, watch_stop: bool) -> bool:
-        """Wait for the next read of the job tracker, for a stop when asked, or ``seconds``; true when the time passed."""
-        waits = {asyncio.ensure_future(self._log_advanced.wait())}
+    def _warn_read_back(self, held: _HeldJob, waited: float) -> None:
+        """Log a wait for the job tracker that lasts; one line for the partition in each interval."""
+        suppressed = self._log_limit.admit('read_back')
+        if suppressed is None:
+            return
+        logger.warning(
+            'split_read_back_waiting',
+            category='split',
+            partition=self._label,
+            job=f'{self._partition}:{held.message.offset}',
+            offset=held.own_written_through,
+            seconds=waited,
+            suppressed=suppressed,
+            hint='the job tracker has not read a record this worker wrote; the job waits for it',
+        )
+
+    async def _next_read(self, seconds: float, *, watch_stop: bool) -> bool:
+        """Wait for the next read of the job tracker, for a stop when asked, or ``seconds``; true when the time passed.
+
+        The wait has a future of its own, which is in place before this
+        coroutine first gives the loop a turn. So a read that comes after
+        the caller looked at the table always ends the wait, however many
+        waits the partition has.
+        """
+        read: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._read_waiters.add(read)
+        waits: set[asyncio.Future[Any]] = {read}
         if watch_stop:
             waits.add(asyncio.ensure_future(self._stopped.wait()))
         try:
             done, _ = await asyncio.wait(waits, timeout=seconds, return_when=asyncio.FIRST_COMPLETED)
             return not done
         finally:
+            self._read_waiters.discard(read)
             for wait in waits:
                 wait.cancel()
 
@@ -687,6 +798,7 @@ class SplitOwner:
             held.run = None
             self._runs.discard(run)
         held.own_written_through = max(held.own_written_through, result.written_through)
+        held.own_unplaced = held.own_unplaced or result.unplaced_record
         is_held = self._jobs.get(offset) is held
         if result.end is SplitEnd.LOCAL and held.base_ref is None:
             return BeginOutcome.LOCAL
@@ -719,10 +831,11 @@ class SplitOwner:
             error=result.failure,
             exc_info=result.cause if result.cause is not None else False,
         )
-        # The attempt that ``closed`` names is taken now, with the decision. A split that failed
-        # before its own ``open`` closes the attempt the log had when the split started: a
-        # ``closed`` of an attempt the log never saw would be ignored for a job the log knows.
-        ref = run.ref if result.open_enqueued or held.base_ref is None else held.base_ref
+        # The attempt that ``closed`` names is taken now, with the decision. A split whose own
+        # ``open`` is not in the log (it failed before the record, or the record was refused for
+        # good) closes the attempt the log had when the split started: a ``closed`` of an attempt
+        # the log never saw would be ignored for a job the log knows.
+        ref = run.ref if result.open_acknowledged or held.base_ref is None else held.base_ref
         error = f'split failed: {cut_error(result.failure)}'
         may_complete = await self._ender.send_to_dlq(
             held.message, held.state, stage='split', error=error, attempts=None
@@ -748,16 +861,14 @@ class SplitOwner:
     async def _close_failed(
         self, held: _HeldJob, ref: JobRef, outcome: ClosedOutcome, *, may_complete: bool
     ) -> BeginOutcome:
-        """Write ``closed`` for a job whose split failed, then settle its offset by what the log shows.
+        """Write ``closed`` for a job whose split failed; its offset is settled later, by what the log shows.
 
         With no DLQ record under ``stall`` nothing is closed, so a restart
-        tries the job again. A stop during the retries of the write, or
-        before the record is read back, leaves the offset pending. When
-        another instance opened a newer attempt before the record, the log
-        ignores the record and the job goes on under that attempt, which
-        this owner follows. The DLQ record of the failure is written by
-        then; a job may so end with a DLQ record and with a result, as it
-        may with two owners.
+        tries the job again. A stop during the retries of the write leaves
+        the offset pending. Once the record is acknowledged the job is held
+        like any open job, and a task of the owner waits for the job table
+        to read the record (:meth:`_settle_failed`): the caller, which can
+        be the partition loop in ``begin``, does not wait for the tracker.
         """
         offset = held.message.offset
         if not may_complete:
@@ -773,15 +884,26 @@ class SplitOwner:
             self._drop(held)
             await self._host.stall_offset(offset)
             return BeginOutcome.FAILED
-        settled = await self._settle_closed(held, ClosedRecord(offset=written, outcome=outcome, duration=duration))
-        if settled is _Settled.CLOSED:
-            self._host.complete_job_offset(offset)
-            return BeginOutcome.FAILED
-        if settled is _Settled.OPEN:
-            self._follow_newer_attempt(held)
-        else:
-            self._host.hold_job_offset(offset)
+        record = ClosedRecord(offset=written, attempt_id=ref.attempt_id, outcome=outcome, duration=duration)
+        self._hold(held)
+        self._spawn(self._settle_failed(held, record))
         return BeginOutcome.JOB
+
+    async def _settle_failed(self, held: _HeldJob, record: ClosedRecord) -> None:
+        """Settle the offset of a job whose split failed, once the job table has read its ``closed`` record.
+
+        The log has the job as closed: the offset completes. Another
+        instance opened a newer attempt before the record: the log ignores
+        the record and the job goes on under that attempt, which this owner
+        follows. The DLQ record of the failure is written by then; a job may
+        so end with a DLQ record and with a result, as it may with two
+        owners. A stop before the record is read leaves the offset pending.
+        """
+        settled = await self._settle_closed(held, record)
+        if settled is _Settled.CLOSED:
+            self._host.complete_job_offset(held.message.offset)
+        elif settled is _Settled.OPEN:
+            self._follow_newer_attempt(held)
 
     def _note_superseded(self, ref: JobRef) -> None:
         """Count and log an attempt of this owner that another instance's attempt replaced."""
@@ -878,22 +1000,28 @@ class SplitOwner:
         The offset of a job completes only when the results log has a
         ``closed`` for it. The record of this owner is ignored when another
         instance's ``open`` came before it in the log, and only the job
-        table knows the order. So the owner waits until the tracker has read
-        past the record, then looks at the table: the job is closed (or
-        retired), and the offset may complete; or a newer attempt is
-        current, and the job is still open. The end of the job is counted
-        and logged only when the log took this very record. ``record`` is
-        None when the log had the job as closed already and nothing was
-        written.
+        table knows the order. So the owner waits until the table has judged
+        the record (:meth:`_closed_was_judged`), then looks at it: the job
+        is closed (or retired), and the offset may complete; or another
+        attempt is current, and the job is still open. The end of the job is
+        counted and logged only when the log took this very record.
+        ``record`` is None when the log had the job as closed already and
+        nothing was written.
         """
         offset = held.message.offset
         if record is not None:
-            held.own_written_through = max(held.own_written_through, record.offset)
-            if not await self._read_past(held, record.offset, stop_grace=partmode.STOP_GRACE_SECONDS):
+            if record.offset == NO_OFFSET:
+                held.own_unplaced = True
+                if not await self._place_own_records(held):
+                    return _Settled.STOPPED
+            else:
+                held.own_written_through = max(held.own_written_through, record.offset)
+            judged = functools.partial(self._closed_was_judged, offset, record.attempt_id, held.own_written_through)
+            if not await self._wait_for_table(held, judged, stop_grace=partmode.STOP_GRACE_SECONDS):
                 return _Settled.STOPPED
         job = self._table.job(offset)
         if job is None or job.closed is not None:
-            if record is not None and job is not None and job.closed_offset == record.offset:
+            if record is not None and job is not None and self._log_took(job, record, held.own_written_through):
                 self._ender.note_closed(record)
             self._drop(held)
             return _Settled.CLOSED
@@ -905,6 +1033,35 @@ class SplitOwner:
             hint='another instance opened a newer attempt before the closed record of this worker; the job stays open',
         )
         return _Settled.OPEN
+
+    def _closed_was_judged(self, offset: int, attempt_id: str, through: int) -> bool:
+        """Whether the job table shows what the log made of a ``closed`` record this owner wrote for ``attempt_id``.
+
+        The tracker must have read past ``through``, where the record lies
+        at the latest. Then the table must show the job as closed (or
+        retired), or another attempt as the current one. While it still
+        shows the attempt of the record as open, the record has not been
+        read, wherever the tracker is: a reader that takes no ``closed`` for
+        the current attempt does not exist. So the owner never takes its own
+        unread record for a newer attempt, and never ends a job twice for it.
+        """
+        if not self._has_read(through):
+            return False
+        job = self._table.job(offset)
+        return job is None or job.closed is not None or job.attempt_id != attempt_id
+
+    @staticmethod
+    def _log_took(job: JobState, record: ClosedRecord, through: int) -> bool:
+        """Whether the ``closed`` record that closed ``job`` in the table is ``record``.
+
+        A record with a known offset is told by its offset. One whose
+        delivery report named no offset is told by what it says and by where
+        it can lie: the same attempt and outcome, at or below ``through``.
+        """
+        if record.offset != NO_OFFSET:
+            return job.closed_offset == record.offset
+        same = job.attempt_id == record.attempt_id and job.closed == record.outcome
+        return same and job.closed_offset is not None and job.closed_offset <= through
 
     def _follow_newer_attempt(self, held: _HeldJob) -> None:
         """Go on with a job that is still open under an attempt newer than the one this owner ended or failed.

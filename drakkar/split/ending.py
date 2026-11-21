@@ -78,10 +78,14 @@ class EndFacts:
 class ClosedRecord:
     """An acknowledged ``closed`` record of a job: where it is in the results log, and what it says.
 
-    ``job`` is the view of an end through a hook; None for a failed split.
+    ``offset`` is ``NO_OFFSET`` when the delivery report named none.
+    ``attempt_id`` is the attempt the record names: every reader of the log
+    ignores the record once another attempt is the current one. ``job`` is
+    the view of an end through a hook; None for a failed split.
     """
 
     offset: int
+    attempt_id: str
     outcome: ClosedOutcome
     duration: float
     job: SplitJob | None = None
@@ -502,7 +506,7 @@ class JobEnder:
             raise asyncio.CancelledError(STOPPED_MESSAGE)
         if written == 'final':
             return False
-        return ClosedRecord(offset=written, outcome=outcome, duration=duration, job=job)
+        return ClosedRecord(offset=written, attempt_id=ref.attempt_id, outcome=outcome, duration=duration, job=job)
 
     def note_closed(self, record: ClosedRecord) -> None:
         """Count and log the end of a job whose ``closed`` record the results log took.

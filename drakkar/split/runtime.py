@@ -220,10 +220,9 @@ class SplitRuntime:
     ) -> SplitOwner:
         """Build the owner of the split jobs of a source partition on its restored table.
 
-        The events of the job tracker for the partition go to this owner,
-        until :meth:`release`: first the ones that came since the restore
-        ended, then every later one. ``host`` is the processor of the
-        partition; ``on_collect`` delivers the answer of ``aggregate``.
+        The events of the job tracker for the partition go to this owner
+        from here on, until :meth:`release`. ``host`` is the processor of
+        the partition; ``on_collect`` delivers the answer of ``aggregate``.
         """
         settings = OwnerSettings(
             producer=self.producer,
@@ -236,6 +235,7 @@ class SplitRuntime:
             max_attempts=self._config.split.max_attempts,
             results_reader=self._results_reader,
             read_position=self.tracker.read_position,
+            end_offset=self.tracker.end_offset,
             job_timeout=self._config.split.job_timeout,
             idle_timeout=self._config.split.idle_timeout,
             clock=self._clock,

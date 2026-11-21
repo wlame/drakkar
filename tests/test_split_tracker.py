@@ -1309,3 +1309,23 @@ async def test_the_read_position_is_the_next_offset_and_is_told_after_each_batch
         assert h.t.read_position(PARTITION) is None
     finally:
         await h.t.stop()
+
+
+async def test_the_end_offset_is_the_end_of_the_log_now_whatever_the_tracker_has_read():
+    h = Harness()
+    await h.t.start()
+    try:
+        assert await h.t.end_offset(PARTITION) is None
+        await h.follow()
+        h.consumer._collect = lambda num_messages: []  # ty: ignore[invalid-assignment]
+        last = h.writer.done(40, 2)
+        # The broker has the record; the tracker has not read it.
+        assert await h.t.end_offset(PARTITION) == last + 1
+        assert h.t.read_position(PARTITION) == 0
+        h.consumer.fail_next('get_watermark_offsets', KafkaException(KafkaError(KafkaError._TRANSPORT)))
+        with pytest.raises(KafkaException):
+            await h.t.end_offset(PARTITION)
+        await h.t.release(PARTITION)
+        assert await h.t.end_offset(PARTITION) is None
+    finally:
+        await h.t.stop()
