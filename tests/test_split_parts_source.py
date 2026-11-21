@@ -7,10 +7,13 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from structlog.testing import capture_logs
 
 import drakkar as dk
+from drakkar import cluster_tasks, detach_slots
+from drakkar import detach as detach_module
 from drakkar.app import (
     DrakkarApp,
     changed_consumed_settings,
@@ -19,18 +22,27 @@ from drakkar.app import (
 from drakkar.config import DrakkarConfig
 from drakkar.consumer import KafkaConsumer
 from drakkar.metrics import assigned_partitions, offsets_committed, split_parts_processed
+from drakkar.metrics import detached as detached_gauge
 from drakkar.models import ConfigurationError, ExecutorTask, PrecomputedResult, SourceMessage
 from drakkar.sources.http import HttpSource
 from drakkar.sources.kafka import KafkaSource, LeaveOutcome
 from drakkar.sources.parts import PartsSource, SourcePair
 from drakkar.sources.registry import build_sources
 from drakkar.split.partmode import ResultWriter
-from drakkar.split.records import PARTS_PARTITION_BASE, JobRef, parse_log_record, part_record
+from drakkar.split.records import PARTS_PARTITION_BASE, JobRef, parse_log_record, parse_part_headers, part_record
 from drakkar.split.runtime import SplitRuntime
+from drakkar.uiserver.routes_health import create_health_router
+from tests.clocks import VirtualClock
 from tests.conftest import wait_for
+from tests.fleet_fakes import RecordingLogger
 from tests.split_helpers import FakeLog, FakeProducerClient
 from tests.stream_helpers import make_pool
+from tests.test_detach_controller import NOW as DETACH_NOW
+from tests.test_detach_controller import FakeSource as DetachFakeSource
+from tests.test_detach_controller import Harness as DetachHarness
+from tests.test_detach_controller import peer as detach_peer
 from tests.test_sources_validation import In, KafkaOnlyHandler, Out
+from tests.test_split_part_mode import ok_result
 
 SOURCE_TOPIC = 'orders'
 GROUP = 'orders-workers'
@@ -265,9 +277,6 @@ async def test_the_runtime_stop_delivers_what_the_producer_still_holds():
     parts.client.hold_deliveries = True
     writer = ResultWriter(runtime.producer, results_topic=RESULTS_TOPIC, stopping=lambda: False)
     message = part_message()
-    from drakkar.split.records import parse_part_headers
-    from tests.test_split_part_mode import ok_result
-
     message.split = parse_part_headers(message.headers)
     write = asyncio.create_task(writer.write(message, ok_result()))
     await wait_for(lambda: parts.client.produced == 1)
@@ -428,10 +437,6 @@ async def test_a_report_of_a_partition_gives_up_when_the_partition_or_the_source
 
 
 async def test_readyz_names_a_dead_partition_of_the_parts_source_with_its_shown_number():
-    from fastapi import FastAPI
-
-    from drakkar.uiserver.routes_health import create_health_router
-
     app = split_app()
     runtime = await wired(app)
     source = app.parts_source
@@ -765,3 +770,65 @@ async def test_a_worker_without_split_builds_nothing_and_logs_nothing(monkeypatc
     assert not [line for line in logs if line['event'].startswith('split_')]
     assert order == ['sinks_connected', f'subscribed:{SOURCE_TOPIC}', f'closed:{SOURCE_TOPIC}']
     assert context.split is None
+
+
+def test_the_lifecycle_builds_the_runtime_from_the_config_and_the_identity_of_the_worker():
+    app = split_app()
+
+    runtime = app._lifecycle._build_split_runtime()
+
+    assert (runtime.worker, runtime.instance) == (WORKER, app._instance)
+    assert runtime.connection.brokers == 'internal:9092'
+    assert (runtime.parts_topic, runtime.results_topic) == (PARTS_TOPIC, RESULTS_TOPIC)
+
+
+async def test_a_detach_leaves_both_groups_and_an_attach_joins_both(tmp_path, monkeypatch):
+    recording = RecordingLogger()
+    for module in (detach_module, detach_slots, cluster_tasks):
+        monkeypatch.setattr(module, 'logger', recording)
+    clock = VirtualClock(DETACH_NOW)
+    # Time moves only when a test runs the clock.
+    clock.limit = DETACH_NOW
+    harness = DetachHarness(tmp_path, clock)
+    harness.fleet.views = [detach_peer()]
+    parts_calls: list[str] = []
+    parts = DetachFakeSource(harness.app, parts_calls)
+    harness.controller.follow_parts(parts)
+
+    detached_result = await harness.detach()
+    assert detached_result.detached
+    assert (harness.calls.count('leave_group'), parts_calls) == (1, ['leave_group'])
+    assert not harness.source.is_group_member and not parts.is_group_member
+
+    attached = await harness.controller.attach(cause='handler')
+
+    assert attached.attached
+    assert (harness.calls.count('join_group'), parts_calls) == (1, ['leave_group', 'join_group'])
+    assert harness.source.is_group_member and parts.is_group_member
+    await harness.controller.release_at_stop(1.0)
+    detached_gauge.set(0)
+
+
+async def test_a_parts_leave_that_times_out_brings_both_sources_back(tmp_path, monkeypatch):
+    recording = RecordingLogger()
+    for module in (detach_module, detach_slots, cluster_tasks):
+        monkeypatch.setattr(module, 'logger', recording)
+    clock = VirtualClock(DETACH_NOW)
+    clock.limit = DETACH_NOW
+    harness = DetachHarness(tmp_path, clock)
+    harness.fleet.views = [detach_peer()]
+    parts_calls: list[str] = []
+    parts = DetachFakeSource(harness.app, parts_calls)
+    parts.leave_outcomes = [LeaveOutcome.TIMED_OUT]
+    harness.controller.follow_parts(parts)
+
+    result = await harness.detach()
+
+    # The detach failed as a whole, and every failure of a detach ends in attached: both groups are joined again.
+    assert (result.detached, result.reason) == (False, 'leave_failed')
+    assert harness.controller.state.state == 'attached'
+    assert harness.source.is_group_member and parts.is_group_member
+    assert parts_calls == ['leave_group', 'join_group']
+    assert harness.held_scopes() == []
+    await harness.controller.release_at_stop(1.0)
+    detached_gauge.set(0)
