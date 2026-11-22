@@ -328,6 +328,8 @@ async def test_a_restored_job_whose_message_never_arrives_is_closed_as_orphaned_
     with capture_logs() as logs:
         worker = await OwnerWorker(world, handler).start(source_message(502))
         await wait_until(lambda: worker.committed == 503)
+        # The orphan is closed by a task of its own; its line follows the acknowledgement of the record.
+        await wait_until(lambda: events(logs, 'split_job_orphaned') != [])
 
     closed = world.entries()[-1]
     assert (closed.kind, closed.ref.offset, closed.ref.attempt_id) == ('closed', 500, FIRST)
@@ -1998,8 +2000,8 @@ async def test_a_wait_for_the_tracker_ends_at_a_stop():
     worker.hold_tracker_reads()
     worker.run(source_message(500))
     await wait_until(lambda: world.kinds() == ['open', 'split-done'])
-    await asyncio.sleep(0.02)
-    assert worker.owner is not None and worker.owner._jobs[500].catching_up
+    # The record is in the log before its delivery report reaches the owner, which then starts to wait.
+    await wait_until(lambda: worker.owner is not None and worker.owner._jobs[500].catching_up)
 
     worker.processor.signal_stop()
     # The wait ends by the stop itself: a wait that went on would hold this call for its whole timeout.
@@ -2020,7 +2022,11 @@ async def test_a_stop_before_the_closed_record_of_a_failed_split_is_read_back_le
     counted = split_jobs.labels(outcome='split_failed')._value.get()
     worker.run(source_message(500))
     await wait_until(lambda: 'closed' in world.kinds())
-    await asyncio.sleep(0.02)
+    # The record is in the log before its delivery report reaches the owner: the split task ends at the
+    # report, and the acknowledged record starts the one task that waits for the table to read it.
+    owner = worker.owner
+    assert owner is not None
+    await wait_until(lambda: [task.get_coro().__name__ for task in owner._tasks] == ['_settle_failed'])
     assert worker.commits == [] and worker.pending == 1
 
     worker.processor.signal_stop()
