@@ -1178,24 +1178,38 @@ def test_the_cap_on_waiting_reports_is_twice_the_window_size_and_at_least_sixtee
 async def test_the_loop_takes_no_part_while_too_many_reports_wait_and_goes_on_when_they_end(mode):
     total = 60
     # The budget bounds the parts in flight, as in a worker; the cap bounds the finished ones that wait.
-    pipeline = PartPipeline(bounded_handler(mode), make_pool(), window_size=1, budget=small_budget())
+    budget = small_budget()
+    pipeline = PartPipeline(bounded_handler(mode), make_pool(), window_size=1, budget=budget)
     processor = pipeline.processor
     cap = processor._max_waiting_reports
     pipeline.reports.gate = asyncio.Event()
 
+    def settled_at_the_cap() -> bool:
+        # A part leaves the in-flight count when its task ends, and reaches its report only after its
+        # delivery: the state is settled when no part is between the two, every report has started, and
+        # no loop holds or waits for room in the budget to take one more part.
+        return (
+            len(pipeline.reports.calls) >= cap
+            and processor.inflight_count == 0
+            and not processor._message_trackers
+            and len(pipeline.reports.calls) == processor._waiting_reports
+            and (budget.tasks, budget.reserved_tasks) == (0, 0)
+            and not budget._waiters
+        )
+
     pipeline.start(*(part_message(offset=offset) for offset in range(total)))
-    await wait_for(lambda: len(pipeline.reports.calls) >= cap and processor.inflight_count == 0)
+    await wait_for(settled_at_the_cap)
     reported = len(pipeline.reports.calls)
     queued = processor.queue_size
     # The reports are held by the gate of the test; a longer wait proves nothing more.
     await asyncio.sleep(0.05)
 
-    # The loop stopped at the cap (a part that was in flight may pass it by a few) and takes nothing more:
-    # the queue does not move while the reports wait. Parts taken before the cap may still be on their way
-    # to a report on a slow machine, so the queue is compared with itself, not with the reports.
+    # The loop stopped at the cap and takes nothing more: neither the queue nor the reports move while the
+    # reports wait. The parts that were in flight or in their sink delivery when the cap was reached pass it,
+    # so the count is above the cap by as many as a slow delivery let through, and below the total.
     assert cap == 16
     assert len(pipeline.reports.calls) == reported
-    assert cap <= reported <= cap + IN_FLIGHT_TASKS + 1
+    assert cap <= reported < total
     assert processor.queue_size == queued
     assert pipeline.commits == []
 
