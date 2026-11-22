@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-11-22
+
 ### Added
 
 - Split: a handler can cut one large source message into parts that every worker of the consumer group processes. The worker that owns the message calls one hook when every part has a result, delivers its answer, and only then commits the offset. Finished parts survive a restart of any worker. The feature is off by default; a worker with `split.enabled: false` does not change (docs page Split a Message Across the Fleet).
