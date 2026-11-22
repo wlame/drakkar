@@ -1186,14 +1186,17 @@ async def test_the_loop_takes_no_part_while_too_many_reports_wait_and_goes_on_wh
     pipeline.start(*(part_message(offset=offset) for offset in range(total)))
     await wait_for(lambda: len(pipeline.reports.calls) >= cap and processor.inflight_count == 0)
     reported = len(pipeline.reports.calls)
+    queued = processor.queue_size
     # The reports are held by the gate of the test; a longer wait proves nothing more.
     await asyncio.sleep(0.05)
 
-    # The loop stopped at the cap (a part that was in flight may pass it by a few), and the rest stay queued.
+    # The loop stopped at the cap (a part that was in flight may pass it by a few) and takes nothing more:
+    # the queue does not move while the reports wait. Parts taken before the cap may still be on their way
+    # to a report on a slow machine, so the queue is compared with itself, not with the reports.
     assert cap == 16
     assert len(pipeline.reports.calls) == reported
     assert cap <= reported <= cap + IN_FLIGHT_TASKS + 1
-    assert processor.queue_size == total - reported
+    assert processor.queue_size == queued
     assert pipeline.commits == []
 
     pipeline.reports.gate.set()
@@ -1218,16 +1221,19 @@ async def test_a_stop_wakes_a_loop_that_waits_for_reports_to_end(mode, monkeypat
     # From now on only the stop can end the loop's wait: its own time bound is far away.
     monkeypatch.setattr(partition_module, 'IDLE_POLL_TIMEOUT', 30.0)
     await asyncio.sleep(0.1)
-    written = len(producer.records)
+    # Read with no await before the stop: the loop cannot take a part in between.
+    queued_at_stop = processor.queue_size
 
     processor.signal_stop()
     await asyncio.wait_for(processor.drain(), timeout=10)
     await processor.stop(timeout=1.0)
 
-    # No part was taken after the stop, the queued ones were dropped, and no report was acknowledged.
-    assert processor._max_waiting_reports <= written < 40
-    assert len(producer.records) == written
-    assert queued_messages_dropped_at_stop._value.get() == dropped + 40 - written
+    # No part was taken after the stop, the queued ones were dropped, and no report was acknowledged. A part
+    # taken before the stop may still write its record during the stop, so the records are counted after it.
+    written = len(producer.records)
+    assert processor._max_waiting_reports <= written <= 40 - queued_at_stop
+    assert queued_at_stop > 0
+    assert queued_messages_dropped_at_stop._value.get() == dropped + queued_at_stop
     assert pipeline.commits == []
     assert pipeline.pending() == written
 

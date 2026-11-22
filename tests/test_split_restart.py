@@ -601,6 +601,9 @@ async def test_assign_revoke_assign_during_a_slow_restore_starts_the_processor_o
         gated.gate.set()
         await wait_for(lambda: second._task is not None, interval=0.001)
         await wait_for(lambda: source._restore_tasks == {}, interval=0.001)
+        # The loop writes this line with an async log call, which a worker thread finishes after the task
+        # started: wait for it inside the capture, or a slow machine logs it after the capture ended.
+        await wait_for(lambda: events(logs, 'partition_processor_started'), interval=0.001)
 
     assert [line['partition'] for line in events(logs, 'partition_processor_started')] == [1]
     assert source.restoring_partitions == set()
