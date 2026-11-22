@@ -185,9 +185,7 @@ async def finished_thread(func, *args):
     return outcome[0]
 
 
-async def test_close_settles_a_record_the_flush_delivered_when_the_flush_returns_without_a_loop_turn(
-    log, monkeypatch
-):
+async def test_close_settles_a_record_the_flush_delivered_when_the_flush_returns_without_a_loop_turn(log, monkeypatch):
     client = FakeProducerClient(log)
     producer = SplitProducer(KafkaConnectionConfig(), producer_factory=lambda config: client)
     await producer.start()
