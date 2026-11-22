@@ -1786,11 +1786,12 @@ async def test_two_owners_that_hold_one_message_both_complete_its_offset_when_th
     await wait_until(lambda: late.committed == 501 and new.committed == 501)
 
     # Each owner ends the job on attempt 2, or finds the closed record of the other before its own
-    # hook ran. The log accepts one closed record, and both offsets complete by it.
+    # hook ran. An owner whose hook ran writes no closed record when its table shows the other's by
+    # then, so the log holds one or two, never more than the hooks that ran; both offsets complete by it.
     ended = late_handler.jobs + new_handler.jobs
     assert 1 <= len(ended) <= 2 and len(late_handler.jobs) <= 1 and len(new_handler.jobs) <= 1
     assert {job.attempt for job in ended} == {2}
-    assert world.kinds().count('closed') == len(ended)
+    assert 1 <= world.kinds().count('closed') <= len(ended)
     assert {closed['outcome'] for closed in world.closed()} == {'aggregated'}
     assert late.pending == 0 and new.pending == 0
     await late.stop()
