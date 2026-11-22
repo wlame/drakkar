@@ -1,6 +1,7 @@
 """The split producer: delivery futures, error classes, a full client queue, order and the loop staying free."""
 
 import asyncio
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -168,6 +169,35 @@ async def test_close_flushes_what_is_queued_and_ends_the_thread(log):
     await producer.close(1.0)
     await asyncio.wait_for(future, 1)
     assert not thread.is_alive()
+    assert len(log.records(TOPIC, 0)) == 1
+
+
+async def finished_thread(func, *args):
+    """Run ``func`` on a thread and return with no turn of the loop, as ``asyncio.to_thread`` may.
+
+    When the thread ends before the loop registers its callback, the awaited future is already done
+    and ``await`` does not give the loop a turn; the reports the thread handed to the loop still wait.
+    """
+    outcome: list = []
+    thread = threading.Thread(target=lambda: outcome.append(func(*args)))
+    thread.start()
+    thread.join()
+    return outcome[0]
+
+
+async def test_close_settles_a_record_the_flush_delivered_when_the_flush_returns_without_a_loop_turn(
+    log, monkeypatch
+):
+    client = FakeProducerClient(log)
+    producer = SplitProducer(KafkaConnectionConfig(), producer_factory=lambda config: client)
+    await producer.start()
+    client.hold_deliveries = True
+    future = await producer.enqueue(TOPIC, record(1))
+    client.release_deliveries()
+    monkeypatch.setattr(asyncio, 'to_thread', finished_thread)
+    await producer.close(1.0)
+    assert future.done()
+    assert future.result() == 0
     assert len(log.records(TOPIC, 0)) == 1
 
 

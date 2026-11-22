@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Split: a record that the client delivered while the split producer closed could be reported as not delivered. On newer Python 3.13 releases a wait for a thread can end with no turn of the event loop, and the close failed the delivery reports that were still queued. A part whose result was delivered at a stop then ran again after a restart. The close now runs the queued reports first.
+
 ## [3.5.0] - 2026-11-22
 
 ### Added

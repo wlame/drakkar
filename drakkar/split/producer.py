@@ -142,7 +142,11 @@ class SplitProducer:
         if remaining:
             logger.warning('split_producer_close_incomplete', category='split', remaining=remaining)
         self._producer = None
-        # Reports of purged records reached the loop before this point; fail any future that is still open.
+        # The poll and flush threads handed every report to the loop queue before they ended, but the
+        # awaits above can return with no turn of the loop: a thread job that ends before the loop
+        # registers its callback completes the awaited future at once. One turn runs those reports, so
+        # only a future the client never reported is failed here.
+        await asyncio.sleep(0)
         for future in list(self._unsettled):
             if not future.done():
                 future.set_exception(SplitProduceError(CLOSED_MESSAGE, final=False))
