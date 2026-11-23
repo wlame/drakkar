@@ -5,9 +5,13 @@ import os
 import pytest
 import yaml
 
-from drakkar.app import DrakkarApp
+from drakkar.app import SETTINGS_CONSUMED_BEFORE_ON_STARTUP, DrakkarApp
 from drakkar.config import DrakkarConfig, SplitConfig, load_config
-from drakkar.config.root import SPLIT_WITHOUT_KAFKA_SOURCE_MESSAGE
+from drakkar.config.root import (
+    SPLIT_HTTP_WITHOUT_SPLIT_MESSAGE,
+    SPLIT_HTTP_WITHOUT_STATUS_TOPIC_MESSAGE,
+    SPLIT_WITHOUT_KAFKA_SOURCE_MESSAGE,
+)
 from tests.conftest import kafka_connections
 from tests.test_sources_validation import KafkaOnlyHandler
 
@@ -391,3 +395,106 @@ def test_stage_rule_itself_skips_a_dependency_that_is_no_sink():
     config.sinks.kafka['final'].depends_on = ['kafka/ghost']
 
     config._check_split_stages()
+
+
+def test_split_http_defaults():
+    http = SplitConfig().http
+
+    assert (http.enabled, http.status_topic, http.result_retention, http.max_response) == (False, '', 86400, 65536)
+
+
+def test_split_http_needs_split(tmp_path, monkeypatch):
+    message = _fails_with(tmp_path, monkeypatch, _document({'http': {'enabled': True}}))
+
+    assert SPLIT_HTTP_WITHOUT_SPLIT_MESSAGE in message
+
+
+def test_split_http_needs_status_topic(tmp_path, monkeypatch):
+    message = _fails_with(tmp_path, monkeypatch, _document({'enabled': True, 'http': {'enabled': True}}))
+
+    assert SPLIT_HTTP_WITHOUT_STATUS_TOPIC_MESSAGE in message
+
+
+def test_split_http_status_topic_check_runs_after_the_other_split_checks(tmp_path, monkeypatch):
+    document = _document(
+        {'enabled': True, 'aggregate_sinks': ['kafka/missing'], 'http': {'enabled': True}},
+    )
+
+    message = _fails_with(tmp_path, monkeypatch, document)
+
+    assert "split.aggregate_sinks: 'kafka/missing' is not a configured sink" in message
+
+
+def test_split_http_status_topic_must_differ(tmp_path, monkeypatch):
+    document = _document({'enabled': True, 'http': {'enabled': True, 'status_topic': 'input-events'}})
+
+    message = _fails_with(tmp_path, monkeypatch, document)
+
+    assert "split: sources.kafka.topic and split.http.status_topic name the same topic 'input-events'" in message
+
+
+@pytest.mark.parametrize(
+    ('http', 'expected'),
+    [
+        ({'result_retention': '30s'}, 'split.http.result_retention must be from 1m to 30d, got 30s'),
+        ({'max_response': '1MiB'}, 'split.http.max_response must be from 1KiB to 900KiB, got 1MiB'),
+    ],
+)
+def test_split_http_ranges(tmp_path, monkeypatch, http, expected):
+    assert expected in _fails_with(tmp_path, monkeypatch, _document({'http': http}))
+
+
+def test_split_http_off_checks_only_ranges(tmp_path, monkeypatch):
+    document = _document({'enabled': True, 'http': {'enabled': False, 'status_topic': 'input-events'}})
+
+    config = _load(tmp_path, monkeypatch, document)
+
+    assert config.split.http.status_topic == 'input-events'
+
+
+@pytest.mark.parametrize(
+    ('split', 'token'),
+    [
+        ({'enabled': True, 'http': {'enabled': True, 'status_topic': 'status'}}, ' split=http'),
+        ({'enabled': True}, ' split=on'),
+        ({'enabled': False}, ' split=off'),
+    ],
+)
+def test_summary_token_split_http(split, token):
+    config = DrakkarConfig(
+        connections=kafka_connections(),
+        sources={'kafka': {'enabled': True}},
+        split=split,
+        ui={'release': {'enabled': False}},
+    )
+
+    assert '100poll]' + token + ' exec=' in config.config_summary('w-1', 'search')
+
+
+def test_check_split_after_startup_uses_built_http_value():
+    config = DrakkarConfig(
+        connections=kafka_connections(),
+        sources={'kafka': {'enabled': True}},
+        split={'enabled': True},
+        ui={'release': {'enabled': False}},
+    )
+
+    with pytest.raises(ValueError, match=SPLIT_HTTP_WITHOUT_STATUS_TOPIC_MESSAGE):
+        config.check_split(enabled=True, http_enabled=True)
+
+
+def test_on_startup_change_of_split_http_enabled_is_ignored():
+    assert 'split.http.enabled' in {setting.path for setting in SETTINGS_CONSUMED_BEFORE_ON_STARTUP}
+    config = DrakkarConfig(
+        connections=kafka_connections(),
+        sources={'kafka': {'enabled': True}},
+        split={'enabled': True},
+        ui={'release': {'enabled': False}},
+        recorder={'enabled': False},
+    )
+    app = DrakkarApp(handler=SplitHandler(), config=config, worker_id='w-1')
+    assert app._split_http_enabled is False
+    # What ``on_startup`` did: the key is on now, but the worker was built with it off.
+    app._config.split.http.enabled = True
+
+    app._lifecycle._check_config_after_startup()

@@ -54,6 +54,8 @@ UNIT_BOUNDS: tuple[UnitBound, ...] = (
     UnitBound('split.job_timeout', 60, 2_592_000, allows_zero=True),
     UnitBound('split.idle_timeout', 60, 2_592_000, allows_zero=True),
     UnitBound('split.max_part_data', KIB, 512 * KIB),
+    UnitBound('split.http.result_retention', 60, 2_592_000),
+    UnitBound('split.http.max_response', KIB, 900 * KIB),
     UnitBound('executor.task_timeout', 1, None),
     UnitBound('executor.drain_timeout', 1, None),
     UnitBound('executor.max_pending_bytes', 16 * MIB, None),

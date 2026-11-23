@@ -78,7 +78,19 @@ SPLIT_WITHOUT_KAFKA_SOURCE_MESSAGE = (
 )
 
 # The topic keys that must name four different topics, in the order a message names them.
-SPLIT_TOPIC_PATHS = ('sources.kafka.topic', 'split.parts_topic', 'split.results_topic', 'dlq.topic')
+SPLIT_HTTP_WITHOUT_SPLIT_MESSAGE = (
+    'split.http.enabled needs split.enabled: an HTTP job is a split job of the Kafka source'
+)
+SPLIT_HTTP_WITHOUT_STATUS_TOPIC_MESSAGE = (
+    'split.http.enabled needs split.http.status_topic: name the topic that keeps the status of HTTP jobs'
+)
+SPLIT_TOPIC_PATHS = (
+    'sources.kafka.topic',
+    'split.parts_topic',
+    'split.results_topic',
+    'dlq.topic',
+    'split.http.status_topic',
+)
 
 # The suffixes of the names that a ``split`` key left empty resolves to.
 SPLIT_PARTS_SUFFIX = '_split_parts'
@@ -440,15 +452,14 @@ class DrakkarConfig(BaseSettings):
         if self.ui.detach_enabled and not detach.enabled:
             raise ValueError(UI_DETACH_WITHOUT_FEATURE_MESSAGE)
 
-    def check_split(self, *, enabled: bool | None = None) -> None:
+    def check_split(self, *, enabled: bool | None = None, http_enabled: bool | None = None) -> None:
         """Refuse a ``split`` section that cannot run.
 
         ``enabled`` is whether the feature is on in this worker; None reads
         ``split.enabled``. The startup passes the value the worker was built
         with, because a change of ``split.enabled`` in ``on_startup`` is ignored:
         a worker that reads the parts topic is checked as one, whatever the hook
-        wrote into the key.
-
+        wrote into the key. ``http_enabled`` is the same for ``split.http.enabled``.
 
         With ``split.enabled`` false only the values of the section itself are
         checked: the timeouts and the form of the ``aggregate_sinks`` entries. No
@@ -463,17 +474,23 @@ class DrakkarConfig(BaseSettings):
         split = self.split
         if enabled is None:
             enabled = split.enabled
+        if http_enabled is None:
+            http_enabled = split.http.enabled
         if not enabled:
             self._check_split_aggregate_sink_form()
             split.check_timeouts()
+            if http_enabled:
+                raise ValueError(SPLIT_HTTP_WITHOUT_SPLIT_MESSAGE)
             return
         if not self.sources.kafka.enabled:
             raise ValueError(SPLIT_WITHOUT_KAFKA_SOURCE_MESSAGE)
         _require_declared_connection('split.connection', 'kafka', split.connection, self.connections)
         self._check_split_aggregate_sinks()
         split.check_timeouts()
-        self._check_split_topics_differ()
+        self._check_split_topics_differ(http_enabled=http_enabled)
         self._check_split_stages()
+        if http_enabled and not split.http.status_topic:
+            raise ValueError(SPLIT_HTTP_WITHOUT_STATUS_TOPIC_MESSAGE)
 
     def _check_split_aggregate_sink_form(self) -> None:
         """Every ``split.aggregate_sinks`` entry is written ``<type>/<name>``; the sink itself is not looked up."""
@@ -489,13 +506,14 @@ class DrakkarConfig(BaseSettings):
             if ref not in configured:
                 raise ValueError(_aggregate_sink_message(ref))
 
-    def _check_split_topics_differ(self) -> None:
-        """The source topic, the parts topic, the results topic and the DLQ topic are four different topics."""
+    def _check_split_topics_differ(self, *, http_enabled: bool) -> None:
+        """The source, parts, results, DLQ and (with HTTP jobs) status topics are different topics."""
         topics = {
             'sources.kafka.topic': self.sources.kafka.topic,
             'split.parts_topic': self.resolved_split_parts_topic,
             'split.results_topic': self.resolved_split_results_topic,
             'dlq.topic': self.resolved_dlq_topic,
+            'split.http.status_topic': self.split.http.status_topic if http_enabled else '',
         }
         for index, first in enumerate(SPLIT_TOPIC_PATHS):
             for second in SPLIT_TOPIC_PATHS[index + 1 :]:
@@ -599,7 +617,7 @@ class DrakkarConfig(BaseSettings):
         [worker/cluster] sources=[kafka:topic/group/100poll http:8090] split=off exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=consul cache=off metrics=9090 dlq=on sinks=[kf:a,b pg:main] log=INFO
 
         ``sources=[...]`` lists the enabled input sources in fixed order
-        (kafka, then http). ``split`` says whether messages are split into parts. ``api`` is the port of the API server, or ``off``;
+        (kafka, then http). ``split`` is ``off``, ``on`` (messages are split into parts) or ``http`` (``on``, and jobs also arrive over HTTP). ``api`` is the port of the API server, or ``off``;
         ``ui`` says whether its UI routes are served (the ``ui.release``
         bundle-fetch settings are left out: they never affect pipeline
         behavior). ``agent`` says whether the agent routes are served.
@@ -631,7 +649,7 @@ class DrakkarConfig(BaseSettings):
         api_part = str(self.api.port) if self.api.enabled else 'off'
         ui_part = 'on' if self.ui.enabled else 'off'
         agent_part = 'on' if self.agent.enabled else 'off'
-        split_part = 'on' if self.split.enabled else 'off'
+        split_part = ('http' if self.split.http.enabled else 'on') if self.split.enabled else 'off'
 
         storage_part = self.storage.dir or 'mem'
         shared_dir = self.storage.shared_dir

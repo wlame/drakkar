@@ -144,6 +144,10 @@ SETTINGS_CONSUMED_BEFORE_ON_STARTUP: tuple[ConsumedSetting, ...] = (
         'handler validation and source construction happen in DrakkarApp.__init__',
     ),
     ConsumedSetting(
+        'split.http.enabled',
+        'handler validation and source construction happen in DrakkarApp.__init__',
+    ),
+    ConsumedSetting(
         'storage.dir',
         'the worker creates its own-files folder before on_startup runs',
     ),
@@ -241,6 +245,8 @@ class DrakkarApp:
         else:
             self._config, self._config_origins = load_config_with_origins(config_path)
 
+        # Read once: a change of ``split.http.enabled`` in ``on_startup`` is ignored.
+        self._split_http_enabled: bool = self._config.split.enabled and self._config.split.http.enabled
         self._handler = handler
         # Fail fast when the handler cannot serve an enabled source: a
         # source without its hooks can never process input, so surface it

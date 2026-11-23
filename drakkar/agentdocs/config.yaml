@@ -113,6 +113,32 @@
     - metric:drakkar_split_jobs_total
     - metric:drakkar_split_parts_published_total
 
+- key: split.http.enabled
+  summary: Whether a split job can arrive as an HTTP request on the HTTP source path and keep a status and result for the client.
+  advice: Needs split.enabled and split.http.status_topic; set it alike on every worker of the consumer group.
+  related:
+    - config:split.enabled
+    - config:split.http.status_topic
+
+- key: split.http.status_topic
+  summary: The topic that keeps the status and the result of HTTP jobs; required when split.http.enabled is true.
+  advice: Create it with the delete cleanup policy and a retention of at least split.http.result_retention.
+  related:
+    - config:split.http.enabled
+    - config:split.http.result_retention
+
+- key: split.http.result_retention
+  summary: How long a client can read the status of a finished HTTP job, from 1m to 30d.
+  advice: Keep the retention of the status topic at least this long; a longer value uses more memory on every worker.
+  related:
+    - config:split.http.status_topic
+
+- key: split.http.max_response
+  summary: The largest result of one HTTP job, from 1KiB to 900KiB.
+  advice: Keep results small; every worker holds the results of all jobs of the retention window in memory.
+  related:
+    - config:split.http.enabled
+
 - key: sources.http.request_timeout
   summary: The time limit of one HTTP request.
   advice: Set it above the p99 of the whole request (all tasks and hooks); a request past it answers 504 and its result is dropped.

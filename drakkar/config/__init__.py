@@ -67,7 +67,7 @@ from drakkar.config.sinks import (
     SinksConfig,
 )
 from drakkar.config.sources import KafkaDetachConfig, KafkaSourceConfig, SourcesConfig, StartupAlignConfig
-from drakkar.config.split import SplitConfig
+from drakkar.config.split import SplitConfig, SplitHttpConfig
 from drakkar.config.storage import StorageConfig
 from drakkar.config.strict import UnknownKey, deep_merge, find_unknown_keys, unknown_keys_message
 from drakkar.config.ui import (
@@ -160,6 +160,7 @@ __all__ = [
     'SinksConfig',
     'SourcesConfig',
     'SplitConfig',
+    'SplitHttpConfig',
     'StartupAlignConfig',
     'StorageConfig',
     'ThreadsConfig',

@@ -728,6 +728,46 @@
           "default": "64KiB",
           "secret": false,
           "group": "split"
+        },
+        {
+          "path": "split.http.enabled",
+          "env": "DK_SPLIT__HTTP__ENABLED",
+          "description": "Accept a split job as a request on the HTTP source path and keep its status and result for the client.",
+          "full_description": "Accept a split job as a request on the HTTP source path and keep its status and result for the client. Needs split.enabled and split.http.status_topic. Set it alike on every worker of the consumer group.",
+          "type": "boolean",
+          "default": false,
+          "secret": false,
+          "group": "split"
+        },
+        {
+          "path": "split.http.status_topic",
+          "env": "DK_SPLIT__HTTP__STATUS_TOPIC",
+          "description": "The topic that keeps the status and the result of HTTP jobs.",
+          "full_description": "The topic that keeps the status and the result of HTTP jobs. Required when enabled. You create it; it needs the delete cleanup policy and a retention of at least result_retention.",
+          "type": "string",
+          "default": "",
+          "secret": false,
+          "group": "split"
+        },
+        {
+          "path": "split.http.result_retention",
+          "env": "DK_SPLIT__HTTP__RESULT_RETENTION",
+          "description": "How long a client can read the status of a finished HTTP job, from 1m to 30d.",
+          "full_description": "How long a client can read the status of a finished HTTP job, from 1m to 30d.",
+          "type": "duration",
+          "default": "1d",
+          "secret": false,
+          "group": "split"
+        },
+        {
+          "path": "split.http.max_response",
+          "env": "DK_SPLIT__HTTP__MAX_RESPONSE",
+          "description": "The largest result of one HTTP job, from 1KiB to 900KiB.",
+          "full_description": "The largest result of one HTTP job, from 1KiB to 900KiB.",
+          "type": "size",
+          "default": "64KiB",
+          "secret": false,
+          "group": "split"
         }
       ]
     },

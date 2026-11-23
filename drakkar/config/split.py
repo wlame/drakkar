@@ -12,6 +12,33 @@ BOTH_TIMEOUTS_ZERO_MESSAGE = (
 )
 
 
+class SplitHttpConfig(ConfigModel):
+    """Settings of split jobs that arrive over HTTP: the status topic and the limits of a stored result."""
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            'Accept a split job as a request on the HTTP source path and keep its status and result for the client. '
+            'Needs split.enabled and split.http.status_topic. Set it alike on every worker of the consumer group.'
+        ),
+    )
+    status_topic: str = Field(
+        default='',
+        description=(
+            'The topic that keeps the status and the result of HTTP jobs. Required when enabled. '
+            'You create it; it needs the delete cleanup policy and a retention of at least result_retention.'
+        ),
+    )
+    result_retention: WholeSeconds = Field(
+        default=86400,
+        description='How long a client can read the status of a finished HTTP job, from 1m to 30d.',
+    )
+    max_response: ByteSize = Field(
+        default=65536,
+        description='The largest result of one HTTP job, from 1KiB to 900KiB.',
+    )
+
+
 class SplitConfig(ConfigModel):
     """Settings of the split feature: the internal topics, the aggregate sinks and the limits of a job.
 
@@ -77,6 +104,10 @@ class SplitConfig(ConfigModel):
     max_part_data: ByteSize = Field(
         default=65536,
         description='The largest data of one part, from 1KiB to 512KiB.',
+    )
+    http: SplitHttpConfig = Field(
+        default_factory=SplitHttpConfig,
+        description='Split jobs that arrive as HTTP requests.',
     )
 
     def check_timeouts(self) -> None:

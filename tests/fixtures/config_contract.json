@@ -766,6 +766,21 @@
         }
       },
       "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] split=on exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
+    },
+    {
+      "worker": "w-1",
+      "cluster": "search",
+      "name": "split_http_on",
+      "yaml": {
+        "split": {
+          "enabled": true,
+          "http": {
+            "enabled": true,
+            "status_topic": "input-status"
+          }
+        }
+      },
+      "line": "[w-1/search] sources=[kafka:input-events/drakkar-workers/100poll] split=http exec=4w/100win retries=3/120s api=8080 ui=on agent=off storage=/tmp/drakkar recorder=sqlite autodiscover=off cache=off metrics=9090 dlq=on sinks=[none] log=INFO"
     }
   ],
   "validation": [
@@ -3028,6 +3043,66 @@
       "path": "split.max_part_data"
     },
     {
+      "name": "split_http_needs_split",
+      "yaml": {
+        "split": {
+          "http": {
+            "enabled": true
+          }
+        }
+      },
+      "message": "split.http.enabled needs split.enabled: an HTTP job is a split job of the Kafka source"
+    },
+    {
+      "name": "split_http_needs_status_topic",
+      "yaml": {
+        "split": {
+          "enabled": true,
+          "http": {
+            "enabled": true
+          }
+        }
+      },
+      "message": "split.http.enabled needs split.http.status_topic: name the topic that keeps the status of HTTP jobs"
+    },
+    {
+      "name": "split_http_status_topic_same_as_source",
+      "yaml": {
+        "split": {
+          "enabled": true,
+          "http": {
+            "enabled": true,
+            "status_topic": "input-events"
+          }
+        }
+      },
+      "message": "split: sources.kafka.topic and split.http.status_topic name the same topic 'input-events'"
+    },
+    {
+      "name": "split_http_result_retention_below_range",
+      "yaml": {
+        "split": {
+          "http": {
+            "result_retention": "30s"
+          }
+        }
+      },
+      "message": "split.http.result_retention must be from 1m to 30d, got 30s",
+      "path": "split.http.result_retention"
+    },
+    {
+      "name": "split_http_max_response_above_range",
+      "yaml": {
+        "split": {
+          "http": {
+            "max_response": "901KiB"
+          }
+        }
+      },
+      "message": "split.http.max_response must be from 1KiB to 900KiB, got 901KiB",
+      "path": "split.http.max_response"
+    },
+    {
       "name": "split_stage_dependency_crosses_stages",
       "yaml": {
         "split": {
@@ -4626,6 +4701,34 @@
       "yaml": {},
       "path": "split.max_part_data",
       "value": 65536
+    },
+    {
+      "name": "split_http_enabled_by_env",
+      "yaml": {
+        "split": {
+          "enabled": true,
+          "http": {
+            "status_topic": "input-status"
+          }
+        }
+      },
+      "env": {
+        "DK_SPLIT__HTTP__ENABLED": "true"
+      },
+      "path": "split.http.enabled",
+      "value": true
+    },
+    {
+      "name": "split_http_result_retention_text",
+      "yaml": {
+        "split": {
+          "http": {
+            "result_retention": "2h"
+          }
+        }
+      },
+      "path": "split.http.result_retention",
+      "value": 7200
     },
     {
       "name": "split_off_dlq_topic_equal_to_the_source_topic_loads",

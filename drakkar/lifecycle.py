@@ -808,7 +808,10 @@ class AppLifecycle:
         app._config.check_detach()
         # The feature is on when the parts source was built; a change of ``split.enabled`` in
         # ``on_startup`` is ignored, so the section is checked for what the worker really runs.
-        app._config.check_split(enabled=app._config.split.enabled or app.parts_source is not None)
+        app._config.check_split(
+            enabled=app._config.split.enabled or app.parts_source is not None,
+            http_enabled=app._split_http_enabled,
+        )
         app._config.check_sink_waits()
         if app._config.autodiscover.enabled and not app._cluster_name:
             logger.warning(

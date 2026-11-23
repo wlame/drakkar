@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `06e2c3c5b893f04b`.
+Registry version: `3065b09c198cfc1d`.
 
 ## Concepts
 
@@ -625,6 +625,38 @@ How many attempts of one job may die during their split (no split-done and no sp
 **Advice:** Keep it low; each new attempt publishes the parts again.
 
 **Related:** `metric:drakkar_split_jobs_total`, `metric:drakkar_split_parts_published_total`
+
+### `config:split.http.enabled`
+
+Whether a split job can arrive as an HTTP request on the HTTP source path and keep a status and result for the client.
+
+**Advice:** Needs split.enabled and split.http.status_topic; set it alike on every worker of the consumer group.
+
+**Related:** `config:split.enabled`, `config:split.http.status_topic`
+
+### `config:split.http.status_topic`
+
+The topic that keeps the status and the result of HTTP jobs; required when split.http.enabled is true.
+
+**Advice:** Create it with the delete cleanup policy and a retention of at least split.http.result_retention.
+
+**Related:** `config:split.http.enabled`, `config:split.http.result_retention`
+
+### `config:split.http.result_retention`
+
+How long a client can read the status of a finished HTTP job, from 1m to 30d.
+
+**Advice:** Keep the retention of the status topic at least this long; a longer value uses more memory on every worker.
+
+**Related:** `config:split.http.status_topic`
+
+### `config:split.http.max_response`
+
+The largest result of one HTTP job, from 1KiB to 900KiB.
+
+**Advice:** Keep results small; every worker holds the results of all jobs of the retention window in memory.
+
+**Related:** `config:split.http.enabled`
 
 ### `config:sources.http.request_timeout`
 
