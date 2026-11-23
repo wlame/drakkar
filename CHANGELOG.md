@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.6.0] - 2026-11-23
+
 ### Added
 
 - Split: HTTP jobs. A client can start a split job over HTTP and read its status and result later; the job survives a restart of any worker. The feature is off by default (docs page Split a Message Across the Fleet, section HTTP jobs).
