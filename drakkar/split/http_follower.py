@@ -12,6 +12,7 @@ and records are applied in small chunks with a turn of the loop between them.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any
@@ -45,6 +46,8 @@ EXPIRY_SWEEP_SECONDS = 60.0
 EXPIRY_SWEEP_LIMIT = 10_000
 # At most this many reads wait for an id at once; a read beyond it answers at once.
 MAX_STATUS_WAITERS = 1000
+# How often a wait for the end of the status topic looks at the read positions again when no record came.
+CATCH_UP_CHECK_SECONDS = 0.1
 
 SleepFn = Callable[[float], Awaitable[None]]
 
@@ -106,6 +109,10 @@ class StatusFollower:
         self._waiters: dict[str, list[tuple[str, asyncio.Future[StatusRecord | None]]]] = {}
         self._waiting = 0
         self._rate_limited = RateLimitedLog(time.monotonic)
+        # The partitions of the status topic as the restore found them.
+        self._partition_ids: list[int] = []
+        # Set after every batch the follower applied; a wait for the end of the topic clears it.
+        self._advanced = asyncio.Event()
 
     # --- lifecycle ---
 
@@ -138,6 +145,11 @@ class StatusFollower:
         for state in STATE_RANK:
             split_http_jobs.labels(state=state).set(0)
 
+    @property
+    def is_stopped(self) -> bool:
+        """True once :meth:`stop` was called; a read that waits then ends with None."""
+        return self._stopped
+
     async def wait_restored(self, stop: asyncio.Event) -> bool:
         """Wait until the restore ended or ``stop`` is set; True when the map is restored."""
         if self.is_restored or stop.is_set():
@@ -150,6 +162,56 @@ class StatusFollower:
             for waiter in (restored, stopped):
                 waiter.cancel()
         return self.is_restored
+
+    async def caught_up(self, timeout: float) -> bool:
+        """Wait until the follower has read up to the end each partition of the status topic has now.
+
+        The end offsets are read once, at the call; the wait then follows the
+        read positions of the follower. True when it reached them within
+        ``timeout`` seconds. False when the map is not restored, the follower
+        stops, the broker does not answer, or the time runs out. Every
+        broker call is a coroutine of the asyncio consumer, so the loop is
+        never held.
+        """
+        if self._stopped or not self.is_restored or self._consumer is None:
+            return False
+        try:
+            async with asyncio.timeout(timeout):
+                ends = await self._end_offsets()
+                while not await self._reached(ends):
+                    self._advanced.clear()
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(self._advanced.wait(), CATCH_UP_CHECK_SECONDS)
+                    if self._stopped:
+                        return False
+        except TimeoutError:
+            return False
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._log_limited('warning', 'catch_up', 'split_http_status_catch_up_failed', error=exc)
+            return False
+        return True
+
+    async def _end_offsets(self) -> dict[int, int]:
+        """The end offset of each partition of the status topic that holds records now."""
+        ends: dict[int, int] = {}
+        for partition in self._partition_ids:
+            low, high = await self._consumer.get_watermark_offsets(
+                TopicPartition(self._topic, partition), timeout=QUERY_TIMEOUT_SECONDS
+            )
+            if high > low:
+                ends[partition] = high
+        return ends
+
+    async def _reached(self, ends: dict[int, int]) -> bool:
+        """Whether the follower has read up to ``ends``, by the records it applied or by its read position."""
+        behind = [partition for partition, end in ends.items() if self._next.get(partition, 0) < end]
+        if not behind:
+            return True
+        # Offsets that hold no record (a cut log, markers) move the position but bring no record.
+        rows = await self._consumer.position([TopicPartition(self._topic, partition) for partition in behind])
+        return all(row.offset >= ends[row.partition] for row in rows)
 
     # --- reads ---
 
@@ -240,6 +302,7 @@ class StatusFollower:
         consumer = self._client()
         started = time.monotonic()
         partitions = await self._partitions(consumer)
+        self._partition_ids = partitions
         pending: dict[int, int] = {}
         for partition in partitions:
             low, high = await consumer.get_watermark_offsets(
@@ -351,6 +414,7 @@ class StatusFollower:
                 now = self._clock()
         if read:
             self._set_gauge()
+            self._advanced.set()
         return read
 
     def _apply_one_safely(self, message: Any, value: bytes | None, now: float) -> None:

@@ -19,7 +19,7 @@ from structlog.testing import capture_logs
 from drakkar import partition as partition_module
 from drakkar.split.http_jobs import running_record
 from drakkar.split.http_status import PartCounts, StatusMap, StatusRecord
-from drakkar.split.owner import RUNNING_MIN_INTERVAL_SECONDS
+from drakkar.split.owner import DUPLICATE_CHECK_WAIT_SECONDS, RUNNING_MIN_INTERVAL_SECONDS
 from tests.split_owner_helpers import PARTITION, SplittingHandler, World, items, source_message, summary, wait_until
 from tests.test_split_http_end import (
     CLIENT,
@@ -271,6 +271,77 @@ async def test_map_entry_of_another_partition_is_no_duplicate():
     await wait_until(lambda: world.kinds() == ['open', 'split-done'])
 
     assert handler.split_calls == [500]
+    await http.worker.stop()
+
+
+class LaggingFollower(RestoredFollower):
+    """A restored follower that reads a late record while the owner waits for it to catch up."""
+
+    def __init__(self, status_map: StatusMap, *, late: StatusRecord | None = None, answer: bool = True) -> None:
+        super().__init__(status_map)
+        self.late = late
+        self.answer = answer
+        self.timeouts: list[float] = []
+        self.release = asyncio.Event()
+
+    async def caught_up(self, timeout: float) -> bool:
+        self.timeouts.append(timeout)
+        if self.late is not None:
+            self.status_map.put(self.late, now=self.late.updated_at)
+            return self.answer
+        await self.release.wait()
+        return self.answer
+
+
+def lagging(http: HttpWorker, **options: Any) -> LaggingFollower:
+    """Give the owner of ``http`` a follower that catches up as the test says; call before ``start``."""
+    follower = LaggingFollower(http.status_map, **options)
+    http.side = dataclasses.replace(http.side, follower=follower)  # ty: ignore[invalid-argument-type]
+    return follower
+
+
+async def test_duplicate_whose_first_status_the_follower_reads_late_is_caught():
+    world = World()
+    handler = SplittingHandler({500: items(2)}, answer=summary())
+    http = HttpWorker(world, handler)
+    follower = lagging(http, late=known(400))
+    with capture_logs() as logs:
+        await http.start(http_message(500))
+        await wait_until(lambda: http.worker.committed == 501)
+
+    assert follower.timeouts == [DUPLICATE_CHECK_WAIT_SECONDS] == [5.0]
+    assert handler.split_calls == []
+    assert len(duplicates(logs)) == 1
+    await http.worker.stop()
+
+
+async def test_begin_goes_on_when_the_follower_does_not_catch_up():
+    world = World()
+    handler = SplittingHandler({500: items(1)}, answer=summary())
+    http = HttpWorker(world, handler)
+    follower = lagging(http, answer=False)
+    await http.start(http_message(500))
+    await asyncio.sleep(0.05)
+    assert handler.split_calls == []
+    follower.release.set()
+    await wait_until(lambda: world.kinds() == ['open', 'split-done'])
+    assert handler.split_calls == [500]
+    await http.worker.stop()
+
+
+async def test_a_stop_ends_the_wait_for_the_follower_and_holds_the_offset():
+    world = World()
+    handler = SplittingHandler({500: items(1)}, answer=summary())
+    http = HttpWorker(world, handler)
+    follower = lagging(http)
+    await http.start(http_message(500))
+    await wait_until(lambda: follower.timeouts == [DUPLICATE_CHECK_WAIT_SECONDS])
+
+    http.worker.processor.signal_stop()
+    await asyncio.wait_for(http.worker.processor.drain(), timeout=10)
+
+    assert handler.split_calls == [] and world.kinds() == []
+    assert http.worker.commits == [] and http.worker.processor._open_job_offsets == {500}
     await http.worker.stop()
 
 

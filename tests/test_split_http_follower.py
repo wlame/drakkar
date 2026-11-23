@@ -10,9 +10,12 @@ from typing import Any
 
 import pytest
 from confluent_kafka import KafkaError, KafkaException
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 from prometheus_client import REGISTRY
 from structlog.testing import capture_logs
 
+from drakkar.app import DrakkarApp
 from drakkar.config import DrakkarConfig
 from drakkar.config.connections import KafkaConnectionConfig
 from drakkar.split import http_follower
@@ -20,6 +23,7 @@ from drakkar.split.http_follower import StatusFollower
 from drakkar.split.http_status import PartCounts, StatusMap, StatusRecord, status_record
 from drakkar.split.records import WireRecord
 from drakkar.split.runtime import SplitRuntime
+from drakkar.uiserver.routes_health import create_health_router
 from tests.split_helpers import FakeConsumerClient, FakeLog, FakeProducerClient, wait_until
 
 STATUS_TOPIC = 'items_status'
@@ -742,3 +746,83 @@ async def test_follower_sweep_starts_a_new_round_of_marks(world):
     assert not world.map.put(status('r1'), now=NOW)
     await world.follower._sweep()
     assert world.map.put(status('r1'), now=NOW)
+
+
+async def test_caught_up_is_false_before_the_restore(world):
+    assert not await world.follower.caught_up(0.1)
+
+
+async def test_caught_up_waits_until_the_follower_read_what_the_topic_held_at_the_call(world):
+    await restored(world)
+    world.write(status('r1'))
+    world.write(status('r2'), partition=1)
+    assert await world.follower.caught_up(5)
+    assert world.follower.get('r1') is not None and world.follower.get('r2') is not None
+
+
+async def test_caught_up_answers_false_when_the_time_runs_out(world, monkeypatch):
+    await restored(world)
+    world.write(status('r1'))
+    monkeypatch.setattr(world.consumers[0], 'consume', _reads_nothing)
+    assert not await world.follower.caught_up(0.2)
+
+
+async def _reads_nothing(*args: Any, **kwargs: Any) -> list[Any]:
+    await asyncio.sleep(0.01)
+    return []
+
+
+async def test_caught_up_answers_false_when_the_broker_fails_and_logs_it(world, monkeypatch):
+    await restored(world)
+
+    async def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise KafkaException(KafkaError(KafkaError._TRANSPORT, 'broker down'))
+
+    monkeypatch.setattr(world.consumers[0], 'get_watermark_offsets', refuse)
+    with capture_logs() as logs:
+        assert not await world.follower.caught_up(1)
+    [line] = [line for line in logs if line['event'] == 'split_http_status_catch_up_failed']
+    assert (line['log_level'], line['category']) == ('warning', 'split')
+
+
+async def test_caught_up_ends_with_false_at_a_stop(world, monkeypatch):
+    await restored(world)
+    world.write(status('r1'))
+    monkeypatch.setattr(world.consumers[0], 'consume', _reads_nothing)
+    waiting = asyncio.ensure_future(world.follower.caught_up(5))
+    await asyncio.sleep(0.05)
+    await world.follower.stop()
+    assert await asyncio.wait_for(waiting, 2) is False
+
+
+async def test_readyz_names_a_status_map_that_is_not_restored():
+    follower = SimpleNamespace(is_restored=False)
+    app = SimpleNamespace(
+        _split_http_enabled=True,
+        _split=SimpleNamespace(http=SimpleNamespace(follower=follower)),
+        is_ready=True,
+        sink_manager=SimpleNamespace(all_connected=lambda: True),
+        processors={},
+        parts_source=None,
+    )
+    app.split_http_status_restored = DrakkarApp.split_http_status_restored.fget(app)  # ty: ignore[invalid-argument-type]
+    api = FastAPI()
+    api.include_router(create_health_router(app))  # ty: ignore[invalid-argument-type]
+    async with AsyncClient(transport=ASGITransport(app=api), base_url='http://test') as client:
+        response = await client.get('/readyz')
+    assert (response.status_code, response.json()) == (
+        503,
+        {'status': 'not_ready', 'reasons': ['split_http_status_not_restored']},
+    )
+
+    follower.is_restored = True
+    app.split_http_status_restored = DrakkarApp.split_http_status_restored.fget(app)  # ty: ignore[invalid-argument-type]
+    async with AsyncClient(transport=ASGITransport(app=api), base_url='http://test') as client:
+        response = await client.get('/readyz')
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize(('enabled', 'split'), [(False, SimpleNamespace(http=None)), (True, None)])
+def test_split_http_status_counts_as_restored_without_the_feature(enabled, split):
+    app = SimpleNamespace(_split_http_enabled=enabled, _split=split)
+    assert DrakkarApp.split_http_status_restored.fget(app) is True  # ty: ignore[invalid-argument-type]

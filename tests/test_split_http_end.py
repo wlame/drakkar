@@ -82,6 +82,9 @@ class RestoredFollower:
     async def wait_restored(self, stop: asyncio.Event) -> bool:
         return True
 
+    async def caught_up(self, timeout: float) -> bool:
+        return True
+
     def get(self, request_id: str) -> StatusRecord | None:
         return self.status_map.get(request_id)
 

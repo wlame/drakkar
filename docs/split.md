@@ -1311,6 +1311,9 @@ Then:
 5. The worker writes the `accepted` record and waits at most 5 seconds for
    it. The answer does not depend on that write.
 
+A `POST` counts in `drakkar_webapp_inflight` while it runs, so a stop of the
+worker waits for it in the drain of the HTTP source.
+
 | HTTP | Body | `status` label of `drakkar_webapp_requests_total` | When |
 |---|---|---|---|
 | 202 | `{"request_id": "<id>", "status": "accepted"}` | `accepted` | The request is stored as a job. |
@@ -1341,6 +1344,7 @@ memory. `503 shutdown` and `503 not_ready` apply.
 | 404 | `{"error": "not_found", "request_id": "<id>"}` | `not_found` | The id is unknown, or belongs to another client. |
 | 422 | `{"error": "invalid_request", "details": "request_id is required"}` | `error` | The parameter is missing or empty. |
 | 503 | `{"status": "unavailable", "error": "the status could not be read", "request_id": "<id>"}` | `unavailable` | The main loop did not answer in time. |
+| 503 | The `shutdown` body of the gates | `shutdown` | The worker started to stop while the read waited for an unknown id. |
 
 An unknown id waits up to 1 second for a record of that id before the
 `404`. So a `GET` that reaches another worker right after the `POST` does
@@ -1537,12 +1541,19 @@ id can name a new job.
 
 **The restore.** At start the follower reads every partition up to the end
 it saw at that moment. Until then the `POST` and the `GET` of this worker
-answer `503 not_ready`, and the owner waits before it begins an HTTP job
-message. The partition gives its reservation of the pending budget back
-while it waits. The end of the restore logs `split_http_status_restored`
-with the number of records and jobs. A restore that fails is tried again
-after 1, 2, 4 ... 30 seconds. The restore reads the whole topic, so it
-takes longer with a longer retention.
+answer `503 not_ready`, `/readyz` names the reason
+`split_http_status_not_restored`, and the owner waits before it begins an
+HTTP job message. The partition returns its reservation to the pending
+budget while it waits. The end of the restore logs
+`split_http_status_restored` with the number of records and jobs. A restore
+that fails is tried again after 1, 2, 4 ... 30 seconds. The restore reads
+the whole topic, so it takes longer with a longer retention.
+
+After the restore, the owner waits once more before each HTTP job message:
+at most 5 seconds, until the follower has read up to the end of every
+partition of the status topic as it is at that moment. A wait that cannot
+read the end logs `split_http_status_catch_up_failed` (warning, at most once
+a minute), and the owner goes on.
 
 **Memory.** Every worker with the feature on holds the map, also a worker
 without the HTTP source. Size it as:
@@ -1604,9 +1615,12 @@ and cleanup policy.
 1. A `POST` whose time limit ends after the message was stored answers
    `503 unavailable`, although the job runs. A second `POST` with the same
    id then answers the existing status.
-2. Between the acknowledgement of an end state and the moment a worker has
-   read it back (about one second), a new message with the same id is not
-   recognised as a duplicate.
+2. Before it begins an HTTP job message, the owner waits up to 5 seconds
+   until its status follower has read what the status topic holds at that
+   moment. This covers a follower that lags behind and a new owner after a
+   rebalance. A record that reaches the topic after that moment, or a
+   follower that needs more than 5 seconds, can still let a second message
+   of the same id run as a second job.
 3. When two owners overlap after a rebalance, both can end the job. A
    client can then read `done` and later another end state of the same job:
    `done` and `failed` have the same rank, and the record that arrives last
@@ -1641,6 +1655,7 @@ can repeat is rate-limited to one a minute and carries `suppressed`.
 | `split_http_enabled` | info | The feature runs. Fields `status_topic`, `result_retention_seconds`. |
 | `split_http_status_restored` | info | The status map is restored; the worker answers. Fields `records`, `jobs`, `seconds`. |
 | `split_http_status_restore_failed` | warning | A restore of the status map failed; it is tried again. Fields `error`, `attempt`. |
+| `split_http_status_catch_up_failed` | warning | The wait of the owner for the end of the status topic could not read the end; the owner goes on. Field `error`. At most once a minute. |
 | `split_http_status_consume_failed` | warning | A read of the status topic failed; it is tried again after half a second. Field `error`. |
 | `split_http_status_record_invalid` | warning | A record of the status topic cannot be read; it is skipped. Fields `partition`, `offset`. |
 | `split_http_status_record_failed` | error | A record of the status topic hit an unexpected error; the next record is read. Fields `partition`, `offset`, `error`. |

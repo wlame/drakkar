@@ -100,8 +100,14 @@ from drakkar.metrics import (
 )
 from drakkar.models import SourceMessage
 from drakkar.providers.resilience import RateLimitedLog
-from drakkar.split.http_jobs import ACCEPTED_WRITE_SECONDS, STATUS_WAIT_SECONDS, STORE_FAILED_TEXT, HttpAnswer
-from drakkar.utils import make_request_id
+from drakkar.split.http_jobs import (
+    ACCEPTED_WRITE_SECONDS,
+    SHUTDOWN_METRIC_STATUS,
+    STATUS_WAIT_SECONDS,
+    STORE_FAILED_TEXT,
+    HttpAnswer,
+)
+from drakkar.utils import make_request_id, validate_request_id
 from drakkar.webapp.dependencies import (
     WebappError,
     make_authenticate,
@@ -171,6 +177,17 @@ def _unavailable_answer(request_id: str, error: str) -> HttpAnswer:
     """The 503 answer of a job request or a status read that the main loop did not answer."""
     body = {'status': 'unavailable', 'error': error, 'request_id': request_id}
     return HttpAnswer(503, json.dumps(body, separators=(',', ':'), ensure_ascii=False).encode('utf-8'), 'unavailable')
+
+
+def _passes_request_id_rule(request_id: str) -> bool:
+    """True when ``request_id`` is non-empty and passes the request id rule."""
+    if not request_id:
+        return False
+    try:
+        validate_request_id(request_id)
+    except ValueError:
+        return False
+    return True
 
 
 def _job_gateway(drakkar_app: DrakkarApp) -> HttpJobGateway | None:
@@ -524,16 +541,7 @@ class WebApp:
         HTTP split jobs is restored.
         """
         if self.shutdown_event.is_set():
-            self._observe_outcome(request=request, client=metric_client, status='shutdown')
-            return JSONResponse(
-                status_code=503,
-                content={
-                    'status': 'shutdown',
-                    'error': 'webapp is shutting down; request rejected',
-                    'request_id': gate_request_id,
-                    'hint': KAFKA_FALLBACK_HINT,
-                },
-            )
+            return self._shutdown_answer(request, metric_client, gate_request_id)
         if not self._app.is_ready or (self._jobs is not None and not self._jobs.is_ready):
             self._observe_outcome(request=request, client=metric_client, status='not_ready')
             return JSONResponse(
@@ -546,6 +554,19 @@ class WebApp:
                 },
             )
         return None
+
+    def _shutdown_answer(self, request: Request, metric_client: str, gate_request_id: str) -> JSONResponse:
+        """The 503 ``shutdown`` answer, with its request metric."""
+        self._observe_outcome(request=request, client=metric_client, status='shutdown')
+        return JSONResponse(
+            status_code=503,
+            content={
+                'status': 'shutdown',
+                'error': 'webapp is shutting down; request rejected',
+                'request_id': gate_request_id,
+                'hint': KAFKA_FALLBACK_HINT,
+            },
+        )
 
     async def _read_body(self, request: Request, metric_client: str, gate_request_id: str) -> bytes | JSONResponse:
         """The request body, or the 408 or 413 answer when it comes too slowly or is too large."""
@@ -726,7 +747,8 @@ class WebApp:
                 category='split',
                 suppressed=suppressed,
                 route=route,
-                request_id=request_id,
+                # The id of a status read is the raw query text: only an id that passes the rule is logged.
+                request_id=request_id if _passes_request_id_rule(request_id) else None,
                 client=client,
                 timeout_seconds=budget,
                 error=f'{type(exc).__name__}: {exc}' if str(exc) else type(exc).__name__,
@@ -765,6 +787,8 @@ class WebApp:
             over_capacity = await self._take_slot(request, request_id, client.name)
             if over_capacity is not None:
                 return over_capacity
+            # Counted in flight like a request of the synchronous route, so the drain at a stop waits for it.
+            webapp_inflight.inc()
             try:
                 answer = await self._dispatch_job_call(
                     jobs.accept(
@@ -780,6 +804,7 @@ class WebApp:
                     route='submit',
                 )
             finally:
+                webapp_inflight.dec()
                 self._semaphore.release()
             if answer is None:
                 answer = _unavailable_answer(request_id, STORE_FAILED_TEXT)
@@ -814,6 +839,8 @@ class WebApp:
             )
             if answer is None:
                 answer = _unavailable_answer(request_id, STATUS_READ_FAILED_TEXT)
+            if answer.metric_status == SHUTDOWN_METRIC_STATUS:
+                return self._shutdown_answer(request, client.name, gate_request_id)
             return self._job_answer(request, client.name, answer)
 
     def _build_app(self) -> FastAPI:

@@ -577,6 +577,17 @@ class DrakkarApp:
         return not self._stopping and all(s.is_ready for s in self.sources)
 
     @property
+    def split_http_status_restored(self) -> bool:
+        """False while HTTP split jobs are on and their status follower has not restored the map yet.
+
+        Safe to read from any thread: it reads one bool the main loop sets.
+        """
+        split = self._split
+        if not self._split_http_enabled or split is None or split.http is None:
+            return True
+        return split.http.follower.is_restored
+
+    @property
     def recorder(self) -> EventRecorder | None:
         return self._recorder
 

@@ -368,7 +368,9 @@ for Kubernetes integration to work.
   Otherwise returns ``{"status": "not_ready", "reasons": [...]}`` with a
   503 status code and a list of machine-readable reasons (e.g.
   ``"not_started"``, ``"sink_kafka:results_not_connected"``,
-  ``"partition_3_processor_died"``). The kubelet removes the pod
+  ``"partition_3_processor_died"``). With ``split.http.enabled`` the
+  worker is also not ready until it has read the status topic of HTTP
+  split jobs; the reason is ``"split_http_status_not_restored"``. The kubelet removes the pod
   from the service endpoints on failure but does NOT restart it — the
   worker is considered recoverable and will self-register once ready.
 

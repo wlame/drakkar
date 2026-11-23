@@ -677,3 +677,22 @@ async def test_write_end_cancelled_during_the_retry_wait_is_cancelled():
 
     with pytest.raises(asyncio.CancelledError):
         await writing
+
+
+async def test_read_that_waits_answers_shutdown_when_the_follower_stops():
+    gate = Gate()
+    reading = asyncio.ensure_future(gate.gateway.read(request_id='req-1', client=CLIENT))
+    await asyncio.sleep(0.02)
+    await gate.follower.stop()
+
+    answer = await asyncio.wait_for(reading, 2)
+
+    assert (answer.status_code, answer.metric_status) == (503, 'shutdown')
+
+
+async def test_read_of_a_stored_id_still_answers_after_the_follower_stopped():
+    gate = Gate()
+    gate.put(record('running'))
+    await gate.follower.stop()
+    answer = await gate.gateway.read(request_id='req-1', client=CLIENT)
+    assert answer.status_code == 200

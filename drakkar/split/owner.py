@@ -109,6 +109,10 @@ class BeginOutcome(StrEnum):
     FAILED = 'failed'
 
 
+# The longest the owner waits for the status follower to read the end of the status topic before the duplicate rule.
+DUPLICATE_CHECK_WAIT_SECONDS = 5.0
+
+
 class OwnerHost(Protocol):
     """What the owner needs of the partition processor it belongs to.
 
@@ -455,9 +459,13 @@ class SplitOwner:
         http_job = message.http_job
         assert side is not None and http_job is not None
         offset = message.offset
-        if not side.follower.is_restored:
-            self._host.release_window_reservation()
+        # Both waits below can take seconds: the window gives its reservation back first.
+        self._host.release_window_reservation()
         if not await side.follower.wait_restored(self._stopped):
+            self._host.hold_job_offset(offset)
+            return BeginOutcome.JOB
+        await self._wait_for_status_follower(side)
+        if self._stopping:
             self._host.hold_job_offset(offset)
             return BeginOutcome.JOB
         self._close_orphans_below(offset)
@@ -475,6 +483,23 @@ class SplitOwner:
         )
         self._host.complete_job_offset(offset)
         return BeginOutcome.DONE
+
+    async def _wait_for_status_follower(self, side: HttpOwnerSide) -> None:
+        """Wait at most ``DUPLICATE_CHECK_WAIT_SECONDS`` for the status follower to read what the topic holds now.
+
+        A follower that lags behind could miss the status of an earlier
+        message of the same id, and a new owner has no begun ids yet. The
+        duplicate rule goes on when the wait times out or fails; a stop ends
+        the wait at once.
+        """
+        catching_up = asyncio.ensure_future(side.follower.caught_up(DUPLICATE_CHECK_WAIT_SECONDS))
+        stop = asyncio.ensure_future(self._stopped.wait())
+        try:
+            await asyncio.wait({catching_up, stop}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stop.cancel()
+            catching_up.cancel()
+            await asyncio.gather(catching_up, stop, return_exceptions=True)
 
     def _first_offset_of(self, request_id: str, offset: int) -> int | None:
         """The lowest offset below ``offset`` of a message of this partition with ``request_id``; None for none."""

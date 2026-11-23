@@ -557,3 +557,56 @@ def test_job_mode_without_its_runtime_fails_at_construction():
     app._split = None
     with pytest.raises(RuntimeError, match='runtime of HTTP split jobs was not started'):
         WebApp(app, _config())
+
+
+async def test_get_ended_by_the_stop_answers_the_shutdown_envelope(main_loop):
+    webapp, gateway = _webapp(main_loop)
+    gateway.read_answer = HttpAnswer(503, b'', 'shutdown')
+    before = _count('tenant-a', 'shutdown')
+
+    response = await _get(webapp, {'request_id': 'r-4'})
+
+    assert response.status_code == 503
+    body = response.json()
+    assert (body['status'], body['error'], body['hint']) == (
+        'shutdown',
+        'webapp is shutting down; request rejected',
+        webapp_server.KAFKA_FALLBACK_HINT,
+    )
+    assert body['request_id']
+    assert _count('tenant-a', 'shutdown') == before + 1
+
+
+async def test_post_is_counted_in_flight_while_its_call_runs(main_loop):
+    webapp, gateway = _webapp(main_loop)
+    gateway.hang = True
+    before = webapp.inflight_count
+
+    posting = asyncio.ensure_future(_post(webapp))
+    for _ in range(200):
+        if gateway.calls:
+            break
+        await asyncio.sleep(0.01)
+    assert webapp.inflight_count == before + 1
+    gateway.hang = False
+    posting.cancel()
+    await asyncio.gather(posting, return_exceptions=True)
+    for _ in range(200):
+        if webapp.inflight_count == before:
+            break
+        await asyncio.sleep(0.01)
+    assert webapp.inflight_count == before
+
+
+@pytest.mark.parametrize(('request_id', 'logged'), [('r-1', 'r-1'), ('has space', None), ('x' * 65, None)])
+async def test_failed_dispatch_logs_only_a_valid_request_id(main_loop, request_id, logged):
+    webapp, _ = _webapp(main_loop)
+
+    async def _fail():
+        raise RuntimeError('refused')
+
+    with capture_logs() as cap:
+        await webapp._dispatch_job_call(_fail(), budget=1.0, request_id=request_id, client='tenant-a', route='status')
+
+    [line] = [entry for entry in cap if entry['event'] == 'split_http_dispatch_failed']
+    assert line['request_id'] == logged

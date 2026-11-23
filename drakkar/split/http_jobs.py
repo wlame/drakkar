@@ -44,6 +44,8 @@ STORE_FAILED_TEXT = 'the request could not be stored'
 TOO_LARGE_DETAIL = 'the request is larger than the broker accepts'
 QUEUE_FULL_TEXT = 'the client queue is full'
 NOT_ACKNOWLEDGED_TEXT = 'the record was not acknowledged in time'
+# The request metric's status of a status read that the stop of the worker ended; the HTTP source writes its body.
+SHUTDOWN_METRIC_STATUS = 'shutdown'
 LOG_KEY = 'status_write'
 STORE_LOG_KEY = 'store'
 
@@ -413,6 +415,9 @@ class HttpJobGateway:
         record = follower.get(request_id)
         if (record is None or record.client != client) and _is_valid_request_id(request_id):
             record = await follower.wait_for(request_id, STATUS_WAIT_SECONDS, client=client)
+        if (record is None or record.client != client) and follower.is_stopped:
+            # The wait ended because the worker stops: the id may exist, so the answer is no 404.
+            return HttpAnswer(503, b'', SHUTDOWN_METRIC_STATUS)
         if record is None or record.client != client:
             split_http_status_reads.labels(status='not_found').inc()
             return HttpAnswer(404, _json({'error': 'not_found', 'request_id': request_id}), 'not_found')

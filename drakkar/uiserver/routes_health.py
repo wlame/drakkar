@@ -49,6 +49,10 @@ def create_health_router(drakkar_app: DrakkarApp) -> APIRouter:
         reasons: list[str] = []
         if not drakkar_app.is_ready:
             reasons.append('not_started')
+        # The status of HTTP split jobs is not read yet: this worker can neither answer a status nor
+        # take a request.
+        if not drakkar_app.split_http_status_restored:
+            reasons.append('split_http_status_not_restored')
         # ``sink_manager`` is always constructed in ``DrakkarApp.__init__``
         # and ``all_connected`` returns True for an empty manager, so we
         # can consult it directly. Startup validation rejects a zero-sink
