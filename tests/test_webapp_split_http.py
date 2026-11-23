@@ -16,11 +16,13 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 from pydantic import BaseModel
+from structlog.testing import capture_logs
 
 import drakkar.webapp.server as webapp_server
 from drakkar import metrics
 from drakkar.config import WebAppConfig, WebClientConfig
 from drakkar.handler import BaseDrakkarHandler
+from drakkar.providers.resilience import RateLimitedLog
 from drakkar.request_ids import RequestIdResolver
 from drakkar.split.http_jobs import HttpAnswer
 from drakkar.webapp import WebApp
@@ -98,6 +100,7 @@ class _FakeGateway:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.threads: list[int] = []
         self.hang = False
+        self.cancelled = threading.Event()
         self.accept_answer = HttpAnswer(202, b'{"request_id":"r-1","status":"accepted"}', 'accepted')
         self.read_answer = HttpAnswer(200, b'{"request_id":"r-1","status":"running"}', 'status_read')
 
@@ -107,7 +110,11 @@ class _FakeGateway:
         self.threads.append(threading.get_ident())
         self.calls.append((name, kwargs))
         if self.hang:
-            await asyncio.sleep(30)
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
 
     async def accept(self, **kwargs: Any) -> HttpAnswer:
         await self._enter('accept', kwargs)
@@ -360,6 +367,8 @@ async def test_post_dispatch_timeout_answers_503_unavailable(main_loop, monkeypa
     assert _count('tenant-a', 'unavailable') == before + 1
     # The slot is given back.
     assert webapp._semaphore._value == 64
+    # The call that hung on the main loop was cancelled.
+    assert gateway.cancelled.wait(timeout=2.0)
 
 
 async def test_post_gateway_failure_answers_503_unavailable():
@@ -470,6 +479,30 @@ async def test_get_dispatch_timeout_answers_503_unavailable(main_loop, monkeypat
 
     assert response.status_code == 503
     assert response.json() == {'status': 'unavailable', 'error': 'the status could not be read', 'request_id': 'r-3'}
+    assert gateway.cancelled.wait(timeout=2.0)
+
+
+async def test_failed_dispatches_of_one_route_log_one_line_per_minute(main_loop):
+    webapp, _ = _webapp(main_loop)
+    now = [100.0]
+    webapp._dispatch_log = RateLimitedLog(lambda: now[0])
+
+    async def _fail():
+        raise RuntimeError('refused')
+
+    async def _dispatch(route: str) -> None:
+        answer = await webapp._dispatch_job_call(_fail(), budget=1.0, request_id='r-1', client='tenant-a', route=route)
+        assert answer is None
+
+    with capture_logs() as cap:
+        for _ in range(3):
+            await _dispatch('status')
+        await _dispatch('submit')
+        now[0] += 61.0
+        await _dispatch('status')
+
+    lines = [(entry['route'], entry['suppressed']) for entry in cap if entry['event'] == 'split_http_dispatch_failed']
+    assert lines == [('status', 0), ('submit', 0), ('status', 2)]
 
 
 # ---------------------------------------------------------------------------

@@ -99,6 +99,7 @@ from drakkar.metrics import (
     webapp_rpm_limit,
 )
 from drakkar.models import SourceMessage
+from drakkar.providers.resilience import RateLimitedLog
 from drakkar.split.http_jobs import ACCEPTED_WRITE_SECONDS, STATUS_WAIT_SECONDS, STORE_FAILED_TEXT, HttpAnswer
 from drakkar.utils import make_request_id
 from drakkar.webapp.dependencies import (
@@ -218,6 +219,9 @@ class WebApp:
         # in-flight work. The route handler checks ``is_set()`` ahead of
         # any dispatch.
         self.shutdown_event: threading.Event = threading.Event()
+        # One warning per job route per minute for a failed dispatch. Only
+        # the server's own loop thread touches it, so it needs no lock.
+        self._dispatch_log = RateLimitedLog(time.monotonic)
 
         # Auth + rate-limit dependencies. Built once at
         # construction time so the route handler can refer to them via
@@ -714,9 +718,13 @@ class WebApp:
             # not warn as never awaited; a started one ends by its cancel.
             if not isinstance(exc, TimeoutError) and inspect.getcoroutinestate(call) == inspect.CORO_CREATED:
                 call.close()
+            suppressed = self._dispatch_log.admit(route)
+            if suppressed is None:
+                return None
             logger.warning(
                 'split_http_dispatch_failed',
                 category='split',
+                suppressed=suppressed,
                 route=route,
                 request_id=request_id,
                 client=client,
