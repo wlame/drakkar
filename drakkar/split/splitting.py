@@ -30,7 +30,17 @@ from drakkar.request_ids import RequestIdResolver, reset_request_id
 from drakkar.sinks.dlq_record import cut_error
 from drakkar.split.partmode import RETRY_FIRST_WAIT_SECONDS, RETRY_MAX_WAIT_SECONDS
 from drakkar.split.producer import NO_OFFSET, SplitProduceError, SplitProducer
-from drakkar.split.records import JobRef, WireRecord, log_record, open_body, part_record, part_value, ref_id
+from drakkar.split.records import (
+    ORIGIN_HTTP,
+    ORIGIN_KAFKA,
+    JobRef,
+    WireRecord,
+    log_record,
+    open_body,
+    part_record,
+    part_value,
+    ref_id,
+)
 from drakkar.split.table import MAX_PART_INDEX
 
 logger = structlog.get_logger()
@@ -404,6 +414,7 @@ class SplitRun:
             value = part_value(item)
         except TypeError as error:
             raise _SplitFailed(str(error)) from None
+        http_job = message.http_job
         record = part_record(
             self.ref,
             source_topic=message.topic,
@@ -413,6 +424,8 @@ class SplitRun:
             value=value,
             source_headers=message.headers,
             partition_count=settings.parts_partition_count,
+            origin=ORIGIN_KAFKA if http_job is None else ORIGIN_HTTP,
+            deliver_sinks=True if http_job is None else http_job.deliver_sinks,
         )
         self.parts += 1
         try:

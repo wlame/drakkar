@@ -103,6 +103,8 @@ def test_part_record_is_produced_byte_for_byte(case):
         value=_bytes(facts['value']),
         source_headers=_headers(facts['source_headers']),
         partition_count=facts['partition_count'],
+        origin=facts.get('origin', 'kafka'),
+        deliver_sinks=facts.get('deliver_sinks', True),
     )
     assert wire.key == _bytes(case['key'])
     assert wire.value == _bytes(facts['value'])
@@ -114,4 +116,5 @@ def test_part_record_is_produced_byte_for_byte(case):
 def test_part_headers_are_read_back(case):
     part = parse_part_headers(_headers(case['headers']))
     assert part is not None
-    assert part.model_dump() == case['parsed']
+    # Cases of Kafka jobs omit the switch, which is always true for them.
+    assert part.model_dump() == {'deliver_sinks': True, **case['parsed']}

@@ -1,5 +1,5 @@
 {
-  "_comment": "Split wire contract, shared byte for byte by every implementation. A results-log record has the key \"<partition>:<offset>\" (UTF-8) and goes to the results partition with the number of the source partition; its headers are log_header_order, each value ASCII text. Its value is compact JSON with sorted keys, raw UTF-8. A part record has the key and the value of the part, the source headers of the original message in their order minus every header whose name starts with \"dk-\", then the headers of part_header_order; dk-request-id is not written when the request id is null. Part i goes to partition (offset mod N + i) mod N of the parts topic. Encoding of bytes in this file: a JSON string is its UTF-8 bytes, {\"base64\": \"...\"} is the decoded bytes, null is no value.",
+  "_comment": "Split wire contract, shared byte for byte by every implementation. A results-log record has the key \"<partition>:<offset>\" (UTF-8) and goes to the results partition with the number of the source partition; its headers are log_header_order, each value ASCII text. Its value is compact JSON with sorted keys, raw UTF-8. A part record has the key and the value of the part, the source headers of the original message in their order minus every header whose name starts with \"dk-\", then the headers of part_header_order; dk-request-id is not written when the request id is null, and dk-split-sinks is written only when the origin is http (on or off). Part i goes to partition (offset mod N + i) mod N of the parts topic. Encoding of bytes in this file: a JSON string is its UTF-8 bytes, {\"base64\": \"...\"} is the decoded bytes, null is no value.",
   "version": "1",
   "parts_partition_base": 1000000,
   "log_header_order": [
@@ -21,6 +21,7 @@
     "dk-split-attempt-id",
     "dk-split-index",
     "dk-split-origin",
+    "dk-split-sinks",
     "dk-request-id"
   ],
   "record_kinds": ["open", "split-done", "split-cancelled", "result", "closed"],
@@ -268,6 +269,52 @@
         "attempt_id": "fedcba9876543210",
         "index": 0,
         "origin": "kafka"
+      }
+    },
+    {
+      "name": "http_job_sinks_off",
+      "ref": {"group": "workers", "partition": 7, "offset": 500, "attempt": 1, "attempt_id": "0123456789abcdef"},
+      "input": {
+        "source_topic": "requests",
+        "index": 0,
+        "request_id": "order-123",
+        "key": "order-123",
+        "value": "{\"items\":[1,2]}",
+        "source_headers": [
+          ["dk-origin", "http"],
+          ["dk-request-id", "order-123"],
+          ["dk-http-client", "tenant-a"],
+          ["dk-deliver-sinks", "false"]
+        ],
+        "partition_count": 6,
+        "origin": "http",
+        "deliver_sinks": false
+      },
+      "key": "order-123",
+      "headers": [
+        ["dk-split-version", "1"],
+        ["dk-split-group", "workers"],
+        ["dk-split-topic", "requests"],
+        ["dk-split-partition", "7"],
+        ["dk-split-offset", "500"],
+        ["dk-split-attempt", "1"],
+        ["dk-split-attempt-id", "0123456789abcdef"],
+        ["dk-split-index", "0"],
+        ["dk-split-origin", "http"],
+        ["dk-split-sinks", "off"],
+        ["dk-request-id", "order-123"]
+      ],
+      "partition": 2,
+      "parsed": {
+        "group": "workers",
+        "source_topic": "requests",
+        "source_partition": 7,
+        "source_offset": 500,
+        "attempt": 1,
+        "attempt_id": "0123456789abcdef",
+        "index": 0,
+        "origin": "http",
+        "deliver_sinks": false
       }
     }
   ]

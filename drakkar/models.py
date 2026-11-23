@@ -85,11 +85,23 @@ class SplitPart(BaseModel):
     attempt_id: str = Field(description='The unique id of the attempt: 16 hex characters.')
     index: int = Field(description='The part number inside its job, from 0.')
     origin: Literal['kafka', 'http'] = Field(default='kafka', description='Where the original message came from.')
+    deliver_sinks: bool = Field(
+        default=True,
+        description='False when the HTTP request that started the job asked for no sink writes; always True for Kafka.',
+    )
 
     @property
     def job_id(self) -> str:
         """The job as shown in logs: ``<partition>:<offset>#<attempt>``."""
         return f'{self.source_partition}:{self.source_offset}#{self.attempt}'
+
+
+class HttpJob(BaseModel, frozen=True):
+    """What the message of an HTTP split job request carries; set on ``SourceMessage.http_job``."""
+
+    request_id: str = Field(description='The request id the client gave the job.')
+    client: str = Field(description='The client name that sent the request; empty when none was sent.')
+    deliver_sinks: bool = Field(description='False when the request asked for no sink writes.')
 
 
 class SourceMessage(BaseModel):
@@ -134,6 +146,11 @@ class SourceMessage(BaseModel):
         default=None,
         exclude=True,
         description='Where the message came from when it is a part of a split job; None for an ordinary message.',
+    )
+    http_job: HttpJob | None = Field(
+        default=None,
+        exclude=True,
+        description='Set for a message stored by an HTTP split job request; None for every other message.',
     )
 
 

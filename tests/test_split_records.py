@@ -249,3 +249,72 @@ def test_part_headers_without_the_origin_header_are_not_a_part():
 
     # The producer always writes the header, so a record without it is not a part of this format.
     assert parse_part_headers(without_origin) is None
+
+
+def _http_part_record(*, deliver_sinks):
+    return records.part_record(
+        REF,
+        source_topic='requests',
+        index=0,
+        request_id='order-123',
+        key=b'order-123',
+        value=b'x',
+        source_headers=[('dk-origin', b'http'), ('dk-http-client', b'tenant-a'), ('dk-deliver-sinks', b'false')],
+        partition_count=8,
+        origin='http',
+        deliver_sinks=deliver_sinks,
+    )
+
+
+@pytest.mark.parametrize(('deliver_sinks', 'text'), [(True, b'on'), (False, b'off')])
+def test_part_record_of_http_job_has_sinks_header_after_origin(deliver_sinks, text):
+    names = [name for name, _ in _http_part_record(deliver_sinks=deliver_sinks).headers]
+    headers = dict(_http_part_record(deliver_sinks=deliver_sinks).headers)
+
+    assert headers['dk-split-sinks'] == text
+    assert names.index('dk-split-sinks') == names.index('dk-split-origin') + 1
+
+
+def test_part_record_of_kafka_job_has_no_sinks_header():
+    record = records.part_record(
+        REF,
+        source_topic='requests',
+        index=0,
+        request_id='r',
+        key=None,
+        value=b'x',
+        source_headers=[],
+        partition_count=8,
+        deliver_sinks=False,
+    )
+
+    assert 'dk-split-sinks' not in [name for name, _ in record.headers]
+
+
+def test_part_drops_http_job_headers():
+    names = [name for name, _ in _http_part_record(deliver_sinks=True).headers]
+
+    assert not {'dk-origin', 'dk-http-client', 'dk-deliver-sinks'} & set(names)
+
+
+@pytest.mark.parametrize(
+    ('origin', 'sinks', 'expected'),
+    [
+        (b'http', b'on', True),
+        (b'http', b'off', False),
+        (b'http', None, False),
+        (b'http', b'ON', False),
+        (b'kafka', None, True),
+        (b'kafka', b'off', True),
+    ],
+)
+def test_parse_part_headers_reads_deliver_sinks(origin, sinks, expected):
+    headers = [(n, v) for n, v in _part_headers() if n != 'dk-split-origin']
+    headers.append(('dk-split-origin', origin))
+    if sinks is not None:
+        headers.append(('dk-split-sinks', sinks))
+
+    part = parse_part_headers(headers)
+
+    assert part is not None
+    assert part.deliver_sinks is expected

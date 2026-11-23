@@ -25,6 +25,9 @@ SPLIT_JOB_LABEL = 'split_job'
 SPLIT_PART_LABEL = 'split_part'
 SPLIT_PART_LOCAL = 'local'
 ORIGIN_KAFKA = 'kafka'
+ORIGIN_HTTP = 'http'
+SINKS_ON = 'on'
+SINKS_OFF = 'off'
 # A record with this partition goes through the producer's key partitioner (librdkafka's "unassigned").
 ANY_PARTITION = -1
 
@@ -38,6 +41,7 @@ H_ATTEMPT = 'dk-split-attempt'
 H_ATTEMPT_ID = 'dk-split-attempt-id'
 H_INDEX = 'dk-split-index'
 H_ORIGIN = 'dk-split-origin'
+H_SINKS = 'dk-split-sinks'
 H_REQUEST_ID = 'dk-request-id'
 
 LOG_HEADER_ORDER: tuple[str, ...] = (
@@ -59,6 +63,7 @@ PART_HEADER_ORDER: tuple[str, ...] = (
     H_ATTEMPT_ID,
     H_INDEX,
     H_ORIGIN,
+    H_SINKS,
     H_REQUEST_ID,
 )
 
@@ -297,8 +302,14 @@ def part_record(
     value: bytes,
     source_headers: Sequence[Header],
     partition_count: int,
+    origin: str = ORIGIN_KAFKA,
+    deliver_sinks: bool = True,
 ) -> WireRecord:
-    """The parts-topic record of part ``index``: source headers without ``dk-`` ones, then the split headers."""
+    """The parts-topic record of part ``index``: source headers without ``dk-`` ones, then the split headers.
+
+    The sinks switch header is written only for the origin ``http``; a Kafka job always delivers to sinks.
+    """
+    sinks_switch = (SINKS_ON if deliver_sinks else SINKS_OFF) if origin == ORIGIN_HTTP else None
     values: dict[str, str | int | None] = {
         H_VERSION: SPLIT_VERSION,
         H_GROUP: ref.group,
@@ -308,7 +319,8 @@ def part_record(
         H_ATTEMPT: ref.attempt,
         H_ATTEMPT_ID: ref.attempt_id,
         H_INDEX: index,
-        H_ORIGIN: ORIGIN_KAFKA,
+        H_ORIGIN: origin,
+        H_SINKS: sinks_switch,
         H_REQUEST_ID: request_id,
     }
     kept = [(name, raw) for name, raw in source_headers if not name.startswith(DK_HEADER_PREFIX)]
@@ -342,6 +354,8 @@ def parse_part_headers(headers: Sequence[Header] | None) -> SplitPart | None:
         'attempt_id': attempt_id,
         'index': numbers[3],
         'origin': origin,
+        # Fail closed: a job of an HTTP request delivers to sinks only on an exact ``on``.
+        'deliver_sinks': origin != ORIGIN_HTTP or found.get(H_SINKS) == SINKS_ON.encode(),
     }
     try:
         return SplitPart.model_validate(fields)

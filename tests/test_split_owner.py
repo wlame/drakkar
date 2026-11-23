@@ -25,7 +25,7 @@ from drakkar.split import partmode
 from drakkar.split import splitting as splitting_module
 from drakkar.split.ending import MAX_RESULTS_RETRIES, RESULTS_RETRY_SECONDS
 from drakkar.split.models import JobAction, PartResult, SplitJob, SplitResultsUnavailable
-from drakkar.split.records import LOG_HEADER_ORDER, PART_HEADER_ORDER, part_partition, result_body
+from drakkar.split.records import H_SINKS, LOG_HEADER_ORDER, PART_HEADER_ORDER, part_partition, result_body
 from drakkar.split.tracker import TIMEOUT_CHECK_SECONDS
 from drakkar.uiserver.runner import DebugRunner, ProbeInput
 from tests.split_helpers import FakeProducerClient
@@ -90,7 +90,10 @@ async def test_a_split_of_five_parts_writes_open_the_parts_and_split_done():
         assert partition == part_partition(500, part.index, PARTS_PARTITIONS)
         assert record.key == b'request-key'
         assert record.value == Item(n=part.index).model_dump_json().encode()
-        assert [name for name, _ in record.headers] == ['traceparent', *PART_HEADER_ORDER]
+        assert [name for name, _ in record.headers] == [
+            'traceparent',
+            *(name for name in PART_HEADER_ORDER if name != H_SINKS),
+        ]
         assert (part.source_topic, part.attempt_id, part.origin) == (SOURCE_TOPIC, opened.ref.attempt_id, 'kafka')
         assert dict(record.headers)['dk-request-id'] == request_id.encode()
     assert split_parts_published._value.get() == published + 5
