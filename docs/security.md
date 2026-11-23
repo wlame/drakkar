@@ -205,6 +205,28 @@ reaches the header as it is, so a sink or a handler must not put one in an
 exception message. The same applies to the
 [Kafka read API](kafka-read.md), which reads the DLQ topic behind the UI token.
 
+### HTTP split jobs
+
+With [`split.http.enabled`](split.md#http-jobs) a `POST` on the HTTP source
+writes the raw request body to the Kafka source topic, and the result of the
+job is kept in the status topic for `split.http.result_retention`.
+
+- No header of the client reaches Kafka, the `Authorization` token above
+  all. The message carries only the request id, the name of the matched
+  client and the sinks switch, in `dk-` headers.
+- The status of a job and its result are visible only to the client that
+  created it. A `GET` with an id of another client answers `404` after the
+  same wait as an unknown id, and a `POST` with such an id answers `409`.
+  The anonymous client (an empty token) is one client: every caller without
+  a token shares its jobs.
+- The status topic holds the result of every job in clear text, and every
+  worker with the feature on keeps it in memory. Give the status topic the
+  access rules of the source topic.
+- Whoever can write to the source topic can create an HTTP job by writing
+  the four headers, with any client name. Whoever can write to the status
+  topic can change what a client reads. The broker ACLs are the boundary,
+  as for the other split topics.
+
 ### The agent routes
 
 The [agent routes](agent.md) under `/api/v1/agent` are on the API port, so

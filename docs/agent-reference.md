@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `65b410b9623f814e`.
+Registry version: `93d22a1e1e585d9e`.
 
 ## Concepts
 
@@ -333,6 +333,22 @@ The state part `split` and `GET /api/v1/debug/split` show the open jobs, their a
 - A job that is close to its timeout needs parts to finish; look at the workers that run parts before the timeout.
 
 **Related:** `concept:dlq`, `metric:drakkar_split_jobs_open`, `metric:drakkar_split_oldest_job_age_seconds`, `config:split.enabled`, `config:split.job_timeout`, `config:split.idle_timeout`, `rule:split-job-near-timeout`, `rule:split-partition-restoring`
+
+### `concept:split-http`
+
+With split.http on, an HTTP POST stores a request as a split job in the source topic, and a GET reads its status and result from a status topic that every worker follows.
+
+A `POST` on `sources.http.path` checks the body, writes it to the Kafka source topic keyed by the request id, and answers `202`. From there the message is an ordinary split job. The owner writes `running` records with the part counters and an end state (`done` with the result of `http_job_result`, or `failed` with an outcome) to the status topic; the source offset completes only after the end state is acknowledged.
+
+Every worker with the feature on follows the status topic into a map in memory, so a `GET ?request_id=<id>` on any worker answers at once. Until the map is restored the worker answers `503 not_ready`. A job is visible only to the client that created it. A second message with a known id is a duplicate and runs nothing.
+
+The status topic needs `cleanup.policy=delete` and a retention of at least `split.http.result_retention`. Every worker of the consumer group must set `split.http` alike; a worker with the feature off runs such a message as an ordinary message and logs `split_http_message_unhandled`.
+
+**Principles:**
+- A client that reads `accepted` for a long time points at a worker with the feature off, or at a job that waits for its owner; look at the logs of the owner of the source partition.
+- The memory of the status map grows with jobs per second times split.http.result_retention times the result size, on every worker with the feature on.
+
+**Related:** `concept:split`, `config:split.http.enabled`, `config:split.http.status_topic`, `config:split.http.result_retention`, `config:split.http.max_response`, `metric:drakkar_split_http_jobs`, `metric:drakkar_split_http_status_write_failures_total`
 
 ### `concept:cache-exchange`
 

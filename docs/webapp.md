@@ -11,6 +11,17 @@ optional, so this page covers a worker that serves HTTP alongside a Kafka
 consumer **and** a worker that serves HTTP only. Both sources are off by
 default and at least one must be on.
 
+!!! note "Job mode with `split.http.enabled`"
+    With [`split.http.enabled: true`](split.md#http-jobs) the path is a job
+    endpoint, not a synchronous one. A `POST` stores the body as a message of
+    the Kafka source topic and answers `202` with a request id; a `GET` on the
+    same path with `?request_id=<id>` answers the status of the job and, at
+    the end, its result. `arrange_http_request` and
+    `on_http_request_complete` are not used then, and the answers differ
+    from the ones on this page. Authentication, the `rpm` limit (on the
+    `POST` only), `max_body` and `max_concurrent` (on the `POST` only) still
+    apply. See [HTTP jobs](split.md#http-jobs).
+
 ---
 
 ## When to use the webapp vs the Kafka source path

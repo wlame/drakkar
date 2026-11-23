@@ -84,6 +84,18 @@ breaking change, never a refactor:
   `<partition>:<offset>`, headers in a fixed order, sorted compact JSON
   values, the closed sets of outcomes) — workers of other releases write and
   read the same log, and a restart rebuilds every job from it
+- the HTTP jobs of the split feature: the message a `POST` writes to the
+  source topic (key the request id, the raw body, and only the headers
+  `dk-origin` = `http`, `dk-request-id`, `dk-http-client`,
+  `dk-deliver-sinks` in this order; the part header `dk-split-sinks` follows
+  from the last), and the records of the status topic (key the request id,
+  header `dk-status-version` = `1`, sorted compact JSON of `client`, `job`
+  `<partition>:<offset>`, `state`, `updated_at`, and `parts`, `result`,
+  `duration_seconds`, `outcome`, `error` by state). The status map keeps, for
+  another job of the same id, the record of the lower source offset, and for
+  the same job the record of the same or a higher state rank (`accepted` <
+  `running` < `done` = `failed`), so the map does not depend on the order of
+  arrival — workers of other releases write and read both
 - framework datetimes in JSON use one canonical format:
   `drakkar.format_rfc3339_micro` — never `isoformat()` on framework values
 
@@ -275,6 +287,12 @@ parametrize).
     I/O and no handler call, and applies the same rules in restore and in
     live reading; a second rule set for one of the two would let a restart
     rebuild a different state than the live owner had.
+    With `split.http.enabled` the end-state status record of an HTTP job is
+    acknowledged before its `closed` record, and before the completion of a
+    local message, of an unparsed message and of nothing else; a duplicate
+    writes no status. The status map is fed only by the follower
+    (`drakkar/split/http_follower.py`) and is read and written only on the
+    main loop; the HTTP source thread reaches it through `dispatch_to_loop`.
 
 ## API server footguns
 
@@ -331,7 +349,10 @@ drakkar/
                            (records.py), the pure job table (table.py), the job tracker over the results log
                            (tracker.py), the producer, the results reader, the topic check (topics.py), the run
                            of one split (splitting.py), the end of a job (ending.py), the owner (owner.py), part
-                           mode of a processor (partmode.py), and the runtime the lifecycle builds (runtime.py)
+                           mode of a processor (partmode.py), and the runtime the lifecycle builds (runtime.py);
+                           HTTP jobs: the status records and the pure status map (http_status.py), the status
+                           follower (http_follower.py), the status writer and the gateway the HTTP source calls
+                           (http_jobs.py), and the headers of an HTTP job message (http_message.py)
   budget.py                the worker's pending budget: tasks and bytes, reservations, the FIFO of waiting loops
   executor.py              subprocess pool (argv exec, process-group kill)
   procwatch.py             the exit watcher: one daemon thread reads each task's exit time off the loop

@@ -202,6 +202,16 @@ describe the source topic only. `drakkar_handler_duration_seconds` has the
 | `drakkar_split_results_ignored_total` | Counter | `reason` | Records of the split topics this worker ignored, by reason: `duplicate`, `old_attempt`, `closed_job`, `unknown_job`, `foreign_group`, `malformed`. The job tracker counts the records of the results topic; a partition of the parts topic counts a part record (`foreign_group` or `malformed`) |
 | `drakkar_split_result_write_failures_total` | Counter | -- | Failed attempts to write a part result |
 | `drakkar_split_restore_duration_seconds` | Histogram | -- | Seconds to restore the split jobs of one source partition. Buckets 0.05, 0.25, 1, 5, 15, 60, 300 |
+| `drakkar_split_http_jobs_accepted_total` | Counter | -- | HTTP requests stored as split jobs |
+| `drakkar_split_http_status_reads_total` | Counter | `status` | Status reads of HTTP split jobs by answered status: `accepted`, `running`, `done`, `failed`, `not_found` |
+| `drakkar_split_http_jobs` | Gauge | `state` | HTTP split jobs in the status map by state: `accepted`, `running`, `done`, `failed`. Every worker with `split.http.enabled` keeps the map |
+| `drakkar_split_http_status_write_failures_total` | Counter | -- | Status records of HTTP split jobs that could not be written: each failed best-effort write and each failed attempt of an end state |
+
+The last four metrics carry values only with
+[`split.http.enabled`](split.md#http-jobs). `drakkar_handler_duration_seconds`
+then also has the `hook` value `http_job_result`. The
+[HTTP jobs section](split.md#http-jobs-observability) of the Split page lists
+their log events.
 
 #### Consumer
 
@@ -443,7 +453,7 @@ The provider log events:
 
 #### Webapp
 
-Emitted only when [`sources.http.enabled=true`](webapp.md). Track per-client request volume, latency, capacity headroom, and drop rates. Status labels are drawn from a closed set documented in [Webapp → Status codes](webapp.md#status-codes): `ok | timeout | error | rate_limited | auth_failed | shutdown | not_ready | capacity`. The `client` label is bounded by the configured client list plus the fixed `unauthenticated` sentinel for auth-failed / pre-auth gate hits, so cardinality stays small.
+Emitted only when [`sources.http.enabled=true`](webapp.md). Track per-client request volume, latency, capacity headroom, and drop rates. Status labels are drawn from a closed set documented in [Webapp → Status codes](webapp.md#status-codes): `ok | timeout | error | rate_limited | auth_failed | shutdown | not_ready | capacity`. A worker with [`split.http.enabled`](split.md#http-jobs) serves split jobs on the path and adds `accepted | duplicate | conflict | unavailable | status_read | not_found` (see [HTTP jobs](split.md#http-jobs-post)). The `client` label is bounded by the configured client list plus the fixed `unauthenticated` sentinel for auth-failed / pre-auth gate hits, so cardinality stays small.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|

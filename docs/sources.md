@@ -43,6 +43,17 @@ shows about partition `n` of the parts topic uses the number `1000000 + n`
 (see [Partition numbers of the parts topic](split.md#partition-numbers)).
 A detach leaves its group too, and the debug consume pause pauses it.
 
+### HTTP split jobs
+
+With [`split.http.enabled`](split.md#http-jobs) the two sources work
+together. The HTTP source stops being a synchronous source: a `POST` on
+`sources.http.path` writes the request as a message to the Kafka source
+topic and answers `202` with a request id, and a `GET` reads the status of
+the job. The message is then a split job of the Kafka source, with its
+at-least-once rules, and it survives a restart of the worker that received
+it. A worker with the feature on and the HTTP source off serves no endpoint
+but still owns and ends such jobs. The feature needs the Kafka source.
+
 ## Choosing a mode
 
 ### Kafka only

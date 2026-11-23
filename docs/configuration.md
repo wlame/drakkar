@@ -668,8 +668,14 @@ A root section, after `sources` and before `executor`. It lets a handler cut a l
 | `split.idle_timeout` | duration | `0` | The longest time without a new part result, counted only after the split has finished: `0` (no limit) or `1m` to `30d`, and below `job_timeout` when both are set. |
 | `split.max_attempts` | `int` | `3` | How many attempts of one job may die during their split (no `split-done` and no `split-cancelled`) before the job goes to the DLQ, 1 to 10. An attempt that a stop or a revoke cancelled is not counted. |
 | `split.max_part_data` | size | `64KiB` | The largest data of one part, `1KiB` to `512KiB`. |
+| `split.http.enabled` | `bool` | `false` | Accept a split job as a `POST` on `sources.http.path` and keep its status for a `GET`. Needs `split.enabled`. Set it alike on every worker of the consumer group. See [HTTP jobs](split.md#http-jobs). |
+| `split.http.status_topic` | `str` | `''` | The topic that keeps the status and the result of HTTP jobs. Required when `split.http.enabled` is true. You create it, with `cleanup.policy=delete` and a retention of at least `result_retention`. |
+| `split.http.result_retention` | duration | `24h` | How long a client can read the status of an ended HTTP job, `1m` to `30d`. |
+| `split.http.max_response` | size | `64KiB` | The largest result of one HTTP job, as JSON text, `1KiB` to `900KiB`. |
 
-With `split.enabled: false` the load checks only the values of the section itself: the ranges, both timeouts `0`, `idle_timeout` not below `job_timeout`, and an `aggregate_sinks` entry that is not written `<type>/<name>`. No key outside the section is read then, so a config that loaded before the section existed still loads. With `split.enabled: true` the load also fails when: the Kafka source is off; `split.connection` is not defined under `connections.kafka`; an `aggregate_sinks` entry is not a configured sink; the source topic, the parts topic, the results topic and the DLQ topic are not four different topics; or a sink depends on a sink of the other stage. The checks run again after `on_startup`; a change of `split.enabled` there is ignored and logged, and a worker that was built with the feature on is checked with the feature on. The config summary has the token `split=on` or `split=off` after `sources=[...]`.
+The `split.http` keys have the environment form `DK_SPLIT__HTTP__<KEY>`, for example `DK_SPLIT__HTTP__ENABLED=true`. `split.http.enabled` does not need `sources.http.enabled`: a worker with the HTTP source off still owns HTTP jobs and writes their status. With `split.http.enabled: false` only the ranges of the block are checked.
+
+With `split.enabled: false` the load checks only the values of the section itself: the ranges, both timeouts `0`, `idle_timeout` not below `job_timeout`, an `aggregate_sinks` entry that is not written `<type>/<name>`, and `split.http.enabled: true`. No key outside the section is read then, so a config that loaded before the section existed still loads. With `split.enabled: true` the load also fails when: the Kafka source is off; `split.connection` is not defined under `connections.kafka`; an `aggregate_sinks` entry is not a configured sink; the source topic, the parts topic, the results topic and the DLQ topic (and the status topic with `split.http.enabled`) are not different topics; a sink depends on a sink of the other stage; or `split.http.enabled` is true and `split.http.status_topic` is empty. The checks run again after `on_startup`; a change of `split.enabled` there is ignored and logged, and a worker that was built with the feature on is checked with the feature on. The config summary has the token `split=on`, `split=http` (with `split.http.enabled`) or `split=off` after `sources=[...]`.
 
 The load messages:
 
@@ -680,8 +686,10 @@ The load messages:
 - `split.idle_timeout (<v>) must be < split.job_timeout (<v>)`
 - `split: <path> and <path> name the same topic '<topic>'`
 - `sinks.<type>.<name>.depends_on: '<ref>' is in the other split stage; a sink depends only on sinks of its own stage`
+- `split.http.enabled needs split.enabled: an HTTP job is a split job of the Kafka source`
+- `split.http.enabled needs split.http.status_topic: name the topic that keeps the status of HTTP jobs`
 
-At start the worker also checks that both topics exist and that the results topic has the partition count of the source topic (see [The two topics](split.md#the-two-topics)).
+At start the worker also checks that both topics exist and that the results topic has the partition count of the source topic (see [The two topics](split.md#the-two-topics)). With `split.http.enabled` it also checks that the status topic exists, and warns when its retention is shorter than `split.http.result_retention` or its cleanup policy has `compact` (see [The status topic](split.md#the-status-topic)).
 
 ---
 

@@ -411,6 +411,26 @@
     - rule:split-job-near-timeout
     - rule:split-partition-restoring
 
+- key: split-http
+  summary: With split.http on, an HTTP POST stores a request as a split job in the source topic, and a GET reads its status and result from a status topic that every worker follows.
+  body: |-
+    A `POST` on `sources.http.path` checks the body, writes it to the Kafka source topic keyed by the request id, and answers `202`. From there the message is an ordinary split job. The owner writes `running` records with the part counters and an end state (`done` with the result of `http_job_result`, or `failed` with an outcome) to the status topic; the source offset completes only after the end state is acknowledged.
+
+    Every worker with the feature on follows the status topic into a map in memory, so a `GET ?request_id=<id>` on any worker answers at once. Until the map is restored the worker answers `503 not_ready`. A job is visible only to the client that created it. A second message with a known id is a duplicate and runs nothing.
+
+    The status topic needs `cleanup.policy=delete` and a retention of at least `split.http.result_retention`. Every worker of the consumer group must set `split.http` alike; a worker with the feature off runs such a message as an ordinary message and logs `split_http_message_unhandled`.
+  principles:
+    - A client that reads `accepted` for a long time points at a worker with the feature off, or at a job that waits for its owner; look at the logs of the owner of the source partition.
+    - The memory of the status map grows with jobs per second times split.http.result_retention times the result size, on every worker with the feature on.
+  related:
+    - concept:split
+    - config:split.http.enabled
+    - config:split.http.status_topic
+    - config:split.http.result_retention
+    - config:split.http.max_response
+    - metric:drakkar_split_http_jobs
+    - metric:drakkar_split_http_status_write_failures_total
+
 - key: cache-exchange
   summary: The cache exchange lets each worker pull the cluster and global cache rows that its peers wrote, over HTTP.
   body: |-

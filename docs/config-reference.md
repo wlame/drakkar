@@ -138,6 +138,11 @@ split:
   idle_timeout: 0                  # longest time without a part result after the split finished; 0 or 1m to 30d, below job_timeout. env: DK_SPLIT__IDLE_TIMEOUT
   max_attempts: 3                  # attempts that may die during their split before the DLQ, 1 to 10. env: DK_SPLIT__MAX_ATTEMPTS
   max_part_data: 64KiB             # largest data of one part, 1KiB to 512KiB. env: DK_SPLIT__MAX_PART_DATA
+  http:                            # split jobs that arrive as HTTP requests; see split.md#http-jobs
+    enabled: false                 # POST on sources.http.path stores a job, GET reads its status; needs split.enabled. env: DK_SPLIT__HTTP__ENABLED
+    status_topic: ''               # topic you create (cleanup.policy=delete); required when enabled. env: DK_SPLIT__HTTP__STATUS_TOPIC
+    result_retention: 24h          # how long a client can read an ended job, 1m to 30d. env: DK_SPLIT__HTTP__RESULT_RETENTION
+    max_response: 64KiB            # largest result of one job, 1KiB to 900KiB. env: DK_SPLIT__HTTP__MAX_RESPONSE
 ```
 
 ---

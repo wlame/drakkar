@@ -146,6 +146,17 @@ after that. You create two more Kafka topics, and the progress survives a
 restart of any worker. A part and the final result can be delivered twice,
 so the sinks must accept repeats. See [When to use it](split.md#when-to-use-it).
 
+### Can an HTTP client start such a large job and read the result later?
+
+Yes, with [HTTP jobs](split.md#http-jobs) (`split.http.enabled`, off by
+default). A `POST` on the HTTP source path stores the request in the Kafka
+source topic and answers `202` with a request id. The client polls a `GET`
+on the same path with `?request_id=<id>` on any worker, and reads a small
+JSON result, built by the hook `http_job_result`, when the job is `done`.
+You create one more topic, the status topic, with `cleanup.policy=delete`.
+Every worker of the consumer group must have the same `split.http`
+settings. A client sees only the jobs it created.
+
 ### Can one task cover multiple messages (fan-in)?
 
 Yes. An `ExecutorTask` can list multiple `source_offsets`; it only completes the window when all its source messages' trackers have settled. See [Multi-message tasks (fan-IN)](fan-out.md#multi-message-tasks-fan-in).

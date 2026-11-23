@@ -12,6 +12,10 @@ worker that owns the source partition of the job is its **owner**.
 The feature is **off by default**. A worker that does not turn it on
 behaves as before.
 
+A job can also start as an HTTP request: a client stores the request with a
+`POST` and reads its status and result with a `GET`. See
+[HTTP jobs](#http-jobs).
+
 ---
 
 ## When to use it {#when-to-use-it}
@@ -579,7 +583,9 @@ The root section `split`, after `sources` and before `executor`:
 - The checks run again after `on_startup`. A change of `split.enabled` in
   `on_startup` is ignored and logged, like the other settings that are read
   before `on_startup`.
-- The config summary line has the token `split=on` or `split=off`.
+- The config summary line has the token `split=on` or `split=off`, and
+  `split=http` with [HTTP jobs](#http-jobs) on.
+- The block `split.http` holds the keys of [HTTP jobs](#http-jobs-config).
 
 The load messages are listed under
 [Configuration](configuration.md#split-messages-split).
@@ -1063,9 +1069,589 @@ generator that is slow between two parts holds every later message of that
 source partition for that time. Keep the work of `split()` small: decide
 the parts, and leave the heavy work to the parts.
 
+## HTTP jobs {#http-jobs}
+
+A client that speaks HTTP can start a split job too. A job of 100 000
+tasks cannot be answered inside one HTTP round trip, and it must not be
+lost when the worker that received it restarts. So the `POST` only
+**stores** the request as one message in the source topic and answers with
+an id. From there the message is an ordinary split job. The client asks a
+`GET` with the id for the status and, at the end, for a small JSON result.
+
+The feature is **off by default** (`split.http.enabled: false`). A worker
+with the feature off does not change.
+
+Checklist before you turn it on:
+
+1. Create the status topic with `cleanup.policy=delete` and a retention of
+   at least `split.http.result_retention`. Any partition count works. See
+   [The status topic](#the-status-topic).
+2. Upgrade every worker of the consumer group to a release with the
+   feature first. Only then switch it on.
+3. Set `split.http.enabled` and `split.http.status_topic` alike on every
+   worker of the consumer group, also on workers that serve no HTTP. See
+   [Mixed fleets and edges](#http-jobs-mixed-fleets).
+4. Make sure that a request body fits in one Kafka record: lower
+   `sources.http.max_body`, or raise the record limit of the broker and of
+   the source topic. See [Mixed fleets and edges](#http-jobs-mixed-fleets).
+5. Read the [known limits](#http-jobs-known-limits).
+
+### How an HTTP job runs {#how-an-http-job-runs}
+
+1. The client sends `POST <sources.http.path>` with the body of one source
+   message.
+2. The worker that receives it checks the body with the input model of the
+   handler, asks the `request_id` hook for the id, and writes the body as a
+   message to the source topic. The key is the request id. It waits for
+   the broker to acknowledge the message.
+3. It writes an `accepted` record to the status topic and answers `202`
+   with the request id.
+4. The owner of the source partition reads the message as any other
+   message. It calls `split`, publishes the parts, and the fleet runs them.
+   While the job is open, the owner writes `running` records with the part
+   counters to the status topic.
+5. At the normal end the owner calls `aggregate`, then the new hook
+   `http_job_result`, writes a `done` record with the result, waits for its
+   acknowledgement, and then writes `closed`. Any other end writes a
+   `failed` record.
+6. Every worker with the feature on follows the status topic into memory.
+   A `GET` on any worker that serves the HTTP source answers from there.
+
+The source offset of an HTTP job completes only after the end state of the
+job (`done` or `failed`) is acknowledged by the broker. So a client never
+waits for ever for a job whose message is already committed. The one
+exception is a duplicate: see [The request id and
+duplicates](#http-jobs-duplicates).
+
+### Turn it on {#http-jobs-config}
+
+| Key | Default | Rule |
+|---|---|---|
+| `split.http.enabled` | `false` | Needs `split.enabled`. |
+| `split.http.status_topic` | `''` | Required when enabled. A topic that you create. |
+| `split.http.result_retention` | `24h` | `1m` to `30d`. How long a client can read the status of an ended job. |
+| `split.http.max_response` | `64KiB` | `1KiB` to `900KiB`. The largest result of one job, as JSON text. |
+
+- Each key has an environment form, for example
+  `DK_SPLIT__HTTP__ENABLED=true` or `DK_SPLIT__HTTP__STATUS_TOPIC=jobs-status`.
+- The load fails with
+  `split.http.enabled needs split.enabled: an HTTP job is a split job of the Kafka source`
+  and with
+  `split.http.enabled needs split.http.status_topic: name the topic that keeps the status of HTTP jobs`.
+  The status topic must differ from the source, parts, results and DLQ
+  topics. With `split.http.enabled: false` only the ranges of the block are
+  checked.
+- `split.http.enabled` does not need `sources.http.enabled`. A worker with
+  the feature on and the HTTP source off serves no endpoint, but it owns
+  jobs, writes their status records and keeps the status map.
+- With the feature on and the HTTP source on, every `POST` on
+  `sources.http.path` is a job. The hooks `arrange_http_request` and
+  `on_http_request_complete` are not used, and the handler does not need
+  them or the HTTP request and response types.
+- The config summary line has the token `split=http`.
+- At start the worker checks the status topic: a missing topic fails the
+  start with `split: the topic '<topic>' does not exist; create it before the worker starts`.
+  A retention shorter than `result_retention`, a cleanup policy with
+  `compact`, or a setting that cannot be read logs the warning
+  `split_topic_retention_short` with a `detail`. The worker still starts.
+
+```yaml
+sources:
+  kafka:
+    enabled: true
+    topic: requests
+    consumer_group: item-workers
+  http:
+    enabled: true
+    path: /jobs
+    deliver_to_sinks: false      # the default: an HTTP job writes to no sink
+    clients:
+      - name: tenant-a
+        token: "${TENANT_A_TOKEN}"
+        rpm: 60
+
+split:
+  enabled: true
+  http:
+    enabled: true
+    status_topic: requests_item-workers_split_status
+    result_retention: 24h
+    max_response: 64KiB
+```
+
+```bash
+kafka-topics.sh --bootstrap-server=kafka:9092 --create \
+  --topic=requests_item-workers_split_status \
+  --partitions=6 --replication-factor=3 \
+  --config=cleanup.policy=delete \
+  --config=retention.ms=172800000
+```
+
+`172800000` milliseconds is 2 days, longer than the `result_retention` of
+`24h`.
+
+### A complete example {#http-jobs-example}
+
+The handler of [A complete example](#a-complete-example), with the result
+hook. The client sends the body of a `Request` and reads a small summary.
+
+```python
+from pydantic import BaseModel
+
+import drakkar as dk
+
+PART_SIZE = 100
+LOCAL_LIMIT = 500
+
+
+class Request(BaseModel):
+    request_id: str
+    items: list[str]
+
+
+class ItemResult(BaseModel):
+    request_id: str
+    item: str
+    exit_code: int
+
+
+class PartSummary(BaseModel):
+    items_done: int
+
+
+class JobAnswer(BaseModel):
+    parts: int
+    failed_parts: int
+    items_done: int
+
+
+class ItemHandler(dk.BaseDrakkarHandler[Request, ItemResult]):
+    part_data_model = PartSummary
+
+    async def split(self, message: dk.SourceMessage):
+        request = message.payload
+        if len(request.items) <= LOCAL_LIMIT:
+            return  # a local message: it runs on this worker
+        for start in range(0, len(request.items), PART_SIZE):
+            yield request.model_copy(update={'items': request.items[start : start + PART_SIZE]})
+
+    async def arrange(self, messages, pending):
+        return [
+            dk.ExecutorTask(
+                task_id=dk.make_task_id('item'),
+                args=[item],
+                metadata={'request_id': msg.payload.request_id, 'item': item},
+                source_offsets=[msg.offset],
+            )
+            for msg in messages
+            for item in msg.payload.items
+        ]
+
+    async def part_data(self, group: dk.MessageGroup) -> PartSummary:
+        return PartSummary(items_done=group.succeeded)
+
+    async def http_job_result(self, job: dk.SplitJob) -> JobAnswer:
+        # Runs on the owner after aggregate, only for an HTTP job that ended normally.
+        items_done = 0
+        async for result in job.results():  # one result for a local message, read from memory
+            if isinstance(result.data, PartSummary):
+                items_done += result.data.items_done
+        return JobAnswer(
+            parts=job.total_parts or 1,
+            failed_parts=job.failed_parts,
+            items_done=items_done,
+        )
+```
+
+The default `aggregate` sends a job with a failed part to the DLQ, so the
+client then reads `failed` with the outcome `dlq`.
+
+A client session:
+
+```bash
+curl -s -X POST http://worker-1:8090/jobs \
+  -H 'Authorization: Bearer <token of tenant-a>' \
+  -d '{"request_id": "order-123", "items": ["a", "b", "c"]}'
+# {"request_id":"req_20261123T101500_...","status":"accepted"}
+
+curl -s -H 'Authorization: Bearer <token of tenant-a>' \
+  'http://worker-2:8090/jobs?request_id=req_20261123T101500_...'
+# {"request_id":"...","status":"running","updated_at":"...","parts":{"total":null,"received":0,"failed":0}}
+```
+
+The id in the answer comes from the `request_id` hook. By default it is a
+generated id. To let the client choose the id, override the hook, for
+example to take the `request_id` field of the body or a request header
+(see [The request id](webapp.md#the-request-id)).
+
+### `POST <path>` {#http-jobs-post}
+
+The gates run in the usual order of the HTTP source: `401`, `429` (the
+`rpm` of the client), `503 shutdown`, `503 not_ready`, `408`, `413`, then
+the body check (`422`) and the `max_concurrent` slot (`503 capacity`). Their
+bodies are the ones of [Status codes](webapp.md#status-codes). `503
+not_ready` has one more cause: the status map of this worker is not
+restored yet (see [The status topic](#the-status-topic)).
+
+Then:
+
+1. The body is parsed with the input model of the handler (the first type
+   parameter of `BaseDrakkarHandler`). A body that does not validate
+   answers `422 invalid_request`. A handler with no input model takes the
+   raw body as it is.
+2. The `request_id` hook gives the id, with the same message as for an
+   ordinary HTTP request: topic `__webapp__`, partition -1, offset 0, the
+   raw body as value, the request headers, and the parsed body as payload.
+   A hook that fails or answers an invalid id gives a generated id.
+3. The id is looked up in the status map of this worker. A known id of the
+   same client answers `200` with the status body of the `GET`, and
+   nothing is written. A known id of another client answers `409`.
+4. An unknown id: the body is written to the source topic, and the worker
+   waits for the acknowledgement for at most `sources.http.request_timeout`.
+5. The worker writes the `accepted` record and waits at most 5 seconds for
+   it. The answer does not depend on that write.
+
+| HTTP | Body | `status` label of `drakkar_webapp_requests_total` | When |
+|---|---|---|---|
+| 202 | `{"request_id": "<id>", "status": "accepted"}` | `accepted` | The request is stored as a job. |
+| 200 | The status body of the `GET` | `duplicate` | The id is known and belongs to this client. Nothing is written. |
+| 409 | `{"error": "request_id_in_use", "request_id": "<id>"}` | `conflict` | The id is known and belongs to another client. |
+| 413 | `{"error": "request_too_large", "request_id": "<id>", "details": "the request is larger than the broker accepts"}` | `error` | The broker refused the message as too large. |
+| 503 | `{"status": "unavailable", "error": "the request could not be stored", "request_id": "<id>"}` | `unavailable` | Any other failure of the write, the time limit, or a main loop that did not answer in time. |
+| 422 | `{"error": "invalid_request", "request_id": "<generated id>", "details": [...]}` | `error` | The body does not validate against the input model. |
+
+A `503 unavailable` does not prove that nothing was stored: the message
+can still reach the topic. Send the `POST` again with the same id. The
+duplicate rule makes sure that only one job runs.
+
+The `POST` writes these headers to the message, in this order, and no
+other: `dk-origin` (`http`), `dk-request-id`, `dk-http-client` (the name of
+the matched client) and `dk-deliver-sinks` (`true` or `false`). No header
+of the client, and no token, reaches Kafka.
+
+### `GET <path>?request_id=<id>` {#http-jobs-get}
+
+The `GET` is authenticated like the `POST`. It is not counted by the `rpm`
+limit and takes no `max_concurrent` slot: a poll is one read of a map in
+memory. `503 shutdown` and `503 not_ready` apply.
+
+| HTTP | Body | `status` label | When |
+|---|---|---|---|
+| 200 | The status body | `status_read` | The id is known and belongs to this client. |
+| 404 | `{"error": "not_found", "request_id": "<id>"}` | `not_found` | The id is unknown, or belongs to another client. |
+| 422 | `{"error": "invalid_request", "details": "request_id is required"}` | `error` | The parameter is missing or empty. |
+| 503 | `{"status": "unavailable", "error": "the status could not be read", "request_id": "<id>"}` | `unavailable` | The main loop did not answer in time. |
+
+An unknown id waits up to 1 second for a record of that id before the
+`404`. So a `GET` that reaches another worker right after the `POST` does
+not see a false `404`. An id of another client waits the same second, so
+the time of the answer does not tell that the id exists. An id that breaks
+the request id rule answers at once. When 1000 reads already wait, a new
+read answers at once.
+
+The status body:
+
+```json
+{"request_id": "order-123", "status": "running",
+ "updated_at": "2026-11-23T10:15:02.123456Z",
+ "parts": {"total": 1000, "received": 412, "failed": 0}}
+```
+
+| `status` | Fields besides `request_id`, `status` and `updated_at` |
+|---|---|
+| `accepted` | none |
+| `running` | `parts`. `total` is `null` while the split has not finished. |
+| `done` | `result` (the JSON of `http_job_result`, or `null`), `duration_seconds`, and `parts` when the job had parts |
+| `failed` | `outcome`, `error` (a text, can be empty), and `parts` when they are known |
+
+`updated_at` is the time of the record, in UTC with microseconds. The
+`running` counters are written at most once every 5 seconds for one job,
+so they can be a few seconds old.
+
+The `outcome` of `failed`:
+
+| `outcome` | Cause | `error` |
+|---|---|---|
+| `dlq` | The job or the local message went to the DLQ: `aggregate` answered `JobAction.DLQ` or raised, or an aggregate sink failed under `on_failure: dlq`. | The `dk-error` text of the DLQ record, or `an aggregate sink failed`. |
+| `timeout` | `split.job_timeout` or `split.idle_timeout` fired. Every end through `on_job_timeout` is `timeout`, whatever the hook answered; `http_job_result` is not called. | The text of the timeout. |
+| `split_failed` | `split` raised, yielded a wrong value, or a part could not be produced. | `split failed: <error>`. |
+| `attempts_spent` | The attempts of the split are spent. | `split did not finish in <n> attempts`. |
+| `orphaned` | The source no longer gives the message of a restored job. | `the source no longer gives the message of this job`. |
+| `parse` | The message could not be parsed on the owner, under any `sources.kafka.on_parse_error`. With `dlq` the DLQ record is written too. | The parse error. |
+| `response_failed` | `http_job_result` raised, its answer is not JSON, its JSON is larger than `split.http.max_response`, or the `done` record could not be written. The job itself ended normally. | Why. |
+
+`error` is cut to 2000 bytes, as `dk-error` of a DLQ record. It never holds
+task output.
+
+### The result hook `http_job_result` {#http-job-result}
+
+```python
+async def http_job_result(self, job: dk.SplitJob) -> BaseModel | dict | list | str | int | float | bool | None:
+    return None
+```
+
+- It runs on the owner after the answer of `aggregate` was acted on, only
+  for an HTTP job that ends normally: the job would close as `aggregated`,
+  or a local message did not go to the DLQ. It runs in the scope of
+  `aggregate`: the message context of the original message, the request id
+  in the log context, and the `hook` value `http_job_result` of
+  `drakkar_handler_duration_seconds`.
+- A pydantic model is dumped with `model_dump(mode='json')`. The answer is
+  written as compact JSON; `NaN` and infinity are refused.
+- A raise, an answer that is not JSON, or a JSON text larger than
+  `split.http.max_response` (UTF-8 bytes) makes the status `failed` with
+  the outcome `response_failed`, and logs `http_job_result_failed`. The job
+  still closes as it ended: the aggregate sinks keep what they got, and
+  nothing goes to the DLQ.
+- It is called once per end. `SplitResultsUnavailable` from `job.results()`
+  is not retried here, unlike in `aggregate`: it gives `response_failed` at
+  once.
+- `job.source_message.http_job` holds the request id and the client.
+- The default answers `None`: the client reads `"result": null`.
+- A handler that overrides it without `split.http.enabled` fails the start:
+  `<Handler> overrides http_job_result() without split.http.enabled; it is called only for HTTP split jobs`.
+
+The handler can tell an HTTP job in every hook:
+
+| Where | Field |
+|---|---|
+| The original message | `message.http_job`: `None` for every other message, else an `HttpJob` with `request_id`, `client` and `deliver_sinks`. `message.request_id` is the id from the header; the `request_id` hook is not called again. |
+| A part | `message.split.origin` is `http`, and `message.split.deliver_sinks` is the switch of the job. |
+
+### Sinks of an HTTP job {#http-jobs-sinks}
+
+The worker that receives the `POST` decides once for the job, by its
+`sources.http.deliver_to_sinks` (default `false`). The decision travels in
+the header `dk-deliver-sinks` and in the header `dk-split-sinks` of every
+part, so the owner and every worker that runs a part follow it.
+
+With the switch on, nothing differs from a job of the Kafka source.
+
+With the switch off:
+
+- Every hook runs as usual. The `CollectResult` of `on_task_complete`,
+  `on_group_complete` and `on_message_complete` of a part or of a local
+  message is dropped before delivery, and `PartResult.deliveries` stays
+  empty. `part_data` runs.
+- `on_window_complete`: a window result has no message to tell its
+  deliveries apart. When one message of the window belongs to a job with
+  the switch off, the whole window result is dropped, also the share of the
+  other messages. Keep window results out of a handler that mixes such jobs
+  with other messages, or use `on_message_complete`.
+- A `CollectResult` of `aggregate` or `on_job_timeout` is checked for its
+  stage as usual, and then dropped. The job ends as if it was delivered.
+- The DLQ is not a sink of this switch. A `dlq` outcome of a task, a
+  `JobAction.DLQ`, a parse failure, a failed split and a timeout write
+  their DLQ records as usual.
+- Each dropped result logs one debug line, `split_http_delivery_dropped`.
+
+### The request id and duplicates {#http-jobs-duplicates}
+
+The request id names the job for the client. The key of the message is the
+id, so every message of one id goes to the same source partition and to the
+same owner, in offset order.
+
+Two `POST`s with one id can both be written: two workers at the same
+moment, or a retry after a `503`. The duplicate rule:
+
+- The worker that receives a `POST` refuses an id that its status map knows
+  (`200` for the same client, `409` for another).
+- The owner, before it begins an HTTP job message, waits until its status
+  map is restored. A message whose id the map has with a lower offset of the
+  same partition, or whose id the owner began at a lower offset since it got
+  the partition, is a duplicate. It completes with no hook call and no
+  status record, and logs `split_http_duplicate`.
+- The same message given again (the same offset) is the same job, not a
+  duplicate. A job that the results topic already has is never a duplicate.
+- An id is free again when its entry left the status map:
+  `result_retention` after the end of its job. A `POST` with that id then
+  starts a new job.
+
+### The status topic {#the-status-topic}
+
+One record for each change of a job:
+
+| Part | Value |
+|---|---|
+| Key | The request id, UTF-8. The partition comes from the key partitioner. |
+| Header | `dk-status-version` = `1`. |
+| Value | Sorted compact JSON: `client`, `job` (`<source partition>:<source offset>`), `state` (`accepted`, `running`, `done` or `failed`), `updated_at`; `parts` (`failed`, `received`, `total`) for `running` and for an end state of a job with parts; `result` and `duration_seconds` for `done`; `outcome` and `error` for `failed`. |
+
+```json
+{"client":"tenant-a","job":"7:500","parts":{"failed":0,"received":412,"total":1000},"state":"running","updated_at":"2026-11-23T10:15:02.123456Z"}
+```
+
+Who writes what:
+
+- The worker that received the `POST` writes `accepted`, best effort.
+- The owner writes `running` after the `open` record of the job is read
+  back, again when the split has finished, and then when a counter changed,
+  at most once every 5 seconds for one job. These writes are best effort: a
+  write that fails is counted and logged, and dropped.
+- The owner writes the end state, `done` or `failed`. It tries it again
+  after 1, 2, 4 ... 30 seconds until the broker acknowledges it. A stop
+  ends the retries and leaves the offset pending, so the next owner ends
+  the job. An end state that can never be written (the broker refuses it
+  for good) stalls the offset. A `done` record that can never be written is
+  first replaced by `failed` with the outcome `response_failed`.
+
+**The status map.** Every worker with the feature on runs a **status
+follower**: one consumer that reads every partition of the status topic
+from the beginning, with the group id of `split.results_group`. It only
+assigns partitions and never commits. It keeps the best record of each
+request id in memory. A new record of a known id:
+
+1. Of another job: the record of the lower source offset wins. The same id
+   gives the same key, so the same source partition: the lower offset is
+   the first message of the id. The record of the other job is ignored.
+2. Of the same job: the states rank `accepted`, then `running`, then `done`
+   and `failed` (equal). A record of a lower rank is ignored; the same or a
+   higher rank replaces the stored one.
+
+So the map does not depend on the order in which the `accepted` record and
+the records of the owner reach the topic. A record that cannot be read (not
+JSON, another version, a missing or wrong field) is skipped and logs
+`split_http_status_record_invalid`.
+
+**Why `cleanup.policy=delete`.** Compaction keeps only the last record of a
+key. The broker could keep a late `accepted` and delete the `done` that the
+rank rule prefers. The client would then see the job as accepted for ever.
+
+**Expiry.** An entry in an end state leaves the map `result_retention`
+after its `updated_at`; a sweep runs every 60 seconds. An entry that has not
+ended never leaves the map by time: its job is still somewhere. After a
+restart the map holds only what the topic still has. Records in an end
+state that are older than `result_retention` are not stored.
+
+**The restore.** At start the follower reads every partition up to the end
+it saw at that moment. Until then the `POST` and the `GET` of this worker
+answer `503 not_ready`, and the owner waits before it begins an HTTP job
+message. The partition gives its reservation of the pending budget back
+while it waits. The end of the restore logs `split_http_status_restored`
+with the number of records and jobs. A restore that fails is tried again
+after 1, 2, 4 ... 30 seconds. The restore reads the whole topic, so it
+takes longer with a longer retention.
+
+**Memory.** Every worker with the feature on holds the map, also a worker
+without the HTTP source. Size it as:
+
+    jobs kept = jobs per second × result_retention (plus the jobs that run)
+    memory    ≈ jobs kept × (result size + a few hundred bytes)
+
+For example, 2 jobs per second with `result_retention: 24h` keep 172 800
+jobs. With results of 4 KiB that is about 700 MiB on every worker. When that
+is too much, lower `result_retention` or `max_response`.
+`drakkar_split_http_jobs` shows the entries by state.
+
+**Access rights.** Besides the rights of the two split topics, the worker
+needs Read and Describe on the status topic, Write on the status topic, and
+Write on the source topic (the `POST` writes the request there).
+DescribeConfigs on the status topic lets the start check read its retention
+and cleanup policy.
+
+### Mixed fleets and edges {#http-jobs-mixed-fleets}
+
+- **A worker with the feature off.** A worker with `split.enabled` and
+  `split.http.enabled: false` treats a message with `dk-origin: http` as an
+  ordinary message of the source: the sinks are delivered and no status is
+  written. It logs `split_http_message_unhandled`, at most once a minute.
+  The client then sees `accepted` for ever. This is a config error of the
+  fleet: set the feature alike on every worker of the consumer group.
+- **An older release.** A worker of a release without the feature ignores
+  `dk-split-sinks` when it runs a part, and delivers the part sinks.
+  Upgrade every worker before you switch the feature on.
+- **The size of a request.** `sources.http.max_body` (default `10MiB`) is
+  larger than the record limit of a default broker (about 1 MB). Lower
+  `max_body` to what the broker accepts, or raise `message.max.bytes` of the
+  broker (or `max.message.bytes` of the source topic). A body that passes
+  `max_body` and that the broker refuses answers `413`.
+- **Time limits.** `sources.http.request_timeout` bounds the `POST`, not the
+  job. `split.job_timeout` bounds the job.
+- **Partitions of the source topic.** The duplicate rule needs every
+  message of one id in one partition. Adding partitions to the source topic
+  moves keys to other partitions, so a retry of an id that was sent before
+  the change can start a second job.
+- **A producer outside the framework.** A program that writes the four
+  headers to the source topic creates an HTTP job; whoever can write to the
+  source topic is trusted already. It must use the key partitioner of the
+  framework (`consistent_random`, the CRC32 hash of the key), or two
+  messages of one id can land in different partitions. Many clients use
+  another hash by default.
+- **A message with a bad request id.** A message with `dk-origin: http` and
+  a `dk-request-id` that breaks the request id rule is an ordinary message
+  of the source.
+- **Detach, the consume pause, a rebalance.** Nothing new: the message is
+  in the source topic, and the job moves with its partition.
+- **The Message Probe.** It runs an HTTP job message as an ordinary
+  message, as for every message of a splitting handler.
+- **`sources.http.deliver_to_sinks`** keeps its old meaning on a worker
+  without the feature.
+
+### Known limits {#http-jobs-known-limits}
+
+1. A `POST` whose time limit ends after the message was stored answers
+   `503 unavailable`, although the job runs. A second `POST` with the same
+   id then answers the existing status.
+2. Between the acknowledgement of an end state and the moment a worker has
+   read it back (about one second), a new message with the same id is not
+   recognised as a duplicate.
+3. When two owners overlap after a rebalance, both can end the job. A
+   client can then read `done` and later another end state of the same job:
+   `done` and `failed` have the same rank, and the record that arrives last
+   wins. A restart of the owner between `done` and `closed` also runs the
+   end again: `aggregate` and `http_job_result` run a second time, and a
+   second `done` is written.
+4. `SplitResultsUnavailable` raised inside `http_job_result` gives `failed`
+   with the outcome `response_failed` at once.
+5. The status map lives in memory on every worker with the feature on. See
+   **Memory** in [The status topic](#the-status-topic).
+6. A job cannot be cancelled.
+
+### Metrics and log events of HTTP jobs {#http-jobs-observability}
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `drakkar_split_http_jobs_accepted_total` | Counter | -- | HTTP requests stored as split jobs. |
+| `drakkar_split_http_status_reads_total` | Counter | `status` | Status reads by the answered status: `accepted`, `running`, `done`, `failed`, `not_found`. |
+| `drakkar_split_http_jobs` | Gauge | `state` | Entries of the status map of this worker, by state. |
+| `drakkar_split_http_status_write_failures_total` | Counter | -- | Status records that could not be written: each failed best-effort write, and each failed attempt of an end state. |
+
+`drakkar_webapp_requests_total{status}` has the values `accepted`,
+`duplicate`, `conflict`, `unavailable`, `status_read` and `not_found` on a
+worker with the feature on. `drakkar_handler_duration_seconds` has the
+`hook` value `http_job_result`.
+
+Log events, category `split` unless the table says otherwise. A line that
+can repeat is rate-limited to one a minute and carries `suppressed`.
+
+| Event | Level | Meaning |
+|---|---|---|
+| `split_http_enabled` | info | The feature runs. Fields `status_topic`, `result_retention_seconds`. |
+| `split_http_status_restored` | info | The status map is restored; the worker answers. Fields `records`, `jobs`, `seconds`. |
+| `split_http_status_restore_failed` | warning | A restore of the status map failed; it is tried again. Fields `error`, `attempt`. |
+| `split_http_status_consume_failed` | warning | A read of the status topic failed; it is tried again after half a second. Field `error`. |
+| `split_http_status_record_invalid` | warning | A record of the status topic cannot be read; it is skipped. Fields `partition`, `offset`. |
+| `split_http_status_record_failed` | error | A record of the status topic hit an unexpected error; the next record is read. Fields `partition`, `offset`, `error`. |
+| `split_http_status_loop_failed` | error | A loop of the status follower (`loop` is `read` or `sweep`) ended on an unexpected error; it starts again after 3 seconds. Fields `loop`, `error`. |
+| `split_http_status_close_failed` | warning | The consumer of the status follower did not close cleanly at a stop. Field `error`. |
+| `split_http_job_accepted` | info | A request is stored as a job. Fields `request_id`, `job` (`<partition>:<offset>`; `null` when the delivery report named no offset), `client`. |
+| `split_http_store_failed` | warning | A request could not be stored in the source topic. Fields `request_id`, `client`, `error`. |
+| `split_http_dispatch_failed` | warning | The HTTP source thread did not get an answer from the main loop in time, and answered `503 unavailable`. One line per route a minute. Fields `route` (`submit` or `status`), `request_id`, `client`, `timeout_seconds`, `error`. |
+| `split_http_status_write_failed` | warning | A status record was not written. Fields `request_id`, `state`, `error`. |
+| `split_http_duplicate` | info | The owner completed a duplicate message with no hook call. Fields `partition`, `request_id`, `job`, `first_job`. |
+| `split_http_message_unhandled` | warning | A worker with the feature off got an HTTP job message and runs it as an ordinary message. Fields `partition`, `offset`. |
+| `split_http_delivery_dropped` | debug | A result was dropped because its job writes to no sink. Fields `partition`, `request_id`. |
+| `http_job_result_failed` | error | Category `handler`. `http_job_result` failed; the status is `failed` with `response_failed`. Fields `partition`, `job`, `error`. |
+
+**Alert on** a rate of `drakkar_split_http_status_write_failures_total`
+(end states wait, and their offsets with them), on `split_http_message_unhandled`
+(a worker of the fleet has the feature off), and on
+`drakkar_webapp_requests_total{status="unavailable"}`.
+
 ## What is not there yet {#what-is-not-there-yet}
 
-- HTTP requests are not split. They keep their usual path.
+- An HTTP job cannot be cancelled. The UI, the recorder and the agent
+  surface do not show the request id or the status of an HTTP job yet.
 - The Message Probe runs a message of a splitting handler as an ordinary
   message: it calls neither `split` nor `aggregate`.
 - Queued parts of a job that has ended are not cancelled.

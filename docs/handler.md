@@ -18,6 +18,7 @@ and what happens to a message when a step fails.
 | `part_data(group)` | Optional; after `on_message_complete` of a part and its delivery | Once per part, only with `split` | `BaseModel \| None` |
 | `aggregate(job)` | Optional; every part of a split job has a result | Once per job, on the owner, only with `split` | [`CollectResult`](sinks.md#collectresult) `\| JobAction \| None` |
 | `on_job_timeout(job)` | Optional; a timeout of a split job fired | Once per timed-out job, on the owner, only with `split` | [`CollectResult`](sinks.md#collectresult) `\| JobAction \| None` |
+| `http_job_result(job)` | Optional; an [HTTP split job](split.md#http-jobs) ended normally, after `aggregate` | Once per end of an HTTP job, on the owner, only with `split.http.enabled` | a pydantic model, `dict`, `list`, `str`, `int`, `float`, `bool` or `None` |
 | `on_task_complete(result)` | A single task completes successfully (exit 0) | Once per successful task | [`CollectResult`](sinks.md#collectresult) `\| None` |
 | `on_group_complete(group, results, errors)` | All tasks of one group of `arrange_stream` reached a terminal state, with their hooks and deliveries | Once per group (stream handlers only) | [`CollectResult`](sinks.md#collectresult) `\| None` |
 | `on_message_complete(group)` | All tasks derived from a single source message reached a terminal state | Once per source message | [`CollectResult`](sinks.md#collectresult) `\| None` |
@@ -35,7 +36,7 @@ and what happens to a message when a step fails.
 | `on_http_request_complete(group)` | All tasks from one HTTP request reached a terminal state | Once per HTTP request (webapp only) | `HttpResponseT` (a Pydantic model) |
 | `http_request_label(req, request_id)` | Before logging each HTTP request | Once per HTTP request (webapp only) | `str` |
 
-**Which hooks are required follows the enabled [input sources](sources.md).** Exactly one of `arrange()` and [`arrange_stream()`](#arrange_stream) is required when `sources.kafka.enabled` is true; the four `*http*` hooks at the bottom are required when `sources.http.enabled` is true, together with concrete types in the `HttpRequestT` / `HttpResponseT` slots (see [Generic type parameters](#generic-type-parameters) below). A worker running both sources needs both sets. An HTTP-only worker implements only the HTTP hooks and may leave `arrange()` unimplemented; a Kafka-only worker is the mirror of that. Every other hook has a safe default.
+**Which hooks are required follows the enabled [input sources](sources.md).** Exactly one of `arrange()` and [`arrange_stream()`](#arrange_stream) is required when `sources.kafka.enabled` is true; the four `*http*` hooks at the bottom are required when `sources.http.enabled` is true (except with [`split.http.enabled`](split.md#http-jobs), where every `POST` stores a split job and these hooks are not used), together with concrete types in the `HttpRequestT` / `HttpResponseT` slots (see [Generic type parameters](#generic-type-parameters) below). A worker running both sources needs both sets. An HTTP-only worker implements only the HTTP hooks and may leave `arrange()` unimplemented; a Kafka-only worker is the mirror of that. Every other hook has a safe default.
 
 ---
 
@@ -470,6 +471,19 @@ class ItemHandler(dk.BaseDrakkarHandler[Request, Output]):
   `return await self.aggregate(job)`.
 - `part_data_model` is a class attribute: the model that `PartResult.data` is
   parsed with. Without it, `data` is a dict.
+- `http_job_result(job)` builds the result that the client of an
+  [HTTP split job](split.md#http-jobs) reads with its `GET`. It runs on the
+  owner after the answer of `aggregate` was acted on, only for an HTTP job
+  that ends normally, in the scope of `aggregate`. A pydantic model is dumped
+  with `model_dump(mode='json')`. A raise, an answer that is not JSON, or JSON
+  larger than `split.http.max_response` makes the status `failed` with the
+  outcome `response_failed` (`http_job_result_failed` is logged); the job
+  still closes as it ended, and nothing goes to the DLQ. The default returns
+  `None`. See [The result hook](split.md#http-job-result).
+- `message.http_job` is `None` for every message except the message of an
+  HTTP split job; there it is an `HttpJob` with `request_id`, `client` and
+  `deliver_sinks`. A part of such a job has `message.split.origin == 'http'`
+  and `message.split.deliver_sinks`.
 
 #### SplitJob
 
@@ -538,6 +552,7 @@ when the records of the job are gone (handled as a raise of the hook). See
 | `split.enabled` is true and the handler does not override `split()` | startup fails |
 | `split.enabled` is true and the handler overrides `part_data()`, `aggregate()` or `on_job_timeout()`, or sets `part_data_model`, without `split()` | startup fails |
 | `split.enabled` is true and `split()` is not an async generator function | startup fails |
+| `split.enabled` is true, `split.http.enabled` is false, and the handler overrides `http_job_result()` | startup fails |
 | `split.enabled` is false | no split hook is checked: the worker starts and never calls them. A handler that has a `split()` method logs `split_disabled` once |
 
 ### on_task_complete
