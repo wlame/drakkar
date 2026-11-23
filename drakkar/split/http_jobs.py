@@ -265,6 +265,26 @@ def end_record(
     )
 
 
+def running_record(message: SourceMessage, *, parts: PartCounts, now: float) -> StatusRecord:
+    """The ``running`` status record of the HTTP job of ``message``, with its part counters.
+
+    Raises:
+        ValueError: the message is no HTTP job message.
+    """
+    http_job = message.http_job
+    if http_job is None:
+        raise ValueError('a running status needs the message of an HTTP job')
+    return StatusRecord(
+        request_id=http_job.request_id,
+        state='running',
+        partition=message.partition,
+        offset=message.offset,
+        client=http_job.client,
+        updated_at=now,
+        parts=parts,
+    )
+
+
 @dataclass(frozen=True)
 class HttpAnswer:
     """What the HTTP source answers: the status code, the JSON body and the request metric's status."""

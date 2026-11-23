@@ -35,7 +35,7 @@ from drakkar.sinks.dlq_record import cut_error
 from drakkar.sinks.manager import CollectCallback, MessageDLQState, SinkManager
 from drakkar.split import partmode
 from drakkar.split.ending import ClosedRecord, EndFacts, EndSettings, JobEnder, local_facts
-from drakkar.split.http_jobs import HttpOwnerSide, end_record
+from drakkar.split.http_jobs import HttpOwnerSide, end_record, running_record
 from drakkar.split.http_status import PartCounts, StatusRecord
 from drakkar.split.models import PartResult, TimedOutKind
 from drakkar.split.producer import NO_OFFSET, SplitProducer
@@ -70,6 +70,16 @@ UNKNOWN_PARSE_ERROR = 'unknown parse error'
 
 # How many offsets of records that the job tracker could not apply an owner remembers; the oldest go first.
 MAX_UNAPPLIED_OFFSETS = 1024
+# The least time between two ``running`` status records of one HTTP job; a change in between is written later.
+RUNNING_MIN_INTERVAL_SECONDS = 5.0
+
+# Schedules a callback after a delay in seconds; the handle it returns can be cancelled.
+TimerFn = Callable[[float, Callable[[], None]], asyncio.TimerHandle]
+
+
+def _call_later(delay: float, callback: Callable[[], None]) -> asyncio.TimerHandle:
+    """Run ``callback`` on the running loop after ``delay`` seconds."""
+    return asyncio.get_running_loop().call_later(delay, callback)
 
 
 class _Settled(StrEnum):
@@ -195,6 +205,17 @@ class OwnerSettings:
 
 
 @dataclass
+class _Progress:
+    """The ``running`` status records of one held HTTP job: what was written last, when, and the next write."""
+
+    last: PartCounts
+    # Epoch seconds of the last write, on the clock of the owner.
+    written_at: float
+    # The write of a change that came within the interval; None when none is due.
+    timer: asyncio.TimerHandle | None = None
+
+
+@dataclass
 class _HeldJob:
     """A job whose source message this owner holds."""
 
@@ -225,6 +246,8 @@ class _HeldJob:
     end_task: asyncio.Task | None = None
     # How many ``closed`` records of this owner for the job the job tracker could not apply.
     unread_closed: int = 0
+    # The ``running`` records of an HTTP job; None before the first one and after the end began.
+    progress: _Progress | None = None
 
     @property
     def busy(self) -> bool:
@@ -293,6 +316,10 @@ class SplitOwner:
         self._runs: set[SplitRun] = set()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._awaited: set[asyncio.Task[Any]] = set()
+        # The request ids of the HTTP jobs begun since this owner got the partition, with the first offset of
+        # each: a second message of an id in the same batch is a duplicate before any status of the first exists.
+        self._begun_ids: dict[str, int] = {}
+        self._timer: TimerFn = _call_later
 
     # --- what the processor calls ---
 
@@ -302,14 +329,18 @@ class SplitOwner:
         self._stopped.set()
         for run in list(self._runs):
             run.interrupt('stop')
+        for held in self._jobs.values():
+            self._end_progress(held)
 
     async def stop(self, timeout: float) -> None:
         """Wait at most ``timeout`` seconds for the tasks of the owner, then cancel what is left.
 
         After ``signal_stop`` these are the cancels of the splits that were
         in progress: each closes its generator and marks its attempt as
-        cancelled in the results log.
+        cancelled in the results log. No ``running`` record is written after it.
         """
+        for held in self._jobs.values():
+            self._end_progress(held)
         tasks = [task for task in self._tasks if not task.done()]
         if not tasks:
             return
@@ -362,6 +393,10 @@ class SplitOwner:
         if self._stopping:
             self._host.hold_job_offset(offset)
             return BeginOutcome.JOB
+        if self._ender.is_http_job(message):
+            decided = await self._begin_http_job(message)
+            if decided is not None:
+                return decided
         self._close_orphans_below(offset)
         self._restored_waiting.discard(offset)
         job = self._table.job(offset)
@@ -393,6 +428,57 @@ class SplitOwner:
         )
         self._reconcile(held)
         return BeginOutcome.JOB
+
+    async def _begin_http_job(self, message: SourceMessage) -> BeginOutcome | None:
+        """Wait for the status map, then complete a duplicate of an HTTP job; None when the message goes on.
+
+        The map must be restored before it can say that an id is known. A
+        stop ends the wait: the offset is held, and the next holder begins
+        the message. While the map is not restored the window gives its
+        reservation back, so the wait holds no room of other partitions.
+
+        A message is a duplicate when its request id belongs to a message of
+        a lower offset of this partition: in the map, or among the jobs this
+        owner began. It completes with no hook call and no status record.
+        The same offset is the same message given again, never a duplicate.
+        """
+        side = self._settings.status
+        http_job = message.http_job
+        assert side is not None and http_job is not None
+        offset = message.offset
+        if not side.follower.is_restored:
+            self._host.release_window_reservation()
+        if not await side.follower.wait_restored(self._stopped):
+            self._host.hold_job_offset(offset)
+            return BeginOutcome.JOB
+        request_id = http_job.request_id
+        first = self._first_offset_of(request_id, offset)
+        if first is None:
+            self._begun_ids.setdefault(request_id, offset)
+            return None
+        logger.info(
+            'split_http_duplicate',
+            category='split',
+            partition=self._label,
+            request_id=request_id,
+            job=f'{self._partition}:{offset}',
+            first_job=f'{self._partition}:{first}',
+        )
+        self._host.complete_job_offset(offset)
+        return BeginOutcome.DONE
+
+    def _first_offset_of(self, request_id: str, offset: int) -> int | None:
+        """The lowest offset below ``offset`` of a message of this partition with ``request_id``; None for none."""
+        side = self._settings.status
+        assert side is not None
+        found: list[int] = []
+        known = side.status_map.get(request_id)
+        if known is not None and known.partition == self._partition and known.offset < offset:
+            found.append(known.offset)
+        begun = self._begun_ids.get(request_id)
+        if begun is not None and begun < offset:
+            found.append(begun)
+        return min(found, default=None)
 
     def fail_unparsed(self, message: SourceMessage) -> None:
         """End an HTTP job whose message could not be parsed; its DLQ record, if any, is already settled.
@@ -512,17 +598,97 @@ class SplitOwner:
         self._unapplied.add(offset)
 
     def log_read(self) -> None:
-        """The job tracker read on in the results log of this partition: who waits for a record looks again."""
+        """The job tracker read on in the results log of this partition: who waits for a record looks again.
+
+        A held HTTP job then reports its part counters: the tracker sends no
+        event for a ``split-done`` or a single ``result``, so the counters
+        are looked at once for each batch the tracker read.
+        """
         waiters, self._read_waiters = self._read_waiters, set()
         for waiter in waiters:
             if not waiter.done():
                 waiter.set_result(None)
+        if self._settings.status is None:
+            return
+        for held in list(self._jobs.values()):
+            job = self._table.job(held.message.offset) if self._reports_progress(held) else None
+            if job is not None:
+                self._note_progress(held, job)
 
     def _job_changed(self, job: JobState) -> None:
-        """The results log said something new about ``job``: let the rules of a holder act, if it is held."""
+        """The results log said something new about ``job``: let the rules of a holder act, if it is held.
+
+        Then an HTTP job whose end has not begun reports its part counters.
+        """
         held = self._jobs.get(job.offset)
         if held is not None:
             self._reconcile(held)
+            self._note_progress(held, job)
+
+    # --- the running status of an HTTP job ---
+
+    def _reports_progress(self, held: _HeldJob) -> bool:
+        """Whether a held job writes ``running`` records now: an HTTP job, held, its end not begun, no stop."""
+        return (
+            not self._stopping
+            and self._ender.is_http_job(held.message)
+            and held.end_task is None
+            and not held.settling
+            and self._jobs.get(held.message.offset) is held
+        )
+
+    def _note_progress(self, held: _HeldJob, job: JobState) -> None:
+        """Write the part counters of ``job`` as ``running``, at most once per interval.
+
+        The first record of a job, and the first one that knows the number
+        of parts, are written at once. Any other change waits for the end of
+        the interval since the last record; the timer then writes what the
+        table has at that time, so the last change is always written. The
+        records are best effort: the partition loop never waits for them.
+        """
+        if not self._reports_progress(held) or job.closed is not None:
+            return
+        counts = PartCounts(job.parts, job.received_count, job.failed_parts)
+        progress = held.progress
+        if progress is None or (progress.last.total is None and counts.total is not None):
+            self._write_running(held, counts)
+            return
+        if counts == progress.last or progress.timer is not None:
+            return
+        waited = self._settings.clock() - progress.written_at
+        delay = min(max(RUNNING_MIN_INTERVAL_SECONDS - waited, 0.0), RUNNING_MIN_INTERVAL_SECONDS)
+        # The callback names the offset, not the job, so a timer keeps no held job alive.
+        progress.timer = self._timer(delay, functools.partial(self._progress_due, held.message.offset))
+
+    def _progress_due(self, offset: int) -> None:
+        """The interval after the last ``running`` record of the job at ``offset`` passed: write what changed."""
+        held = self._jobs.get(offset)
+        if held is None or held.progress is None:
+            return
+        held.progress.timer = None
+        job = self._table.job(offset)
+        if job is None or job.closed is not None or not self._reports_progress(held):
+            return
+        counts = PartCounts(job.parts, job.received_count, job.failed_parts)
+        if counts != held.progress.last:
+            self._write_running(held, counts)
+
+    def _write_running(self, held: _HeldJob, counts: PartCounts) -> None:
+        """Queue one ``running`` record of a held HTTP job; a record that cannot be queued is logged and dropped."""
+        side = self._settings.status
+        assert side is not None
+        self._end_progress(held)
+        now = self._settings.clock()
+        side.writer.write_best_effort(running_record(held.message, parts=counts, now=side.clock()))
+        held.progress = _Progress(last=counts, written_at=now)
+
+    @staticmethod
+    def _end_progress(held: _HeldJob) -> None:
+        """Stop the ``running`` records of a job: its end begins, it is dropped, or the owner stops."""
+        progress = held.progress
+        if progress is not None and progress.timer is not None:
+            progress.timer.cancel()
+        held.progress = None
 
     # --- the rules of a holder ---
 
@@ -773,6 +939,7 @@ class SplitOwner:
 
     def _drop(self, held: _HeldJob) -> None:
         """Stop holding a job whose offset this owner has settled."""
+        self._end_progress(held)
         if self._jobs.get(held.message.offset) is held:
             del self._jobs[held.message.offset]
 
@@ -887,6 +1054,7 @@ class SplitOwner:
             spent = job.crashed_attempts + (0 if job.cancelled else 1)
             if spent >= self._settings.max_attempts:
                 held.settling = True
+                self._end_progress(held)
                 # The attempt that the failure closes is named now, with the decision.
                 return self._spawn(self._fail_spent_attempts(held, self._ref_of(job), spent))
         attempt = 1 if job is None else job.attempt + 1
@@ -979,6 +1147,7 @@ class SplitOwner:
     async def _fail_split(self, held: _HeldJob, run: SplitRun, result: SplitResult) -> BeginOutcome:
         """End a job whose split failed: one DLQ record with stage ``split``, then ``closed``."""
         held.settling = True
+        self._end_progress(held)
         self._release_reservation(held)
         logger.error(
             'split_failed',
@@ -1096,6 +1265,7 @@ class SplitOwner:
 
     def _start_end(self, held: _HeldJob, job: JobState, timed_out: TimedOutKind) -> None:
         """Start the end of a job as a task of the processor, once for each job."""
+        self._end_progress(held)
         if timed_out:
             logger.warning(
                 'split_job_timed_out',

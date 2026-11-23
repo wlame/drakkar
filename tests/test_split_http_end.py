@@ -66,6 +66,12 @@ def http_message(offset: int = 500, *, value: bytes = b'{"n": 5}', deliver_sinks
     return message
 
 
+def is_end_status(item: Any) -> bool:
+    """Whether a produced status record carries an end state."""
+    parsed = parse_status_record(item.key, item.headers, item.value)
+    return parsed is not None and parsed.is_ended
+
+
 class RestoredFollower:
     """A follower whose map is restored: the owner reads the map through it."""
 
@@ -86,8 +92,9 @@ class HttpWorker:
     ``events`` holds ``('status', state)`` when a status record is written,
     ``('results', kind)`` when a record of the results log is written, and
     ``('complete', offset)`` when the processor completes an offset.
-    ``status_errors`` are the delivery errors of the next status records.
-    While ``hold_status`` is set, the delivery of every status record waits
+    ``status_errors`` are the delivery errors of the next end-state status
+    records; a ``running`` record is always delivered.
+    While ``hold_status`` is set, the delivery of every end-state record waits
     in ``held_status`` (``('status_held', None)`` in ``events``) until
     :meth:`release_status`.
     """
@@ -125,11 +132,12 @@ class HttpWorker:
         deliver = client._deliver
 
         def recorded(item: Any) -> None:
-            if item.topic == STATUS_TOPIC and self.hold_status:
+            is_end = item.topic == STATUS_TOPIC and is_end_status(item)
+            if is_end and self.hold_status:
                 self.events.append(('status_held', None))
                 self.held_status.append(item)
                 return
-            if item.topic == STATUS_TOPIC and self.status_errors:
+            if is_end and self.status_errors:
                 self.events.append(('status_refused', None))
                 item.on_delivery(self.status_errors.popleft(), FakeMessage(topic=item.topic, partition=item.partition))
                 return
@@ -165,18 +173,20 @@ class HttpWorker:
         await self.worker.start(*messages)
         return self
 
-    def statuses(self) -> list[StatusRecord]:
-        """The status records in the status topic, parsed, in order."""
+    def statuses(self, *, running: bool = False) -> list[StatusRecord]:
+        """The status records in the status topic, parsed, in order; ``running`` records only when asked."""
         found = []
         for record in self.world.log.records(STATUS_TOPIC, 0):
             parsed = parse_status_record(record.key, record.headers, record.value)
             assert parsed is not None
-            found.append(parsed)
+            if running or parsed.state != 'running':
+                found.append(parsed)
         return found
 
     def status_bodies(self) -> list[dict[str, Any]]:
-        """The JSON bodies of the status records, in order."""
-        return [json.loads(record.value) for record in self.world.log.records(STATUS_TOPIC, 0)]
+        """The JSON bodies of the status records that are not ``running``, in order."""
+        bodies = [json.loads(record.value) for record in self.world.log.records(STATUS_TOPIC, 0)]
+        return [body for body in bodies if body['state'] != 'running']
 
     def index(self, event: tuple[str, Any]) -> int:
         return self.events.index(event)
@@ -517,7 +527,7 @@ async def test_status_write_retried_with_backoff_then_acknowledged():
     await http.worker.sleep.fire(2.0)
     await wait_until(lambda: http.worker.committed == 501)
 
-    assert [event for event in http.events if event[0].startswith('status')] == [
+    assert [event for event in http.events if event[0].startswith('status') and event[1] != 'running'] == [
         ('status_refused', None),
         ('status_refused', None),
         ('status', 'failed'),
