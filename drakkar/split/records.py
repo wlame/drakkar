@@ -25,6 +25,8 @@ SPLIT_JOB_LABEL = 'split_job'
 SPLIT_PART_LABEL = 'split_part'
 SPLIT_PART_LOCAL = 'local'
 ORIGIN_KAFKA = 'kafka'
+# A record with this partition goes through the producer's key partitioner (librdkafka's "unassigned").
+ANY_PARTITION = -1
 
 H_VERSION = 'dk-split-version'
 H_RECORD = 'dk-split-record'
