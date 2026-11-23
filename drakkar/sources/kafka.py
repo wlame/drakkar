@@ -839,7 +839,11 @@ class KafkaSource:
             report=no_report,
             source_group=runtime.source_group,
         )
-        return {'on_collect': part_collect(ctx.sink_manager, ctx.on_collect), 'part_mode': part_mode}
+        return {
+            'on_collect': part_collect(ctx.sink_manager, ctx.on_collect),
+            'part_mode': part_mode,
+            'http_jobs': runtime.http is not None,
+        }
 
     def _start_restore(self, partition_id: int, processor: PartitionProcessor, runtime: SplitRuntime) -> None:
         """Mark the partition as restoring and start the task that restores its split jobs."""

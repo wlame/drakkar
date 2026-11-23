@@ -302,6 +302,7 @@ class OwnerWorker:
         budget: PendingBudget | None = None,
         client: FakeProducerClient | None = None,
         executor_on_failure: str = 'skip',
+        http_jobs: bool = False,
     ) -> None:
         self.world = world
         self.handler = handler
@@ -367,6 +368,7 @@ class OwnerWorker:
             executor_on_failure=executor_on_failure,
             part_mode=part_mode,
             budget=budget,
+            http_jobs=http_jobs,
         )
         self.owner: SplitOwner | None = None
         self.table: JobTable | None = None

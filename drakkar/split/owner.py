@@ -384,6 +384,19 @@ class SplitOwner:
         self._reconcile(held)
         return BeginOutcome.JOB
 
+    def fail_unparsed(self, message: SourceMessage) -> None:
+        """End an HTTP job whose message could not be parsed; its DLQ record, if any, is already settled.
+
+        The message never reaches ``split``. The end runs as a task of the
+        processor, so the partition loop does not wait for it, and its
+        answer completes the offset.
+        """
+
+        async def end() -> bool:
+            return True
+
+        self._host.start_job_end(message, end)
+
     async def end_local(self, message: SourceMessage, result: PartResult) -> bool:
         """End a local message as a job of one part; no record is written to any topic.
 

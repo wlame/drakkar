@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from drakkar.metrics import split_result_write_failures
 from drakkar.models import CollectResult, SourceMessage, SplitPart
 from drakkar.providers.resilience import RateLimitedLog
+from drakkar.split.http_message import delivers_to_sinks
 from drakkar.split.models import PartResult, SinkCounts
 from drakkar.split.producer import SplitProduceError, SplitProducer
 from drakkar.split.records import H_REQUEST_ID, Header, JobRef, WireRecord, log_record, result_body
@@ -164,6 +165,11 @@ def build_part_result(
     )
 
 
+def log_dropped_delivery(partition: int, request_id: str | None) -> None:
+    """Log one result that was not delivered because its job asked for no sink writes."""
+    logger.debug('split_http_delivery_dropped', category='split', partition=partition, request_id=request_id)
+
+
 def part_collect(sink_manager: SinkManager, on_collect: CollectCallback) -> CollectCallback:
     """Wrap ``on_collect`` for the results of a part: a result that names an aggregate sink is not delivered.
 
@@ -172,6 +178,10 @@ def part_collect(sink_manager: SinkManager, on_collect: CollectCallback) -> Coll
     messages a captured DLQ outcome of stage ``sink`` with the fixed error
     text, so the part ends as a message on the DLQ ends. A window result has
     no source message to carry the outcome: the error is logged.
+
+    After that check, a result is dropped when one of its source messages
+    belongs to a job that asked for no sink writes: no sink sees it, and it
+    adds no delivery count to the part.
     """
 
     async def collect(
@@ -179,7 +189,13 @@ def part_collect(sink_manager: SinkManager, on_collect: CollectCallback) -> Coll
     ) -> dict | None:
         # A result with no context is left to the delivery, which fails closed for it.
         error = None if message_context is None else sink_manager.stage_error(result, 'part')
-        if message_context is None or error is None:
+        if message_context is None:
+            return await on_collect(result, partition_id, message_context=message_context)
+        if error is None:
+            dropped_for = _sinks_off_message(message_context.source_messages)
+            if dropped_for is not None:
+                log_dropped_delivery(partition_id, dropped_for.request_id)
+                return {}
             return await on_collect(result, partition_id, message_context=message_context)
         if message_context.is_window:
             logger.error('split_stage_error', category='split', partition=partition_id, error=error)
@@ -188,6 +204,14 @@ def part_collect(sink_manager: SinkManager, on_collect: CollectCallback) -> Coll
         return {}
 
     return collect
+
+
+def _sinks_off_message(messages: Sequence[SourceMessage]) -> SourceMessage | None:
+    """The first of ``messages`` whose job asked for no sink writes, or None."""
+    for message in messages:
+        if not delivers_to_sinks(message):
+            return message
+    return None
 
 
 def _result_ref(part: SplitPart) -> JobRef:

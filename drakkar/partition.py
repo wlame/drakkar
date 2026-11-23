@@ -80,6 +80,7 @@ from drakkar.reported_run import reported_run_seconds
 from drakkar.request_ids import RequestIdResolver, reset_request_id
 from drakkar.sinks.dlq_record import DLQRecord, cut_error
 from drakkar.sinks.manager import CollectCallback, DeliveryOutcome, MessageContext, MessageDLQState, sink_ref
+from drakkar.split.http_message import delivers_to_sinks, is_http_origin, read_http_job
 from drakkar.split.models import PartResult
 from drakkar.split.owner import BeginOutcome, SplitOwner
 from drakkar.split.partmode import (
@@ -87,6 +88,7 @@ from drakkar.split.partmode import (
     PartReportError,
     build_part_result,
     checked_part_data,
+    log_dropped_delivery,
     max_waiting_reports,
     part_data_raised,
     part_request_id,
@@ -374,6 +376,7 @@ class PartitionProcessor:
         request_ids: RequestIdResolver | None = None,
         part_mode: PartMode | None = None,
         partition_label: int | None = None,
+        http_jobs: bool = False,
     ) -> None:
         self._partition_id = partition_id
         # The number this processor shows for its partition: in metric labels,
@@ -397,6 +400,10 @@ class PartitionProcessor:
         # each accepted message goes through ``SplitOwner.begin``, a local
         # message runs here in part mode, and a job keeps its offset pending.
         self._owner: SplitOwner | None = None
+        # Whether a message of the source can be an HTTP split job: its
+        # headers are read only on a worker that splits with the feature on.
+        self._http_jobs = http_jobs
+        self._http_log = RateLimitedLog(time.monotonic)
         # Offsets of open jobs. They stay pending until the job ends, so the
         # watermark stops below them, and every drain leaves them out: the
         # results of a job can take hours, and the next owner continues it.
@@ -1443,16 +1450,46 @@ class PartitionProcessor:
                     accepted.append(msg)
                 continue
             self._handler.deserialize_message(msg)
-            # After the parse, so the handler hook can read msg.payload.
-            self._request_ids.assign(msg)
+            if self._owner is not None:
+                self._read_http_job(msg)
+            if msg.http_job is None:
+                # After the parse, so the handler hook can read msg.payload.
+                self._request_ids.assign(msg)
             if msg.parse_error is not None and self._on_parse_error != 'skip':
                 with self._request_ids.scope([msg.request_id]):
                     await self._handle_parse_failure(msg)
+                continue
+            if msg.parse_error is not None and msg.http_job is not None and self._owner is not None:
+                # An HTTP job never reaches split without its payload: its owner ends it as failed.
+                self._owner.fail_unparsed(msg)
                 continue
             if self._owner is not None and not await self._begin_split(msg, self._owner):
                 continue
             accepted.append(msg)
         return accepted
+
+    def _read_http_job(self, msg: SourceMessage) -> None:
+        """Give a message stored by an HTTP split job request its job view and the request id of its header.
+
+        Without the feature such a message runs as an ordinary message of
+        the source, and a warning says so at most once a minute.
+        """
+        if self._http_jobs:
+            msg.http_job = read_http_job(msg.headers)
+            if msg.http_job is not None:
+                msg.request_id = msg.http_job.request_id
+            return
+        if not is_http_origin(msg.headers):
+            return
+        suppressed = self._http_log.admit('unhandled')
+        if suppressed is not None:
+            logger.warning(
+                'split_http_message_unhandled',
+                category='split',
+                partition=self._partition_label,
+                offset=msg.offset,
+                suppressed=suppressed,
+            )
 
     async def _begin_split(self, msg: SourceMessage, owner: SplitOwner) -> bool:
         """Let the owner decide what an accepted source message is; true for a local message, which runs here.
@@ -2385,8 +2422,7 @@ class PartitionProcessor:
         if self._dlq_send is not None:
             sent = await self._dlq_send(record, self._partition_label)
         if sent:
-            self._offset_tracker.complete(msg.offset)
-            await self._note_commit_due()
+            await self._end_unparsed(msg)
         elif self._on_dlq_failure == 'stall':
             await self._stall_offset(msg.offset)
         else:
@@ -2401,8 +2437,19 @@ class PartitionProcessor:
                 reason='on_parse_error=dlq but the message was not written to the DLQ',
                 action='ALERT: unparseable message dropped (dlq.on_send_failure=drop)',
             )
-            self._offset_tracker.complete(msg.offset)
-            await self._note_commit_due()
+            await self._end_unparsed(msg)
+
+    async def _end_unparsed(self, msg: SourceMessage) -> None:
+        """Settle a message that could not be parsed once its DLQ record is written or dropped.
+
+        The owner ends an HTTP split job, which completes the offset only
+        after the job's status says it failed; any other offset completes here.
+        """
+        if msg.http_job is not None and self._owner is not None:
+            self._owner.fail_unparsed(msg)
+            return
+        self._offset_tracker.complete(msg.offset)
+        await self._note_commit_due()
 
     async def _execute_and_track(self, task: ExecutorTask, window: Window, retry_count: int = 0) -> None:
         """Run one task to its last outcome: hooks, delivery, trackers, window.
@@ -2910,7 +2957,7 @@ class PartitionProcessor:
                 )
             if on_complete_result and self._on_collect and self._deliveries_suppressed:
                 self._note_suppressed_delivery('on_window_complete')
-            elif on_complete_result and self._on_collect:
+            elif on_complete_result and self._on_collect and not self._window_drops_sinks(window):
                 try:
                     # The explicit window context: this result has no source
                     # message left, so a ``dlq`` outcome acts as ``skip``.
@@ -2952,6 +2999,20 @@ class PartitionProcessor:
             # case the last commit was blocked.
             offset_lag.labels(partition=str(self._partition_label)).set(self._offset_tracker.pending_count)
             await self._note_commit_due()
+
+    def _window_drops_sinks(self, window: Window) -> bool:
+        """Whether a window result of part mode is dropped: a message of the window asked for no sink writes.
+
+        A window result has no message to tell its deliveries apart, so one
+        such message drops the whole result.
+        """
+        if self._part_mode is None:
+            return False
+        for message in window.source_messages:
+            if not delivers_to_sinks(message):
+                log_dropped_delivery(self._partition_label, message.request_id)
+                return True
+        return False
 
     async def _complete_group(self, window: Window) -> None:
         """Finish a group whose tasks all ended: its hook and delivery, its note check, then maybe its message.
