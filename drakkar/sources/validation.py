@@ -13,23 +13,27 @@ from drakkar.models import ConfigurationError
 _SPLIT_ONLY_HOOKS = ('part_data', 'aggregate', 'on_job_timeout')
 
 
-def validate_handler_for_sources(handler: Any, sources: SourcesConfig, *, split_enabled: bool = False) -> None:
+def validate_handler_for_sources(
+    handler: Any, sources: SourcesConfig, *, split_enabled: bool = False, split_http_enabled: bool = False
+) -> None:
     """Raise ``ConfigurationError`` unless the handler implements the hooks every enabled source calls.
 
     The checks of the streaming arrange hook and of the split hooks run first,
     whatever sources are enabled: they are faults of the handler class alone,
-    except that the split checks also read ``split.enabled``.
+    except that the split checks also read ``split.enabled`` and
+    ``split.http.enabled``. With both on, the HTTP source stores split jobs
+    and needs none of the hooks or models of a synchronous request.
     """
     from drakkar.handler import overrides_arrange, uses_arrange_stream
 
     validate_stream_hooks(handler)
-    validate_split_hooks(handler, split_enabled=split_enabled)
+    validate_split_hooks(handler, split_enabled=split_enabled, split_http_enabled=split_http_enabled)
     if sources.kafka.enabled and not overrides_arrange(handler) and not uses_arrange_stream(handler):
         raise ConfigurationError(
             f'sources.kafka.enabled=true but {type(handler).__name__} does not override arrange() or '
             'arrange_stream() — implement one of them or disable sources.kafka'
         )
-    if sources.http.enabled:
+    if sources.http.enabled and not (split_enabled and split_http_enabled):
         from drakkar.webapp.validation import validate_webapp_handler
 
         validate_webapp_handler(handler)
@@ -66,7 +70,7 @@ def validate_stream_hooks(handler: Any) -> None:
         )
 
 
-def validate_split_hooks(handler: Any, *, split_enabled: bool) -> None:
+def validate_split_hooks(handler: Any, *, split_enabled: bool, split_http_enabled: bool = False) -> None:
     """Raise ``ConfigurationError`` when the split hooks of the handler do not fit each other.
 
     With ``split.enabled`` false nothing is checked: no split hook is ever
@@ -82,6 +86,10 @@ def validate_split_hooks(handler: Any, *, split_enabled: bool) -> None:
     if _handler_splits(handler):
         if not inspect.isasyncgenfunction(handler_cls.split):
             raise ConfigurationError(f'{name}.split must be an async generator function')
+        if not split_http_enabled and _overrides_hook(handler, 'http_job_result'):
+            raise ConfigurationError(
+                f'{name} overrides http_job_result() without split.http.enabled; it is called only for HTTP split jobs'
+            )
         return
     for hook in _SPLIT_ONLY_HOOKS:
         if _overrides_hook(handler, hook):

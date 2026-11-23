@@ -209,3 +209,33 @@ def test_default_split_raises_not_implemented():
 def test_split_names_are_exported(name):
     assert name in dk.__all__
     assert hasattr(dk, name)
+
+
+class HttpResultHandler(SplitHandler):
+    async def http_job_result(self, job):
+        return {'ok': True}
+
+
+def test_http_job_result_without_split_http_is_refused():
+    with pytest.raises(ConfigurationError) as excinfo:
+        validate_handler_for_sources(HttpResultHandler(), _sources(), split_enabled=True, split_http_enabled=False)
+    assert str(excinfo.value) == (
+        'HttpResultHandler overrides http_job_result() without split.http.enabled; '
+        'it is called only for HTTP split jobs'
+    )
+
+
+def test_http_job_result_with_split_off_is_not_checked():
+    validate_handler_for_sources(HttpResultHandler(), _sources(), split_enabled=False)
+    validate_handler_for_sources(HttpResultHandler(), _sources(), split_enabled=True, split_http_enabled=True)
+
+
+def test_http_source_with_split_http_skips_webapp_validation():
+    sources = SourcesConfig(kafka={'enabled': True}, http={'enabled': True})
+    validate_handler_for_sources(SplitHandler(), sources, split_enabled=True, split_http_enabled=True)
+    with pytest.raises(ConfigurationError, match='HttpRequestT'):
+        validate_handler_for_sources(SplitHandler(), sources, split_enabled=True, split_http_enabled=False)
+
+
+async def test_default_http_job_result_returns_none():
+    assert await PlainHandler().http_job_result(_job(failed_parts=0)) is None

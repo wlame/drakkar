@@ -565,6 +565,21 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         """
         return JobAction.DLQ
 
+    async def http_job_result(self, job: SplitJob) -> BaseModel | dict | list | str | int | float | bool | None:
+        """Build the result that the client reads for a finished HTTP job.
+
+        Optional. Runs on the owner, after ``aggregate`` was acted on, only
+        for an HTTP split job that ends normally, in the same scope as
+        ``aggregate``. A pydantic model is dumped with
+        ``model_dump(mode='json')``; the value is encoded as JSON. When that
+        fails, when the text is larger than ``split.http.max_response``, or
+        when the hook raises, the job's status is ``failed`` with outcome
+        ``response_failed``; the job itself still closes as it ended.
+        ``job.source_message.http_job`` holds the request id and the client.
+        Valid only with ``split.http.enabled``.
+        """
+        return None
+
     def task_run_seconds(self, result: ExecutorResult) -> float | None:
         """Return the run time to draw for this task, or None to use the framework measure.
 

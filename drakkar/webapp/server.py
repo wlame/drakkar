@@ -74,8 +74,11 @@ gracefully.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import threading
 import time
+from collections.abc import Coroutine
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -83,7 +86,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 import uvicorn
 from fastapi import Depends, FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 
 from drakkar.concurrency import dispatch_to_loop
@@ -96,6 +99,7 @@ from drakkar.metrics import (
     webapp_rpm_limit,
 )
 from drakkar.models import SourceMessage
+from drakkar.split.http_jobs import ACCEPTED_WRITE_SECONDS, STATUS_WAIT_SECONDS, STORE_FAILED_TEXT, HttpAnswer
 from drakkar.utils import make_request_id
 from drakkar.webapp.dependencies import (
     WebappError,
@@ -108,6 +112,7 @@ from drakkar.webapp.validation import validate_webapp_handler
 
 if TYPE_CHECKING:
     from drakkar.app import DrakkarApp
+    from drakkar.split.http_jobs import HttpJobGateway
 
 logger = structlog.get_logger()
 
@@ -153,6 +158,32 @@ MAX_HEADER_BYTES = 64 * 1024
 # alone is not a slow-loris defence: a client can stay under
 # ``max_body`` forever by sending one byte a minute.
 BODY_READ_TIMEOUT_MARGIN_SECONDS = 30
+
+# Added to the time a gateway call of job mode may take, for the hop to
+# the main loop and back.
+DISPATCH_MARGIN_SECONDS = 1.0
+
+STATUS_READ_FAILED_TEXT = 'the status could not be read'
+
+
+def _unavailable_answer(request_id: str, error: str) -> HttpAnswer:
+    """The 503 answer of a job request or a status read that the main loop did not answer."""
+    body = {'status': 'unavailable', 'error': error, 'request_id': request_id}
+    return HttpAnswer(503, json.dumps(body, separators=(',', ':'), ensure_ascii=False).encode('utf-8'), 'unavailable')
+
+
+def _job_gateway(drakkar_app: DrakkarApp) -> HttpJobGateway | None:
+    """The gateway of HTTP split jobs when ``split.http.enabled`` is on, else None.
+
+    Raises:
+        RuntimeError: the feature is on but its runtime was not started before the HTTP source.
+    """
+    if drakkar_app._split_http_enabled is not True:
+        return None
+    split = drakkar_app._split
+    if split is None or split.http is None:
+        raise RuntimeError('split.http.enabled is true but the runtime of HTTP split jobs was not started')
+    return split.http.gateway
 
 
 class WebApp:
@@ -200,23 +231,33 @@ class WebApp:
         self._authenticate = make_authenticate(config, drakkar_app)
         self._rate_limit = make_rate_limit(config, drakkar_app)
 
-        # Validate at construction time that the handler exposes concrete
-        # HTTP request/response models. We do this BEFORE building the
-        # FastAPI app so a misconfigured deployment fails at startup with
-        # a clear message, not at first-request time with a confusing
-        # 500 about a missing override.
-        self._validate_handler_types()
+        # Job mode: with ``split.http.enabled`` every POST stores a split
+        # job and a GET reads its status, through the gateway on the main
+        # loop. Only a real ``True`` turns it on.
+        self._jobs: HttpJobGateway | None = _job_gateway(drakkar_app)
+        self._runner: WebappRunner | None = None
+        if self._jobs is not None:
+            # The body of a job is a source message: it is checked with the
+            # handler's input model, and taken as it is when there is none.
+            self._http_request_type: Any = drakkar_app._handler.input_model
+        else:
+            # Validate at construction time that the handler exposes concrete
+            # HTTP request/response models. We do this BEFORE building the
+            # FastAPI app so a misconfigured deployment fails at startup with
+            # a clear message, not at first-request time with a confusing
+            # 500 about a missing override.
+            self._validate_handler_types()
 
-        # Webapp runner. One instance per ``WebApp`` so the
-        # synthetic ``SourceMessage.offset`` counter is monotone for the
-        # process lifetime. The runner runs on the main loop (T1); the
-        # FastAPI route handler dispatches to it via ``dispatch_to_loop``.
-        self._runner = WebappRunner(drakkar_app, config)
-        # Cache the resolved HttpRequestT model on ``self`` so the route
-        # handler can validate the POST body without re-walking the
-        # handler's class attributes per request. ``_validate_handler_types``
-        # already proved this is non-None before the runner was built.
-        self._http_request_type: Any = drakkar_app._handler.http_request_model
+            # Webapp runner. One instance per ``WebApp`` so the
+            # synthetic ``SourceMessage.offset`` counter is monotone for the
+            # process lifetime. The runner runs on the main loop (T1); the
+            # FastAPI route handler dispatches to it via ``dispatch_to_loop``.
+            self._runner = WebappRunner(drakkar_app, config)
+            # Cache the resolved HttpRequestT model on ``self`` so the route
+            # handler can validate the POST body without re-walking the
+            # handler's class attributes per request. ``_validate_handler_types``
+            # already proved this is non-None before the runner was built.
+            self._http_request_type = drakkar_app._handler.http_request_model
 
         # T2-side concurrency cap. The semaphore must be allocated on
         # the loop that awaits it (the webapp loop, T2). Constructing
@@ -404,7 +445,9 @@ class WebApp:
             Cardinality stays bounded by the configured client list + 1.
         status:
             One of the closed set: ``ok | timeout | error | rate_limited |
-            auth_failed | shutdown | not_ready | capacity``.
+            auth_failed | shutdown | not_ready | capacity``, and in job mode
+            also ``accepted | duplicate | conflict | unavailable |
+            status_read | not_found``.
         """
         webapp_requests.labels(client=client, status=status).inc()
         # ``request.state`` may be missing the start-time on early-error
@@ -469,6 +512,301 @@ class WebApp:
         defense for direct ``WebApp(...)`` embedders who bypass the app.
         """
         validate_webapp_handler(self._app._handler)
+
+    def _gate_answer(self, request: Request, metric_client: str, gate_request_id: str) -> JSONResponse | None:
+        """The 503 answer of the shutdown or the not-ready gate, or None when both pass.
+
+        In job mode the worker is also not ready until the status of the
+        HTTP split jobs is restored.
+        """
+        if self.shutdown_event.is_set():
+            self._observe_outcome(request=request, client=metric_client, status='shutdown')
+            return JSONResponse(
+                status_code=503,
+                content={
+                    'status': 'shutdown',
+                    'error': 'webapp is shutting down; request rejected',
+                    'request_id': gate_request_id,
+                    'hint': KAFKA_FALLBACK_HINT,
+                },
+            )
+        if not self._app.is_ready or (self._jobs is not None and not self._jobs.is_ready):
+            self._observe_outcome(request=request, client=metric_client, status='not_ready')
+            return JSONResponse(
+                status_code=503,
+                content={
+                    'status': 'not_ready',
+                    'error': 'webapp is starting; main pipeline is not yet ready',
+                    'request_id': gate_request_id,
+                    'hint': KAFKA_FALLBACK_HINT,
+                },
+            )
+        return None
+
+    async def _read_body(self, request: Request, metric_client: str, gate_request_id: str) -> bytes | JSONResponse:
+        """The request body, or the 408 or 413 answer when it comes too slowly or is too large."""
+        # Cap the body read so an authenticated client cannot exhaust
+        # worker memory with one huge POST, answering 413. Counting
+        # streamed bytes (not trusting Content-Length) means a lying
+        # or absent header cannot bypass the cap; exactly
+        # ``max_body`` is still accepted.
+        max_body = self._config.max_body
+        chunks: list[bytes] = []
+        received = 0
+        too_large = False
+        # The size cap alone is not a slow-loris defence — a client can
+        # stay under it indefinitely by sending one byte at a time — so
+        # the read is also bounded in TIME (uvicorn has no such
+        # timeout of its own).
+        read_budget = self._config.request_timeout + BODY_READ_TIMEOUT_MARGIN_SECONDS
+        try:
+            async with asyncio.timeout(read_budget):
+                async for chunk in request.stream():
+                    received += len(chunk)
+                    if received > max_body:
+                        too_large = True
+                        break
+                    chunks.append(chunk)
+        except TimeoutError:
+            logger.warning(
+                'webapp_request_body_read_timeout',
+                category='webapp',
+                client=metric_client,
+                received_bytes=received,
+                timeout_seconds=read_budget,
+                hint='client stopped sending mid-body; front the webapp with a proxy that enforces read timeouts',
+            )
+            self._observe_outcome(request=request, client=metric_client, status='error')
+            return JSONResponse(
+                status_code=408,
+                content={
+                    'error': 'request_timeout',
+                    'request_id': gate_request_id,
+                    'hint': 'the request body was not delivered in time',
+                },
+            )
+        if too_large:
+            self._observe_outcome(request=request, client=metric_client, status='error')
+            # 413 (not the parse gate's 422): the payload was never
+            # even read, so "invalid" would mislead clients into
+            # retrying the same oversized body.
+            return JSONResponse(
+                status_code=413,
+                content={
+                    'error': 'request_too_large',
+                    'request_id': gate_request_id,
+                    'details': f'request body exceeds sources.http.max_body ({max_body} bytes)',
+                },
+            )
+        return b''.join(chunks)
+
+    def _parse_body(
+        self, request: Request, body: bytes, metric_client: str, gate_request_id: str
+    ) -> tuple[Any, JSONResponse | None]:
+        """The body parsed with the request model, or the 422 answer; with no model the payload is None."""
+        if self._http_request_type is None:
+            return None, None
+        # Parse the body manually so we control the 422 envelope
+        # shape. Declaring the parameter as the typed model would
+        # let FastAPI auto-422 with its own envelope; we want a flat
+        # body matching the documented webapp shape.
+        try:
+            return self._http_request_type.model_validate_json(body), None
+        except ValidationError as exc:
+            # ``include_input=False`` keeps the offending raw bytes
+            # OUT of the response body (the default ``input`` field
+            # carries the raw value, which can be ``bytes`` and isn't
+            # JSON-encodable; even when encodable, echoing it back
+            # leaks request payload to anyone who could already see
+            # the response). ``include_url=False`` strips the
+            # documentation URLs Pydantic adds — operators read
+            # docs, the API caller does not need them.
+            self._observe_outcome(request=request, client=metric_client, status='error')
+            return None, JSONResponse(
+                status_code=422,
+                content={
+                    'error': 'invalid_request',
+                    'request_id': gate_request_id,
+                    'details': exc.errors(include_input=False, include_url=False),
+                },
+            )
+        except ValueError as exc:
+            # ``model_validate_json`` surfaces malformed JSON as a
+            # plain ``ValueError`` — same flat envelope, different
+            # ``details`` shape (Pydantic gives us a single string).
+            self._observe_outcome(request=request, client=metric_client, status='error')
+            return None, JSONResponse(
+                status_code=422,
+                content={
+                    'error': 'invalid_request',
+                    'request_id': gate_request_id,
+                    'details': str(exc),
+                },
+            )
+
+    def _resolve_request_id(self, body: bytes, headers: dict[str, str], parsed: Any) -> str:
+        """The request id of the request, from the handler hook ``request_id``.
+
+        By default a generated id, so a handler can promote an upstream
+        tracing header (e.g. ``X-Request-ID``) into the id. The resolver
+        checks the answer and falls back to a generated id when the hook
+        raises or answers something that is not a valid id.
+        """
+        return self._app._request_ids.resolve(
+            SourceMessage(
+                topic=HTTP_SOURCE_TOPIC,
+                partition=-1,
+                offset=0,
+                value=body,
+                timestamp=int(time.time() * 1000),
+                headers=[(name, value.encode('utf-8')) for name, value in headers.items()],
+                payload=parsed,
+            )
+        )
+
+    async def _take_slot(self, request: Request, request_id: str, client_name: str) -> JSONResponse | None:
+        """Take one ``max_concurrent`` slot, or answer 503 ``capacity`` when none is free.
+
+        ``acquire`` with a tiny non-zero timeout probes the semaphore: a free
+        slot is taken at once, otherwise the request is shed rather than
+        queued — the documented "fail fast, tell the client to use Kafka"
+        contract. The caller releases a taken slot.
+        """
+        try:
+            await asyncio.wait_for(
+                self._semaphore.acquire(),
+                timeout=_SEMAPHORE_ACQUIRE_PROBE_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                'webapp_request_over_capacity',
+                category='webapp',
+                request_id=request_id,
+                client=client_name,
+                max_concurrent=self._config.max_concurrent,
+            )
+            self._observe_outcome(request=request, client=client_name, status='capacity')
+            return JSONResponse(
+                status_code=503,
+                content={
+                    'status': 'capacity',
+                    'error': 'webapp is over capacity; request rejected',
+                    'request_id': request_id,
+                    'max_concurrent': self._config.max_concurrent,
+                    'hint': KAFKA_FALLBACK_HINT,
+                },
+            )
+        return None
+
+    async def _dispatch_job_call(
+        self, call: Coroutine[Any, Any, HttpAnswer], *, budget: float, request_id: str, client: str, route: str
+    ) -> HttpAnswer | None:
+        """Run a gateway call on the main loop within ``budget`` seconds; None when it did not answer.
+
+        Every failure of the dispatch (a time-out, a refusal of the gateway,
+        a closed main loop) is logged and answered by the caller as a 503;
+        nothing of it reaches the client as a 500.
+        """
+        try:
+            return await asyncio.wait_for(dispatch_to_loop(call, target_loop=self._app.main_loop), timeout=budget)
+        except Exception as exc:
+            # A call the main loop never started is closed here, so it does
+            # not warn as never awaited; a started one ends by its cancel.
+            if not isinstance(exc, TimeoutError) and inspect.getcoroutinestate(call) == inspect.CORO_CREATED:
+                call.close()
+            logger.warning(
+                'split_http_dispatch_failed',
+                category='split',
+                route=route,
+                request_id=request_id,
+                client=client,
+                timeout_seconds=budget,
+                error=f'{type(exc).__name__}: {exc}' if str(exc) else type(exc).__name__,
+            )
+            return None
+
+    def _job_answer(self, request: Request, client: str, answer: HttpAnswer) -> Response:
+        """The HTTP answer of a gateway answer, with its request metric."""
+        self._observe_outcome(request=request, client=client, status=answer.metric_status)
+        return Response(content=answer.body, status_code=answer.status_code, media_type='application/json')
+
+    def _add_job_routes(self, app: FastAPI, authenticate_dep: Any, enforce_rate_limit: Any) -> None:
+        """Register the routes of job mode: POST stores a split job, GET reads its status."""
+        jobs = self._jobs
+        assert jobs is not None
+        path = self._config.path
+
+        @app.post(path)
+        async def submit_job(
+            request: Request,
+            client: Any = Depends(authenticate_dep),  # noqa: B008
+            _: Any = Depends(enforce_rate_limit),  # noqa: B008
+        ) -> Any:
+            gate_request_id = make_request_id('req')
+            metric_client = client.name if client is not None else 'unauthenticated'
+            gate = self._gate_answer(request, metric_client, gate_request_id)
+            if gate is not None:
+                return gate
+            body = await self._read_body(request, metric_client, gate_request_id)
+            if isinstance(body, JSONResponse):
+                return body
+            parsed, invalid = self._parse_body(request, body, metric_client, gate_request_id)
+            if invalid is not None:
+                return invalid
+            request_id = self._resolve_request_id(body, dict(request.headers), parsed)
+            over_capacity = await self._take_slot(request, request_id, client.name)
+            if over_capacity is not None:
+                return over_capacity
+            try:
+                answer = await self._dispatch_job_call(
+                    jobs.accept(
+                        request_id=request_id,
+                        client=client.name,
+                        body=body,
+                        deliver_sinks=self._config.deliver_to_sinks,
+                        timeout=self._config.request_timeout,
+                    ),
+                    budget=self._config.request_timeout + ACCEPTED_WRITE_SECONDS + DISPATCH_MARGIN_SECONDS,
+                    request_id=request_id,
+                    client=client.name,
+                    route='submit',
+                )
+            finally:
+                self._semaphore.release()
+            if answer is None:
+                answer = _unavailable_answer(request_id, STORE_FAILED_TEXT)
+            return self._job_answer(request, client.name, answer)
+
+        @app.get(path)
+        async def read_job_status(
+            request: Request,
+            client: Any = Depends(authenticate_dep),  # noqa: B008
+        ) -> Any:
+            # No rate limit and no ``max_concurrent`` slot: a poll is one
+            # read of the status map, and an rpm limit sized for job
+            # requests would make polling impossible.
+            gate_request_id = make_request_id('req')
+            metric_client = client.name if client is not None else 'unauthenticated'
+            gate = self._gate_answer(request, metric_client, gate_request_id)
+            if gate is not None:
+                return gate
+            request_id = request.query_params.get('request_id', '')
+            if not request_id:
+                self._observe_outcome(request=request, client=metric_client, status='error')
+                return JSONResponse(
+                    status_code=422,
+                    content={'error': 'invalid_request', 'details': 'request_id is required'},
+                )
+            answer = await self._dispatch_job_call(
+                jobs.read(request_id=request_id, client=client.name),
+                budget=max(STATUS_WAIT_SECONDS + DISPATCH_MARGIN_SECONDS, self._config.request_timeout),
+                request_id=request_id,
+                client=client.name,
+                route='status',
+            )
+            if answer is None:
+                answer = _unavailable_answer(request_id, STATUS_READ_FAILED_TEXT)
+            return self._job_answer(request, client.name, answer)
 
     def _build_app(self) -> FastAPI:
         """Construct the FastAPI app and register the single POST route.
@@ -585,6 +923,10 @@ class WebApp:
                 raise WebappError(status_code=401, body_dict={'error': 'unauthorized'})
             await rate_limit_dep(matched)
 
+        if self._jobs is not None:
+            self._add_job_routes(app, authenticate_dep, _enforce_rate_limit)
+            return app
+
         # The route signature uses ``Depends``'s default-value form
         # (rather than ``Annotated[..., Depends(...)]``) because the
         # closure-bound dep callables are local variables at this scope —
@@ -633,139 +975,17 @@ class WebApp:
             # the fixed ``unauthenticated`` sentinel if (somehow) the auth
             # dep didn't populate it — keeps cardinality bounded.
             metric_client = client.name if client is not None else 'unauthenticated'
-            if self.shutdown_event.is_set():
-                self._observe_outcome(request=request, client=metric_client, status='shutdown')
-                return JSONResponse(
-                    status_code=503,
-                    content={
-                        'status': 'shutdown',
-                        'error': 'webapp is shutting down; request rejected',
-                        'request_id': gate_request_id,
-                        'hint': KAFKA_FALLBACK_HINT,
-                    },
-                )
-            if not self._app.is_ready:
-                self._observe_outcome(request=request, client=metric_client, status='not_ready')
-                return JSONResponse(
-                    status_code=503,
-                    content={
-                        'status': 'not_ready',
-                        'error': 'webapp is starting; main pipeline is not yet ready',
-                        'request_id': gate_request_id,
-                        'hint': KAFKA_FALLBACK_HINT,
-                    },
-                )
-
-            # Cap the body read so an authenticated client cannot exhaust
-            # worker memory with one huge POST, answering 413. Counting
-            # streamed bytes (not trusting Content-Length) means a lying
-            # or absent header cannot bypass the cap; exactly
-            # ``max_body`` is still accepted.
-            max_body = self._config.max_body
-            chunks: list[bytes] = []
-            received = 0
-            too_large = False
-            # The size cap alone is not a slow-loris defence — a client can
-            # stay under it indefinitely by sending one byte at a time — so
-            # the read is also bounded in TIME (uvicorn has no such
-            # timeout of its own).
-            read_budget = self._config.request_timeout + BODY_READ_TIMEOUT_MARGIN_SECONDS
-            try:
-                async with asyncio.timeout(read_budget):
-                    async for chunk in request.stream():
-                        received += len(chunk)
-                        if received > max_body:
-                            too_large = True
-                            break
-                        chunks.append(chunk)
-            except TimeoutError:
-                logger.warning(
-                    'webapp_request_body_read_timeout',
-                    category='webapp',
-                    client=metric_client,
-                    received_bytes=received,
-                    timeout_seconds=read_budget,
-                    hint='client stopped sending mid-body; front the webapp with a proxy that enforces read timeouts',
-                )
-                self._observe_outcome(request=request, client=metric_client, status='error')
-                return JSONResponse(
-                    status_code=408,
-                    content={
-                        'error': 'request_timeout',
-                        'request_id': gate_request_id,
-                        'hint': 'the request body was not delivered in time',
-                    },
-                )
-            if too_large:
-                self._observe_outcome(request=request, client=metric_client, status='error')
-                # 413 (not the parse gate's 422): the payload was never
-                # even read, so "invalid" would mislead clients into
-                # retrying the same oversized body.
-                return JSONResponse(
-                    status_code=413,
-                    content={
-                        'error': 'request_too_large',
-                        'request_id': gate_request_id,
-                        'details': f'request body exceeds sources.http.max_body ({max_body} bytes)',
-                    },
-                )
-
-            # Parse the body manually so we control the 422 envelope
-            # shape. Declaring the parameter as the typed model would
-            # let FastAPI auto-422 with its own envelope; we want a flat
-            # body matching the documented webapp shape.
-            body_bytes = b''.join(chunks)
-            try:
-                parsed = self._http_request_type.model_validate_json(body_bytes)
-            except ValidationError as exc:
-                # ``include_input=False`` keeps the offending raw bytes
-                # OUT of the response body (the default ``input`` field
-                # carries the raw value, which can be ``bytes`` and isn't
-                # JSON-encodable; even when encodable, echoing it back
-                # leaks request payload to anyone who could already see
-                # the response). ``include_url=False`` strips the
-                # documentation URLs Pydantic adds — operators read
-                # docs, the API caller does not need them.
-                self._observe_outcome(request=request, client=metric_client, status='error')
-                return JSONResponse(
-                    status_code=422,
-                    content={
-                        'error': 'invalid_request',
-                        'request_id': gate_request_id,
-                        'details': exc.errors(include_input=False, include_url=False),
-                    },
-                )
-            except ValueError as exc:
-                # ``model_validate_json`` surfaces malformed JSON as a
-                # plain ``ValueError`` — same flat envelope, different
-                # ``details`` shape (Pydantic gives us a single string).
-                self._observe_outcome(request=request, client=metric_client, status='error')
-                return JSONResponse(
-                    status_code=422,
-                    content={
-                        'error': 'invalid_request',
-                        'request_id': gate_request_id,
-                        'details': str(exc),
-                    },
-                )
-
-            # The request id comes from the handler hook ``request_id`` (by
-            # default a generated id), so a handler can promote an upstream
-            # tracing header (e.g. ``X-Request-ID``) into the id. The resolver
-            # checks the answer and falls back to a generated id when the hook
-            # raises or answers something that is not a valid id.
+            gate = self._gate_answer(request, metric_client, gate_request_id)
+            if gate is not None:
+                return gate
+            body_bytes = await self._read_body(request, metric_client, gate_request_id)
+            if isinstance(body_bytes, JSONResponse):
+                return body_bytes
+            parsed, invalid = self._parse_body(request, body_bytes, metric_client, gate_request_id)
+            if invalid is not None:
+                return invalid
             headers = dict(request.headers)
-            request_id = self._app._request_ids.resolve(
-                SourceMessage(
-                    topic=HTTP_SOURCE_TOPIC,
-                    partition=-1,
-                    offset=0,
-                    value=body_bytes,
-                    timestamp=int(time.time() * 1000),
-                    headers=[(name, value.encode('utf-8')) for name, value in headers.items()],
-                    payload=parsed,
-                )
-            )
+            request_id = self._resolve_request_id(body_bytes, headers, parsed)
 
             ctx = WebRequestContext(
                 request_id=request_id,
@@ -776,37 +996,11 @@ class WebApp:
                 raw_body=body_bytes,
             )
 
-            # T2-side concurrency cap. ``acquire`` with a tiny non-zero
-            # timeout (``_SEMAPHORE_ACQUIRE_PROBE_SECONDS``) probes the
-            # semaphore: if a slot is free we get it instantly, otherwise
-            # ``TimeoutError`` falls through and we shed the request as
-            # 503 ``capacity`` rather than queue. This matches the
-            # documented "fail fast → tell the client to use Kafka"
-            # contract for over-cap requests.
-            try:
-                await asyncio.wait_for(
-                    self._semaphore.acquire(),
-                    timeout=_SEMAPHORE_ACQUIRE_PROBE_SECONDS,
-                )
-            except TimeoutError:
-                logger.warning(
-                    'webapp_request_over_capacity',
-                    category='webapp',
-                    request_id=ctx.request_id,
-                    client=ctx.client_name,
-                    max_concurrent=self._config.max_concurrent,
-                )
-                self._observe_outcome(request=request, client=ctx.client_name, status='capacity')
-                return JSONResponse(
-                    status_code=503,
-                    content={
-                        'status': 'capacity',
-                        'error': 'webapp is over capacity; request rejected',
-                        'request_id': ctx.request_id,
-                        'max_concurrent': self._config.max_concurrent,
-                        'hint': KAFKA_FALLBACK_HINT,
-                    },
-                )
+            over_capacity = await self._take_slot(request, ctx.request_id, ctx.client_name)
+            if over_capacity is not None:
+                return over_capacity
+            runner = self._runner
+            assert runner is not None
 
             # Dispatch the runner coroutine to the main pipeline loop.
             # The loop captured by ``DrakkarApp`` is where the executor
@@ -824,7 +1018,7 @@ class WebApp:
                 try:
                     report = await asyncio.wait_for(
                         dispatch_to_loop(
-                            self._runner.run(ctx),
+                            runner.run(ctx),
                             target_loop=self._app.main_loop,
                         ),
                         timeout=self._config.request_timeout,

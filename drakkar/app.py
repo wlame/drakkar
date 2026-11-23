@@ -253,7 +253,12 @@ class DrakkarApp:
         # at construction rather than at the first message or request.
         from drakkar.sources.validation import validate_handler_for_sources
 
-        validate_handler_for_sources(handler, self._config.sources, split_enabled=self._config.split.enabled)
+        validate_handler_for_sources(
+            handler,
+            self._config.sources,
+            split_enabled=self._config.split.enabled,
+            split_http_enabled=self._split_http_enabled,
+        )
         # Same philosophy: an ``async def task_run_seconds`` would cost an
         # await per task on the event loop, so it is refused here.
         check_task_run_seconds_hook(handler)
