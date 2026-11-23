@@ -115,6 +115,14 @@ DUPLICATE_CHECK_WAIT_SECONDS = 5.0
 DUPLICATE_ERROR = 'another request with this request_id was stored first'
 
 
+@dataclass(frozen=True)
+class _BegunJob:
+    """An HTTP job this owner began: the offset of its message and the client that stored it."""
+
+    offset: int
+    client: str
+
+
 class OwnerHost(Protocol):
     """What the owner needs of the partition processor it belongs to.
 
@@ -325,9 +333,10 @@ class SplitOwner:
         self._runs: set[SplitRun] = set()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._awaited: set[asyncio.Task[Any]] = set()
-        # The request ids of the HTTP jobs begun since this owner got the partition, with the first offset of
-        # each: a second message of an id in the same batch is a duplicate before any status of the first exists.
-        self._begun_ids: dict[str, int] = {}
+        # The request ids of the HTTP jobs begun since this owner got the partition, with the first offset and
+        # the client of each: a second message of an id in the same batch is a duplicate before any status of the
+        # first exists, and the ``accepted`` status of the first is written from them before the duplicate's end.
+        self._begun_ids: dict[str, _BegunJob] = {}
         self._timer: TimerFn = _call_later
 
     # --- what the processor calls ---
@@ -492,7 +501,8 @@ class SplitOwner:
         )
         # The duplicate is never noted among the begun ids, so its end cannot forget the id of the first job.
         self._host.hold_job_offset(offset)
-        self._host.start_job_end(message, functools.partial(self.end_duplicate, message))
+        first_accepted = self._missing_accepted_of(request_id, first)
+        self._host.start_job_end(message, functools.partial(self.end_duplicate, message, first_accepted=first_accepted))
         return BeginOutcome.JOB
 
     async def _wait_for_status_follower(self, side: HttpOwnerSide) -> None:
@@ -521,9 +531,37 @@ class SplitOwner:
         if known is not None and known.partition == self._partition and known.offset < offset:
             found.append(known.offset)
         begun = self._begun_ids.get(request_id)
-        if begun is not None and begun < offset:
-            found.append(begun)
+        if begun is not None and begun.offset < offset:
+            found.append(begun.offset)
         return min(found, default=None)
+
+    def _missing_accepted_of(self, request_id: str, first: int | None) -> StatusRecord | None:
+        """The ``accepted`` record of the first job of ``request_id`` when the status map does not hold that job.
+
+        The first job is then known only from the begun ids: the ``accepted``
+        record of its ``POST`` was never written (the wait for the store
+        timed out) or not read yet. Without it in the topic, the ``failed``
+        record of the duplicate would be the only record of the id, and a
+        client would read a final state while the first job runs. None when
+        the map holds the first job, or the first job is not one this owner
+        began.
+        """
+        side = self._settings.status
+        assert side is not None
+        begun = self._begun_ids.get(request_id)
+        if first is None or begun is None or begun.offset != first:
+            return None
+        known = side.status_map.get(request_id)
+        if known is not None and (known.partition, known.offset) == (self._partition, first):
+            return None
+        return StatusRecord(
+            request_id=request_id,
+            state='accepted',
+            partition=self._partition,
+            offset=first,
+            client=begun.client,
+            updated_at=side.clock(),
+        )
 
     def _ended_as_duplicate(self, request_id: str, offset: int) -> bool:
         """Whether the map holds the end of the job at ``offset`` as a dropped duplicate."""
@@ -562,11 +600,23 @@ class SplitOwner:
             message, outcome='parse', error=cut_error(message.parse_error or UNKNOWN_PARSE_ERROR)
         )
 
-    async def end_duplicate(self, message: SourceMessage) -> bool | None:
+    async def end_duplicate(self, message: SourceMessage, *, first_accepted: StatusRecord | None = None) -> bool | None:
         """Write the ``failed`` status, outcome ``duplicate``, of an HTTP job message that was dropped.
 
-        The answers are those of :meth:`end_unparsed`.
+        ``first_accepted`` is the ``accepted`` record of the first job of the
+        id when the status map did not hold that job. It is written first,
+        with the retries of an end state, and the ``failed`` record follows
+        only after its acknowledgement: by the lower-offset rule every reader
+        then shows the first job. The answers are those of
+        :meth:`end_unparsed`, for either record.
         """
+        if first_accepted is not None:
+            written = await self._ender.write_status(first_accepted)
+            if written == 'stopped':
+                self._host.hold_job_offset(message.offset)
+                return None
+            if written == 'final':
+                return False
         return await self._end_unsplit(message, outcome='duplicate', error=DUPLICATE_ERROR)
 
     async def _end_unsplit(self, message: SourceMessage, *, outcome: str, error: str) -> bool | None:
@@ -1021,7 +1071,7 @@ class SplitOwner:
         """
         http_job = message.http_job
         if http_job is not None and self._ender.is_http_job(message):
-            self._begun_ids.setdefault(http_job.request_id, message.offset)
+            self._begun_ids.setdefault(http_job.request_id, _BegunJob(offset=message.offset, client=http_job.client))
 
     def _forget_begun(self, message: SourceMessage) -> None:
         """Forget the request id of an HTTP job whose offset is settled, so the id may name a new job later.
@@ -1030,7 +1080,8 @@ class SplitOwner:
         the id from there on. Only the entry of this very offset goes.
         """
         http_job = message.http_job
-        if http_job is not None and self._begun_ids.get(http_job.request_id) == message.offset:
+        begun = None if http_job is None else self._begun_ids.get(http_job.request_id)
+        if http_job is not None and begun is not None and begun.offset == message.offset:
             del self._begun_ids[http_job.request_id]
 
     def _ref_of(self, job: JobState) -> JobRef:

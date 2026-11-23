@@ -1485,7 +1485,15 @@ moment, or a retry after a `503`. The duplicate rule:
   after the broker acknowledged that record. So the `accepted` record of the
   duplicate is never left alone in the status topic, and no later restore
   takes it for a job that never ends. Status readers still see the earlier
-  job of the id, because the lower offset wins.
+  job of the id, because the lower offset wins. When the status map does
+  not hold the earlier job (the owner knows it only because it began it,
+  for example after a `POST` whose time limit ended before its `accepted`
+  record was written), the owner first writes the `accepted` record of the
+  earlier job, with the client of that job, and waits for its
+  acknowledgement. Only then does it write the `failed` record of the
+  duplicate. So no client reads the final state of the duplicate while the
+  earlier job runs. A stop during either write leaves the offset of the
+  duplicate pending.
 - The same message given again (the same offset) is the same job, not a
   duplicate. The one exception is a duplicate that is given again after
   its `failed` record was written: it is ended as a duplicate again. A job
@@ -1636,8 +1644,13 @@ and cleanup policy.
 ### Known limits {#http-jobs-known-limits}
 
 1. A `POST` whose time limit ends after the message was stored answers
-   `503 unavailable`, although the job runs. A second `POST` with the same
-   id then answers the existing status.
+   `503 unavailable`, although the job runs, and no `accepted` record is
+   written for that job. A `GET` of the id answers `404` until the first
+   `running` record or the end state of the job is read; `running` records
+   are best effort. A second `POST` with the same id answers the existing
+   status when the worker has one; else it is stored again, and the owner
+   drops it as a duplicate after it wrote the `accepted` record of the
+   first job (see [The request id and duplicates](#http-jobs-duplicates)).
 2. Before it begins an HTTP job message, the owner waits up to 5 seconds
    until its status follower has read what the status topic holds at that
    moment. This covers a follower that lags behind and a new owner after a

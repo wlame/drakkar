@@ -58,10 +58,12 @@ def fast_commits(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(partition_module, 'COMMIT_BATCH_MAX_DELAY_SECONDS', 0.01)
 
 
-def http_message(offset: int = 500, *, value: bytes = b'{"n": 5}', deliver_sinks: bool = True) -> SourceMessage:
-    """A message of the source topic that an HTTP split job request stored."""
+def http_message(
+    offset: int = 500, *, value: bytes = b'{"n": 5}', deliver_sinks: bool = True, client: str = CLIENT
+) -> SourceMessage:
+    """A message of the source topic that an HTTP split job request of ``client`` stored."""
     message = source_message(offset, value=value)
-    record = source_message_record(request_id=HTTP_ID, client=CLIENT, deliver_sinks=deliver_sinks, body=b'')
+    record = source_message_record(request_id=HTTP_ID, client=client, deliver_sinks=deliver_sinks, body=b'')
     message.headers = [*message.headers, *record.headers]
     return message
 
@@ -70,6 +72,12 @@ def is_end_status(item: Any) -> bool:
     """Whether a produced status record carries an end state."""
     parsed = parse_status_record(item.key, item.headers, item.value)
     return parsed is not None and parsed.is_ended
+
+
+def is_accepted_status(item: Any) -> bool:
+    """Whether a produced status record carries the state ``accepted``."""
+    parsed = parse_status_record(item.key, item.headers, item.value)
+    return parsed is not None and parsed.state == 'accepted'
 
 
 class RestoredFollower:
@@ -99,17 +107,26 @@ class HttpWorker:
     records; a ``running`` record is always delivered.
     While ``hold_status`` is set, the delivery of every end-state record waits
     in ``held_status`` (``('status_held', None)`` in ``events``) until
-    :meth:`release_status`.
+    :meth:`release_status`. ``hold_accepted`` holds every ``accepted`` record
+    the same way.
     """
 
     def __init__(
-        self, world: World, handler: Any, *, max_response: int = 65536, hold_status: bool = False, **options: Any
+        self,
+        world: World,
+        handler: Any,
+        *,
+        max_response: int = 65536,
+        hold_status: bool = False,
+        hold_accepted: bool = False,
+        **options: Any,
     ) -> None:
         self.world = world
         self.worker = OwnerWorker(world, handler, http_jobs=True, **options)
         self.events: list[tuple[str, Any]] = []
         self.status_errors: deque[KafkaError] = deque()
         self.hold_status = hold_status
+        self.hold_accepted = hold_accepted
         self.held_status: list[Any] = []
         self.status_map = StatusMap(86400)
         writer = StatusWriter(
@@ -136,7 +153,8 @@ class HttpWorker:
 
         def recorded(item: Any) -> None:
             is_end = item.topic == STATUS_TOPIC and is_end_status(item)
-            if is_end and self.hold_status:
+            is_accepted = item.topic == STATUS_TOPIC and is_accepted_status(item)
+            if (is_end and self.hold_status) or (is_accepted and self.hold_accepted):
                 self.events.append(('status_held', None))
                 self.held_status.append(item)
                 return
@@ -158,6 +176,7 @@ class HttpWorker:
     def release_status(self) -> None:
         """Deliver the held status records, in order, and stop holding new ones."""
         self.hold_status = False
+        self.hold_accepted = False
         held, self.held_status = self.held_status, []
         for item in held:
             self._deliver_recorded(item)

@@ -19,7 +19,12 @@ from structlog.testing import capture_logs
 from drakkar import partition as partition_module
 from drakkar.split.http_jobs import running_record
 from drakkar.split.http_status import PartCounts, StatusMap, StatusRecord
-from drakkar.split.owner import DUPLICATE_CHECK_WAIT_SECONDS, DUPLICATE_ERROR, RUNNING_MIN_INTERVAL_SECONDS
+from drakkar.split.owner import (
+    DUPLICATE_CHECK_WAIT_SECONDS,
+    DUPLICATE_ERROR,
+    RUNNING_MIN_INTERVAL_SECONDS,
+    _BegunJob,
+)
 from tests.split_owner_helpers import PARTITION, SplittingHandler, World, items, source_message, summary, wait_until
 from tests.test_split_http_end import (
     CLIENT,
@@ -198,7 +203,7 @@ async def test_same_window_duplicate_ends_without_split():
     owner = http.worker.owner
     assert owner is not None
     # The end of the duplicate does not forget the id of the first job, which is still running.
-    assert owner._begun_ids == {HTTP_ID: 500}
+    assert owner._begun_ids == {HTTP_ID: _BegunJob(offset=500, client=CLIENT)}
 
     await wait_until(lambda: world.kinds() == ['open', 'split-done'])
     world.report_all()
@@ -206,6 +211,84 @@ async def test_same_window_duplicate_ends_without_split():
     assert {record.job for record in http.statuses(running=True) if record.outcome != 'duplicate'} == {
         f'{PARTITION}:500'
     }
+    await http.worker.stop()
+
+
+OTHER_CLIENT = 'retrying-client'
+
+
+async def test_a_duplicate_of_a_job_known_only_as_begun_writes_the_accepted_status_of_that_job_first():
+    world = World()
+    handler = SplittingHandler({500: items(2)}, answer=summary())
+    http = HttpWorker(world, handler)
+    # The status map holds nothing of the id: the first job is known only to the owner, which began it.
+    await http.start(http_message(500), http_message(501, client=OTHER_CLIENT))
+    await wait_until(lambda: ('complete', 501) in http.events)
+
+    first, dropped = http.statuses()
+    assert (first.state, first.job, first.client) == ('accepted', f'{PARTITION}:500', CLIENT)
+    assert (dropped.state, dropped.outcome, dropped.job, dropped.client) == (
+        'failed',
+        'duplicate',
+        f'{PARTITION}:501',
+        OTHER_CLIENT,
+    )
+    assert http.index(('status', 'accepted')) < http.index(('status', 'failed')) < http.index(('complete', 501))
+    # A reader that builds its map from these records answers the first job, also when every best-effort
+    # ``running`` record of it is lost.
+    reader = StatusMap(86400)
+    for record in http.statuses():
+        reader.put(record, now=world.seconds())
+    shown = reader.get(HTTP_ID)
+    assert shown is not None and (shown.job, shown.state, shown.client) == (f'{PARTITION}:500', 'accepted', CLIENT)
+    await http.worker.stop()
+
+
+async def test_the_status_of_a_duplicate_waits_for_the_acknowledgement_of_the_accepted_status_of_the_first_job():
+    world = World()
+    http = HttpWorker(world, SplittingHandler({500: items(2)}, answer=summary()), hold_accepted=True)
+    await http.start(http_message(500), http_message(501))
+    await wait_until(lambda: ('status_held', None) in http.events)
+    await asyncio.sleep(0.05)
+    assert ('status', 'failed') not in http.events and ('complete', 501) not in http.events
+
+    http.release_status()
+    await wait_until(lambda: ('complete', 501) in http.events)
+    assert http.index(('status', 'accepted')) < http.index(('status', 'failed'))
+    await http.worker.stop()
+
+
+async def test_a_stop_during_the_accepted_status_of_the_first_job_leaves_the_duplicate_pending():
+    world = World()
+    http = HttpWorker(world, SplittingHandler({500: items(2)}, answer=summary()), hold_accepted=True)
+    await http.start(http_message(500), http_message(501))
+    await wait_until(lambda: ('status_held', None) in http.events)
+
+    http.worker.processor.signal_stop()
+    await asyncio.wait_for(http.worker.processor.drain(), timeout=10)
+
+    assert ('complete', 501) not in http.events and http.worker.commits == []
+    assert duplicate_ends(http) == [] and ('status', 'failed') not in http.events
+    await http.worker.stop()
+
+
+async def test_an_accepted_status_of_the_first_job_that_can_never_be_written_stalls_the_duplicate():
+    world = World()
+    http = await HttpWorker(world, SplittingHandler()).start()
+    owner = http.worker.owner
+    assert owner is not None
+    written: list[str] = []
+
+    async def refused(record: StatusRecord, **options: Any) -> str:
+        written.append(record.state)
+        return 'final'
+
+    owner._ender.write_status = refused  # ty: ignore[invalid-assignment]
+    first = known(500)
+
+    assert await owner.end_duplicate(http_message(501), first_accepted=first) is False
+    # The ``failed`` record of the duplicate is never written alone.
+    assert written == ['accepted']
     await http.worker.stop()
 
 
@@ -286,7 +369,7 @@ async def test_redelivered_message_of_a_begun_id_is_not_a_duplicate():
     http = await HttpWorker(world, SplittingHandler()).start()
     owner = http.worker.owner
     assert owner is not None
-    owner._begun_ids[HTTP_ID] = 500
+    owner._begun_ids[HTTP_ID] = _BegunJob(offset=500, client=CLIENT)
 
     assert owner._first_offset_of(HTTP_ID, 500) is None
     assert owner._first_offset_of(HTTP_ID, 501) == 500
