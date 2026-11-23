@@ -192,6 +192,24 @@
         ["dk-split-attempt-id", "0123456789abcdef"]
       ],
       "partition": 7
+    },
+    {
+      "name": "open_of_an_http_job",
+      "ref": {"group": "workers", "partition": 7, "offset": 500, "attempt": 1, "attempt_id": "0123456789abcdef"},
+      "kind": "open",
+      "input": {"worker": "w1", "instance": "i-1a2b", "request_id": "order-123", "origin": "http"},
+      "key": "7:500",
+      "value": "{\"instance\":\"i-1a2b\",\"origin\":\"http\",\"request_id\":\"order-123\",\"worker\":\"w1\"}",
+      "headers": [
+        ["dk-split-version", "1"],
+        ["dk-split-record", "open"],
+        ["dk-split-group", "workers"],
+        ["dk-split-partition", "7"],
+        ["dk-split-offset", "500"],
+        ["dk-split-attempt", "1"],
+        ["dk-split-attempt-id", "0123456789abcdef"]
+      ],
+      "partition": 7
     }
   ],
   "part_cases": [
@@ -305,6 +323,35 @@
         ["dk-request-id", "order-123"]
       ],
       "partition": 2,
+      "parsed": {
+        "group": "workers",
+        "source_topic": "requests",
+        "source_partition": 7,
+        "source_offset": 500,
+        "attempt": 1,
+        "attempt_id": "0123456789abcdef",
+        "index": 0,
+        "origin": "http",
+        "deliver_sinks": false
+      }
+    }
+  ],
+  "part_parse_cases": [
+    {
+      "name": "http_part_without_the_sinks_header_delivers_no_sinks",
+      "why": "dk-split-sinks is read only for origin http, and anything but on means off",
+      "headers": [
+        ["dk-split-version", "1"],
+        ["dk-split-group", "workers"],
+        ["dk-split-topic", "requests"],
+        ["dk-split-partition", "7"],
+        ["dk-split-offset", "500"],
+        ["dk-split-attempt", "1"],
+        ["dk-split-attempt-id", "0123456789abcdef"],
+        ["dk-split-index", "0"],
+        ["dk-split-origin", "http"],
+        ["dk-request-id", "order-123"]
+      ],
       "parsed": {
         "group": "workers",
         "source_topic": "requests",

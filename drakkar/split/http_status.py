@@ -84,7 +84,13 @@ def _parts_body(parts: PartCounts) -> dict[str, int | None]:
 
 
 def status_record(record: StatusRecord) -> WireRecord:
-    """The status-topic record for ``record``; the partition is left to the key partitioner."""
+    """The status-topic record for ``record``; the partition is left to the key partitioner.
+
+    Raises:
+        ValueError: a ``failed`` record has no outcome of ``FAILED_OUTCOMES``; every reader would refuse it.
+    """
+    if record.state == 'failed' and record.outcome not in FAILED_OUTCOMES:
+        raise ValueError(f'a failed status needs an outcome of {", ".join(FAILED_OUTCOMES)}, got {record.outcome!r}')
     body: dict[str, Any] = {
         'state': record.state,
         'job': record.job,

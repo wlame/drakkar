@@ -375,7 +375,12 @@ class SplitRun:
                 attempt=ref.attempt,
                 crashed_attempts=self._crashed_attempts,
             )
-        body = open_body(worker=settings.worker, instance=settings.instance, request_id=message.request_id)
+        body = open_body(
+            worker=settings.worker,
+            instance=settings.instance,
+            request_id=message.request_id,
+            origin=ORIGIN_KAFKA if message.http_job is None else ORIGIN_HTTP,
+        )
         # From here on the record may reach the log, also when its delivery report never comes.
         self.open_enqueued = True
         await self._write_to_log(log_record(ref, 'open', body))

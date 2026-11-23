@@ -100,6 +100,25 @@ class ClosedRecord:
     job: SplitJob | None = None
 
 
+def dlq_status_error(stage: str, sink: str | None, *, local: bool) -> str:
+    """The ``error`` of the ``failed`` status of an HTTP job that went to the DLQ: where it failed, never why.
+
+    The DLQ record has the full text. The status names only the stage of
+    that record (and the sink of a ``sink`` stage), because the text of a
+    failed task holds its output, which the HTTP source never gives a client.
+    """
+    if local:
+        subject = 'the message'
+    elif stage == 'aggregate':
+        subject = 'the job'
+    else:
+        subject = 'a part'
+    text = f'{subject} failed in stage {stage}'
+    if stage == 'sink' and sink:
+        text += f' at sink {sink}'
+    return text
+
+
 def error_text(error: BaseException) -> str:
     """The text of an error (its type when it has none), cut as ``dk-error`` is."""
     return cut_error(str(error) or type(error).__name__)
@@ -286,8 +305,9 @@ class JobEnder:
 
         may_complete = True
         sent_to_dlq = False
-        # The text the DLQ record of the job carries; the error of a ``failed`` status.
+        # The text the DLQ record of the job carries, and the ``error`` of a ``failed`` status, which holds no task output.
         dlq_error = ''
+        status_error = ''
         if failure_text is not None:
             logger.error(
                 'aggregate_failed',
@@ -299,6 +319,7 @@ class JobEnder:
                 exc_info=raised if raised is not None else False,
             )
             dlq_error = f'{hook} failed: {failure_text}'
+            status_error = dlq_status_error('aggregate', None, local=job.local)
             may_complete = await self.send_to_dlq(message, state, stage='aggregate', error=dlq_error, attempts=None)
             sent_to_dlq = True
         elif isinstance(answer, CollectResult):
@@ -306,19 +327,20 @@ class JobEnder:
             # A failing aggregate sink under ``on_failure: dlq`` put the original message on the DLQ.
             sent_to_dlq = state.dlq_written or state.dlq_lost
             if sent_to_dlq:
-                dlq_error = AGGREGATE_SINK_FAILED
+                status_error = AGGREGATE_SINK_FAILED
         elif answer is JobAction.DLQ:
             dlq_fields = self._dlq_fields(facts, timed_out)
-            dlq_error = dlq_fields['error']
+            status_error = dlq_status_error(dlq_fields['stage'], dlq_fields.get('sink'), local=job.local)
             may_complete = await self.send_to_dlq(message, state, **dlq_fields)
             sent_to_dlq = True
         if not may_complete:
             return False
         # Every end through ``on_job_timeout`` closes as ``timeout``, whatever the hook answered.
         outcome: ClosedOutcome = 'timeout' if timed_out else ('dlq' if sent_to_dlq else 'aggregated')
-        if outcome == 'timeout' and not dlq_error:
-            dlq_error = self._dlq_fields(facts, timed_out)['error']
-        if not await self._write_job_status(message, job, outcome, dlq_error):
+        if outcome == 'timeout':
+            # The text of the framework, also when the hook failed: the text of a hook can carry what a part reported.
+            status_error = self._dlq_fields(facts, timed_out)['error']
+        if not await self._write_job_status(message, job, outcome, status_error):
             return False
         if closing_ref is None:
             split_jobs.labels(outcome='dlq' if sent_to_dlq else 'local').inc()

@@ -301,3 +301,9 @@ def test_map_forgets_an_expired_job_after_two_mark_rounds():
     assert not m.put(make(), now=UPDATED + 1000)
     m.forget_old_marks()
     assert m.put(make(), now=UPDATED + 1000)
+
+
+@pytest.mark.parametrize('outcome', [None, 'lost'])
+def test_status_record_refuses_a_failed_record_without_a_known_outcome(outcome):
+    with pytest.raises(ValueError, match='a failed status needs an outcome'):
+        status_record(failed(outcome=outcome))

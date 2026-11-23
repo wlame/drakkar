@@ -118,3 +118,10 @@ def test_part_headers_are_read_back(case):
     assert part is not None
     # Cases of Kafka jobs omit the switch, which is always true for them.
     assert part.model_dump() == {'deliver_sinks': True, **case['parsed']}
+
+
+@pytest.mark.parametrize('case', FIXTURE['part_parse_cases'], ids=lambda c: c['name'])
+def test_part_headers_written_by_another_release_are_read_as_the_fixture_says(case):
+    part = parse_part_headers(_headers(case['headers']))
+    assert part is not None
+    assert part.model_dump() == case['parsed']

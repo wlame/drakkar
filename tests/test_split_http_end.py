@@ -25,7 +25,7 @@ from drakkar.providers.resilience import RateLimitedLog
 from drakkar.split.http_jobs import HttpOwnerSide, StatusWriter, encode_result, end_record
 from drakkar.split.http_message import read_http_job, source_message_record
 from drakkar.split.http_status import StatusMap, StatusRecord, parse_status_record, status_record
-from drakkar.split.models import JobAction, PartResult, SplitJob
+from drakkar.split.models import JobAction, PartDLQ, PartResult, SplitJob
 from drakkar.split.records import parse_log_record, result_body
 from drakkar.split.tracker import TIMEOUT_CHECK_SECONDS
 from tests.split_helpers import FakeMessage
@@ -368,32 +368,62 @@ async def test_failed_outcomes_map(path):
 @pytest.mark.parametrize(
     ('path', 'error'),
     [
-        ('aggregate_raised', 'aggregate failed: bad sum'),
+        ('aggregate_raised', 'the job failed in stage aggregate'),
         ('aggregate_dlq', 'an aggregate sink failed'),
-        ('job_action_dlq', 'aggregate chose the DLQ: 0 of 2 parts failed'),
+        ('job_action_dlq', 'the job failed in stage aggregate'),
         ('timeout', 'job timed out after 1m1s: 0 of 3 parts'),
         ('failed_split', 'split failed: boom'),
         ('spent_attempts', 'split did not finish in 1 attempts'),
-        ('local_dlq', 'part 0 failed: cannot arrange'),
+        ('local_dlq', 'the message failed in stage aggregate'),
     ],
 )
-async def test_failed_error_is_the_text_of_the_dlq_record_or_the_log_line(path, error):
+async def test_failed_error_names_where_the_job_failed(path, error):
     http, _ = await _run_path(path)
     [status] = [record for record in http.statuses() if record.is_ended]
     assert status.error == error
     await http.worker.stop()
 
 
+@pytest.mark.parametrize(
+    ('dlq', 'error'),
+    [
+        (
+            PartDLQ(stage='execute', task_id='t-1', error='exit code 1: SECRET task stderr'),
+            'a part failed in stage execute',
+        ),
+        (
+            PartDLQ(stage='sink', sink='kafka/results', error='SECRET payload of the task'),
+            'a part failed in stage sink at sink kafka/results',
+        ),
+    ],
+    ids=['execute', 'sink'],
+)
+async def test_failed_dlq_status_holds_no_task_output_and_the_dlq_record_keeps_it(dlq, error):
+    world = World()
+    handler = SplittingHandler({500: items(2)}, answer=JobAction.DLQ)
+    http = await HttpWorker(world, handler).start(http_message())
+    await wait_until(lambda: world.kinds() == ['open', 'split-done'])
+    world.report_all(outcome='failed', dlq=dlq)
+    await wait_until(lambda: http.worker.committed == 501)
+
+    [body] = [body for body in http.status_bodies() if body['state'] == 'failed']
+    assert (body['outcome'], body['error']) == ('dlq', error)
+    assert 'SECRET' not in json.dumps(body)
+    [record] = http.worker.dlq_records()
+    assert record.error == dlq.error
+    await http.worker.stop()
+
+
 async def test_failed_error_is_cut_to_2000_bytes():
     world = World()
-    handler = SplittingHandler({500: items(1)}, answer=ValueError('x' * 5000))
+    handler = ResultHandler({500: items(1)}, answer=summary(), result=ValueError('x' * 5000))
     http = await HttpWorker(world, handler).start(http_message())
     await wait_until(lambda: world.kinds() == ['open', 'split-done'])
     world.report_all()
     await wait_until(lambda: http.worker.committed == 501)
 
     [body] = [body for body in http.status_bodies() if body['state'] == 'failed']
-    assert body['outcome'] == 'dlq'
+    assert body['outcome'] == 'response_failed'
     assert len(body['error'].encode('utf-8')) == 2000
     await http.worker.stop()
 

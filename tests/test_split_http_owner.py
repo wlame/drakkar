@@ -540,3 +540,15 @@ async def test_no_running_after_an_end_state_of_an_attempt_that_another_instance
     states = [record.state for record in http.statuses(running=True)]
     assert 'done' in states and 'running' not in states[states.index('done') :]
     await http.worker.stop()
+
+
+async def test_open_record_of_an_http_job_has_origin_http():
+    world = World()
+    handler = SplittingHandler({500: items(1), 501: items(1)}, answer=summary())
+    http = HttpWorker(world, handler)
+    await http.start(http_message(500), source_message(501))
+    await wait_until(lambda: len([entry for entry in world.entries() if entry.kind == 'open']) == 2)
+
+    origins = {entry.ref.offset: entry.body['origin'] for entry in world.entries() if entry.kind == 'open'}
+    assert origins == {500: 'http', 501: 'kafka'}
+    await http.worker.stop()

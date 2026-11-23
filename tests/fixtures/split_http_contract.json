@@ -1,0 +1,625 @@
+{
+  "_comment": "The wire contract of split jobs that arrive over HTTP. A POST writes one source message: the key and the value are the request id (UTF-8) and the raw request body, the partition is left to the key partitioner (-1), and the headers are source_message_header_order, each value UTF-8 text. A status record has the request id as its key (UTF-8), the one header dk-status-version = 1, and a value of compact JSON with sorted keys, raw UTF-8. In the input of a status case, updated_at is the text the value carries, and result is the JSON text of the result. A status map keeps one record per request id: for another job the lower source offset wins, for the same job the state rank that is equal or higher wins; an end state older than retention_seconds at now is not stored and removes the stored entry of its own job, and a lower-rank record of that job read after it is not stored. Encoding of bytes in this file: a JSON string is its UTF-8 bytes, {\"base64\": \"...\"} is the decoded bytes, null is no value.",
+  "status_version": "1",
+  "status_header": "dk-status-version",
+  "source_message_header_order": [
+    "dk-origin",
+    "dk-request-id",
+    "dk-http-client",
+    "dk-deliver-sinks"
+  ],
+  "failed_outcomes": [
+    "dlq",
+    "timeout",
+    "split_failed",
+    "attempts_spent",
+    "orphaned",
+    "parse",
+    "response_failed"
+  ],
+  "state_rank": {
+    "accepted": 0,
+    "running": 1,
+    "done": 2,
+    "failed": 2
+  },
+  "source_message_cases": [
+    {
+      "name": "sinks_off",
+      "input": {
+        "request_id": "order-123",
+        "client": "tenant-a",
+        "deliver_sinks": false,
+        "body": "{\"items\":[1,2,3]}"
+      },
+      "key": "order-123",
+      "value": "{\"items\":[1,2,3]}",
+      "headers": [
+        ["dk-origin", "http"],
+        ["dk-request-id", "order-123"],
+        ["dk-http-client", "tenant-a"],
+        ["dk-deliver-sinks", "false"]
+      ],
+      "partition": -1
+    },
+    {
+      "name": "sinks_on",
+      "input": {
+        "request_id": "order-123",
+        "client": "tenant-a",
+        "deliver_sinks": true,
+        "body": "{\"items\":[1,2,3]}"
+      },
+      "key": "order-123",
+      "value": "{\"items\":[1,2,3]}",
+      "headers": [
+        ["dk-origin", "http"],
+        ["dk-request-id", "order-123"],
+        ["dk-http-client", "tenant-a"],
+        ["dk-deliver-sinks", "true"]
+      ],
+      "partition": -1
+    }
+  ],
+  "status_cases": [
+    {
+      "name": "accepted",
+      "input": {
+        "request_id": "order-123",
+        "state": "accepted",
+        "partition": 7,
+        "offset": 500,
+        "client": "tenant-a",
+        "updated_at": "2026-11-23T10:15:02.123456Z"
+      },
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"job\":\"7:500\",\"state\":\"accepted\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "running_total_unknown",
+      "input": {
+        "request_id": "order-123",
+        "state": "running",
+        "partition": 7,
+        "offset": 500,
+        "client": "tenant-a",
+        "updated_at": "2026-11-23T10:15:02.123456Z",
+        "parts": {"total": null, "received": 0, "failed": 0}
+      },
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"job\":\"7:500\",\"parts\":{\"failed\":0,\"received\":0,\"total\":null},\"state\":\"running\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "running",
+      "input": {
+        "request_id": "order-123",
+        "state": "running",
+        "partition": 7,
+        "offset": 500,
+        "client": "tenant-a",
+        "updated_at": "2026-11-23T10:15:02.123456Z",
+        "parts": {"total": 1000, "received": 412, "failed": 0}
+      },
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"job\":\"7:500\",\"parts\":{\"failed\":0,\"received\":412,\"total\":1000},\"state\":\"running\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "done_with_result",
+      "input": {
+        "request_id": "order-123",
+        "state": "done",
+        "partition": 7,
+        "offset": 500,
+        "client": "tenant-a",
+        "updated_at": "2026-11-23T10:15:02.123456Z",
+        "parts": {"total": 3, "received": 3, "failed": 0},
+        "result": "{\"items\":3,\"name\":\"Ærø\"}",
+        "duration_seconds": 12.5
+      },
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"duration_seconds\":12.5,\"job\":\"7:500\",\"parts\":{\"failed\":0,\"received\":3,\"total\":3},\"result\":{\"items\":3,\"name\":\"Ærø\"},\"state\":\"done\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "done_local_null_result",
+      "input": {
+        "request_id": "order-123",
+        "state": "done",
+        "partition": 7,
+        "offset": 500,
+        "client": "tenant-a",
+        "updated_at": "2026-11-23T10:15:02.123456Z",
+        "result": "null",
+        "duration_seconds": 0.25
+      },
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"duration_seconds\":0.25,\"job\":\"7:500\",\"result\":null,\"state\":\"done\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "failed_dlq",
+      "input": {
+        "request_id": "order-123",
+        "state": "failed",
+        "partition": 7,
+        "offset": 500,
+        "client": "tenant-a",
+        "updated_at": "2026-11-23T10:15:02.123456Z",
+        "outcome": "dlq",
+        "error": "a part failed in stage execute",
+        "parts": {"total": 3, "received": 1, "failed": 1}
+      },
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"error\":\"a part failed in stage execute\",\"job\":\"7:500\",\"outcome\":\"dlq\",\"parts\":{\"failed\":1,\"received\":1,\"total\":3},\"state\":\"failed\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "failed_timeout",
+      "input": {
+        "request_id": "order-123",
+        "state": "failed",
+        "partition": 7,
+        "offset": 500,
+        "client": "tenant-a",
+        "updated_at": "2026-11-23T10:15:02.123456Z",
+        "outcome": "timeout",
+        "error": "job timed out after 1m1s: 1 of 3 parts",
+        "parts": {"total": 3, "received": 1, "failed": 1}
+      },
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"error\":\"job timed out after 1m1s: 1 of 3 parts\",\"job\":\"7:500\",\"outcome\":\"timeout\",\"parts\":{\"failed\":1,\"received\":1,\"total\":3},\"state\":\"failed\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "failed_split_failed",
+      "input": {
+        "request_id": "order-123",
+        "state": "failed",
+        "partition": 7,
+        "offset": 500,
+        "client": "tenant-a",
+        "updated_at": "2026-11-23T10:15:02.123456Z",
+        "outcome": "split_failed",
+        "error": "split failed: boom"
+      },
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"error\":\"split failed: boom\",\"job\":\"7:500\",\"outcome\":\"split_failed\",\"state\":\"failed\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "failed_attempts_spent",
+      "input": {
+        "request_id": "order-123",
+        "state": "failed",
+        "partition": 7,
+        "offset": 500,
+        "client": "tenant-a",
+        "updated_at": "2026-11-23T10:15:02.123456Z",
+        "outcome": "attempts_spent",
+        "error": "split did not finish in 3 attempts"
+      },
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"error\":\"split did not finish in 3 attempts\",\"job\":\"7:500\",\"outcome\":\"attempts_spent\",\"state\":\"failed\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "failed_orphaned",
+      "input": {
+        "request_id": "order-123",
+        "state": "failed",
+        "partition": 7,
+        "offset": 500,
+        "client": "tenant-a",
+        "updated_at": "2026-11-23T10:15:02.123456Z",
+        "outcome": "orphaned",
+        "error": "the source no longer gives the message of this job"
+      },
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"error\":\"the source no longer gives the message of this job\",\"job\":\"7:500\",\"outcome\":\"orphaned\",\"state\":\"failed\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "failed_parse",
+      "input": {
+        "request_id": "order-123",
+        "state": "failed",
+        "partition": 7,
+        "offset": 500,
+        "client": "tenant-a",
+        "updated_at": "2026-11-23T10:15:02.123456Z",
+        "outcome": "parse",
+        "error": "1 validation error for Item"
+      },
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"error\":\"1 validation error for Item\",\"job\":\"7:500\",\"outcome\":\"parse\",\"state\":\"failed\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "failed_response_failed",
+      "input": {
+        "request_id": "order-123",
+        "state": "failed",
+        "partition": 7,
+        "offset": 500,
+        "client": "tenant-a",
+        "updated_at": "2026-11-23T10:15:02.123456Z",
+        "outcome": "response_failed",
+        "error": "the result is 70000 bytes, the limit is 65536"
+      },
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"error\":\"the result is 70000 bytes, the limit is 65536\",\"job\":\"7:500\",\"outcome\":\"response_failed\",\"state\":\"failed\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    }
+  ],
+  "invalid_status_cases": [
+    {
+      "name": "no_version_header",
+      "why": "a record without dk-status-version 1 is no status record",
+      "key": "order-123",
+      "headers": [],
+      "value": "{\"client\":\"tenant-a\",\"job\":\"7:500\",\"state\":\"accepted\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "other_version",
+      "why": "only version 1 is read",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "2"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"job\":\"7:500\",\"state\":\"accepted\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "no_key",
+      "why": "the key is the request id",
+      "key": null,
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"job\":\"7:500\",\"state\":\"accepted\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "key_not_utf8",
+      "why": "the key must be UTF-8 text",
+      "key": {
+        "base64": "/w=="
+      },
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"job\":\"7:500\",\"state\":\"accepted\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "value_not_json",
+      "why": "the value must be a JSON object",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "not json"
+    },
+    {
+      "name": "value_not_object",
+      "why": "the value must be a JSON object",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "[1,2]"
+    },
+    {
+      "name": "unknown_state",
+      "why": "state is one of accepted, running, done, failed",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"job\":\"7:500\",\"state\":\"paused\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "bad_job",
+      "why": "job is <partition>:<offset> in decimal digits",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"job\":\"7-500\",\"state\":\"accepted\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "missing_job",
+      "why": "job is always present",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"state\":\"accepted\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "bad_time",
+      "why": "updated_at is RFC 3339 UTC with six fraction digits and Z",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"job\":\"7:500\",\"state\":\"accepted\",\"updated_at\":\"2026-11-23T10:15:02Z\"}"
+    },
+    {
+      "name": "client_not_text",
+      "why": "client is a text",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":7,\"job\":\"7:500\",\"state\":\"accepted\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "negative_count",
+      "why": "a counter is a JSON integer that is not negative",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"job\":\"7:500\",\"parts\":{\"failed\":0,\"received\":-1,\"total\":null},\"state\":\"running\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "count_is_boolean",
+      "why": "a boolean is no counter",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"job\":\"7:500\",\"parts\":{\"failed\":false,\"received\":1,\"total\":3},\"state\":\"running\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "failed_unknown_outcome",
+      "why": "outcome is one of failed_outcomes",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"error\":\"\",\"job\":\"7:500\",\"outcome\":\"lost\",\"state\":\"failed\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "failed_without_outcome",
+      "why": "a failed record has an outcome",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"error\":\"\",\"job\":\"7:500\",\"state\":\"failed\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "failed_error_not_text",
+      "why": "error is a text",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"error\":5,\"job\":\"7:500\",\"outcome\":\"dlq\",\"state\":\"failed\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "done_duration_not_number",
+      "why": "duration_seconds is a finite number",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"duration_seconds\":\"1.5\",\"job\":\"7:500\",\"result\":null,\"state\":\"done\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    }
+  ],
+  "map_cases": [
+    {
+      "name": "rank_rule_in_log_order",
+      "retention_seconds": 3600,
+      "now": "2026-11-23T10:15:09.500000Z",
+      "records": [
+        {
+          "request_id": "order-123",
+          "state": "accepted",
+          "partition": 7,
+          "offset": 500,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:15:02.123456Z"
+        },
+        {
+          "request_id": "order-123",
+          "state": "running",
+          "partition": 7,
+          "offset": 500,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:15:02.123456Z",
+          "parts": {"total": 1000, "received": 412, "failed": 0}
+        },
+        {
+          "request_id": "order-123",
+          "state": "done",
+          "partition": 7,
+          "offset": 500,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:15:02.123456Z",
+          "result": "{\"items\":3}",
+          "duration_seconds": 1.5
+        }
+      ],
+      "expected": {
+        "request_id": "order-123",
+        "state": "done",
+        "partition": 7,
+        "offset": 500,
+        "client": "tenant-a",
+        "updated_at": "2026-11-23T10:15:02.123456Z",
+        "result": "{\"items\":3}",
+        "duration_seconds": 1.5
+      }
+    },
+    {
+      "name": "late_accepted_after_the_end_is_ignored",
+      "retention_seconds": 3600,
+      "now": "2026-11-23T10:15:09.500000Z",
+      "records": [
+        {
+          "request_id": "order-123",
+          "state": "done",
+          "partition": 7,
+          "offset": 500,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:15:02.123456Z",
+          "result": "null",
+          "duration_seconds": 1.5
+        },
+        {
+          "request_id": "order-123",
+          "state": "accepted",
+          "partition": 7,
+          "offset": 500,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:15:02.123456Z"
+        }
+      ],
+      "expected": {
+        "request_id": "order-123",
+        "state": "done",
+        "partition": 7,
+        "offset": 500,
+        "client": "tenant-a",
+        "updated_at": "2026-11-23T10:15:02.123456Z",
+        "result": "null",
+        "duration_seconds": 1.5
+      }
+    },
+    {
+      "name": "lower_offset_wins_over_a_second_message_of_the_id",
+      "retention_seconds": 3600,
+      "now": "2026-11-23T10:15:09.500000Z",
+      "records": [
+        {
+          "request_id": "order-123",
+          "state": "accepted",
+          "partition": 7,
+          "offset": 600,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:15:02.123456Z"
+        },
+        {
+          "request_id": "order-123",
+          "state": "accepted",
+          "partition": 7,
+          "offset": 500,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:15:02.123456Z"
+        },
+        {
+          "request_id": "order-123",
+          "state": "running",
+          "partition": 7,
+          "offset": 600,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:15:02.123456Z",
+          "parts": {"total": 1000, "received": 412, "failed": 0}
+        }
+      ],
+      "expected": {
+        "request_id": "order-123",
+        "state": "accepted",
+        "partition": 7,
+        "offset": 500,
+        "client": "tenant-a",
+        "updated_at": "2026-11-23T10:15:02.123456Z"
+      }
+    },
+    {
+      "name": "an_end_state_older_than_the_retention_removes_its_job",
+      "retention_seconds": 60,
+      "now": "2026-11-23T10:15:09.500000Z",
+      "records": [
+        {
+          "request_id": "order-123",
+          "state": "accepted",
+          "partition": 7,
+          "offset": 500,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:00:00.000000Z"
+        },
+        {
+          "request_id": "order-123",
+          "state": "failed",
+          "partition": 7,
+          "offset": 500,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:00:01.000000Z",
+          "outcome": "timeout",
+          "error": "too slow"
+        },
+        {
+          "request_id": "order-123",
+          "state": "running",
+          "partition": 7,
+          "offset": 500,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:00:00.500000Z",
+          "parts": {"total": 1000, "received": 412, "failed": 0}
+        }
+      ],
+      "expected": null
+    },
+    {
+      "name": "a_new_job_of_a_reused_id_after_the_old_end_expired",
+      "retention_seconds": 60,
+      "now": "2026-11-23T10:15:09.500000Z",
+      "records": [
+        {
+          "request_id": "order-123",
+          "state": "done",
+          "partition": 7,
+          "offset": 500,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:00:01.000000Z",
+          "result": "null",
+          "duration_seconds": 1.0
+        },
+        {
+          "request_id": "order-123",
+          "state": "accepted",
+          "partition": 7,
+          "offset": 900,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:15:09.500000Z"
+        }
+      ],
+      "expected": {
+        "request_id": "order-123",
+        "state": "accepted",
+        "partition": 7,
+        "offset": 900,
+        "client": "tenant-a",
+        "updated_at": "2026-11-23T10:15:09.500000Z"
+      }
+    }
+  ]
+}

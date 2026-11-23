@@ -1108,6 +1108,7 @@ Checklist before you turn it on:
    with the request id.
 4. The owner of the source partition reads the message as any other
    message. It calls `split`, publishes the parts, and the fleet runs them.
+   The `open` record of the job in the results log has `origin` `http`.
    While the job is open, the owner writes `running` records with the part
    counters to the status topic.
 5. At the normal end the owner calls `aggregate`, then the new hook
@@ -1376,16 +1377,19 @@ The `outcome` of `failed`:
 
 | `outcome` | Cause | `error` |
 |---|---|---|
-| `dlq` | The job or the local message went to the DLQ: `aggregate` answered `JobAction.DLQ` or raised, or an aggregate sink failed under `on_failure: dlq`. | The `dk-error` text of the DLQ record, or `an aggregate sink failed`. |
-| `timeout` | `split.job_timeout` or `split.idle_timeout` fired. Every end through `on_job_timeout` is `timeout`, whatever the hook answered; `http_job_result` is not called. | The text of the timeout. |
+| `dlq` | The job or the local message went to the DLQ: `aggregate` answered `JobAction.DLQ` or raised, or an aggregate sink failed under `on_failure: dlq`. | Where it failed, from the `dk-stage` of the DLQ record: `a part failed in stage <stage>` (with ` at sink <type>/<name>` for the stage `sink`), `the job failed in stage aggregate`, `the message failed in stage <stage>` for a local message, or `an aggregate sink failed`. |
+| `timeout` | `split.job_timeout` or `split.idle_timeout` fired. Every end through `on_job_timeout` is `timeout`, whatever the hook answered; `http_job_result` is not called. | The text of the timeout, also when `on_job_timeout` failed. |
 | `split_failed` | `split` raised, yielded a wrong value, or a part could not be produced. | `split failed: <error>`. |
 | `attempts_spent` | The attempts of the split are spent. | `split did not finish in <n> attempts`. |
 | `orphaned` | The source no longer gives the message of a restored job. | `the source no longer gives the message of this job`. |
 | `parse` | The message could not be parsed on the owner, under any `sources.kafka.on_parse_error`. With `dlq` the DLQ record is written too. | The parse error. |
 | `response_failed` | `http_job_result` raised, its answer is not JSON, its JSON is larger than `split.http.max_response`, or the `done` record could not be written. The job itself ended normally. | Why. |
 
-`error` is cut to 2000 bytes, as `dk-error` of a DLQ record. It never holds
-task output.
+`error` is cut to 2000 bytes, as `dk-error` of a DLQ record. The status never
+holds task output: for the outcome `dlq` it names only the stage where the
+job failed. The text of a failed task holds its stdout or stderr, and the
+HTTP source never gives task output to a client. The DLQ record of the job
+keeps the full text in `dk-error`.
 
 ### The result hook `http_job_result` {#http-job-result}
 

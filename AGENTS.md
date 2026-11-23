@@ -95,7 +95,8 @@ breaking change, never a refactor:
   another job of the same id, the record of the lower source offset, and for
   the same job the record of the same or a higher state rank (`accepted` <
   `running` < `done` = `failed`), so the map does not depend on the order of
-  arrival — workers of other releases write and read both
+  arrival (`tests/fixtures/split_http_contract.json`) — workers of other
+  releases write and read both
 - framework datetimes in JSON use one canonical format:
   `drakkar.format_rfc3339_micro` — never `isoformat()` on framework values
 

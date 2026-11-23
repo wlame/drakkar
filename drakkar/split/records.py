@@ -150,9 +150,11 @@ def log_record(ref: JobRef, kind: RecordKind, body: Mapping[str, Any]) -> WireRe
     )
 
 
-def open_body(*, worker: str, instance: str, request_id: str | None) -> dict[str, Any]:
-    """The value of an ``open`` record."""
-    return {'worker': worker, 'instance': instance, 'request_id': request_id, 'origin': ORIGIN_KAFKA}
+def open_body(
+    *, worker: str, instance: str, request_id: str | None, origin: Literal['kafka', 'http'] = ORIGIN_KAFKA
+) -> dict[str, Any]:
+    """The value of an ``open`` record; ``origin`` is ``http`` for a job whose request came over HTTP."""
+    return {'worker': worker, 'instance': instance, 'request_id': request_id, 'origin': origin}
 
 
 def _data_json(data: Any) -> Any:
