@@ -21,7 +21,7 @@ from confluent_kafka import KafkaError, KafkaException, Message, Producer
 from drakkar.config.connections import KafkaConnectionConfig
 from drakkar.kafka_security import merge_client_config
 from drakkar.providers.resilience import RateLimitedLog
-from drakkar.split.records import WireRecord
+from drakkar.split.records import ANY_PARTITION, WireRecord
 
 logger = structlog.get_logger()
 
@@ -102,7 +102,7 @@ class SplitProducer:
         self._stopping = threading.Event()
         # One waiter at a time takes the next place in the client queue, so records keep their order.
         self._enqueue_lock = asyncio.Lock()
-        self._unsettled: set[asyncio.Future[int]] = set()
+        self._unsettled: set[asyncio.Future[Any]] = set()
         # Only the poll thread uses it.
         self._poll_failure_log = RateLimitedLog(time.monotonic)
 
@@ -171,8 +171,13 @@ class SplitProducer:
             producer.poll(0)
         return remaining
 
-    def _delivery_callback(self, loop: asyncio.AbstractEventLoop, future: asyncio.Future[int]) -> Callable[..., None]:
-        """The callback for one record; the client calls it on the poll thread."""
+    def _delivery_callback(
+        self, loop: asyncio.AbstractEventLoop, future: asyncio.Future[Any], *, located: bool = False
+    ) -> Callable[..., None]:
+        """The callback for one record; the client calls it on the poll thread.
+
+        The future gets the offset, or ``(partition, offset)`` when ``located``.
+        """
 
         def settle(error: KafkaError | None, message: Message | None) -> None:
             if future.done():
@@ -182,7 +187,12 @@ class SplitProducer:
                 offset = message.offset() if message is not None else None
                 # A report with no error carries the offset of the record. Without one the caller
                 # gets NO_OFFSET, which is below every offset: it cannot wait for that record to be read.
-                future.set_result(NO_OFFSET if offset is None or offset < 0 else offset)
+                found = NO_OFFSET if offset is None or offset < 0 else offset
+                if located:
+                    partition = message.partition() if message is not None else None
+                    future.set_result((ANY_PARTITION if partition is None else partition, found))
+                else:
+                    future.set_result(found)
             elif isinstance(failure, SplitProduceError):
                 future.set_exception(failure)
             else:
@@ -208,7 +218,7 @@ class SplitProducer:
             raise RuntimeError('the split producer is not started')
         return loop, producer
 
-    def _track(self, future: asyncio.Future[int]) -> asyncio.Future[int]:
+    def _track[T](self, future: asyncio.Future[T]) -> asyncio.Future[T]:
         """Keep the delivery future of a queued record until it ends, so ``close`` can fail what is left."""
         self._unsettled.add(future)
         future.add_done_callback(self._unsettled.discard)
@@ -228,6 +238,18 @@ class SplitProducer:
         async with self._enqueue_lock:
             await self._produce_when_room(producer, topic, record, callback)
         return self._track(future)
+
+    async def publish_located(self, topic: str, record: WireRecord) -> tuple[int, int]:
+        """Like :meth:`publish`, but gives the partition the record landed on and its offset there.
+
+        For a record whose partition is left to the key partitioner.
+        """
+        loop, producer = self._started_client()
+        future: asyncio.Future[tuple[int, int]] = loop.create_future()
+        callback = self._delivery_callback(loop, future, located=True)
+        async with self._enqueue_lock:
+            await self._produce_when_room(producer, topic, record, callback)
+        return await self._track(future)
 
     def enqueue_nowait(self, topic: str, record: WireRecord) -> asyncio.Future[int] | None:
         """Put ``record`` in the client queue when it has room now; its delivery future, or None when it has none.

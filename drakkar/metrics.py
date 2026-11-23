@@ -459,6 +459,22 @@ split_http_jobs = Gauge(
     ['state'],
 )
 
+split_http_jobs_accepted = Counter(
+    'drakkar_split_http_jobs_accepted_total',
+    'HTTP requests stored as split jobs',
+)
+
+split_http_status_reads = Counter(
+    'drakkar_split_http_status_reads_total',
+    'Status reads of HTTP split jobs by answered status',
+    ['status'],
+)
+
+split_http_status_write_failures = Counter(
+    'drakkar_split_http_status_write_failures_total',
+    'Status records of HTTP split jobs that could not be written',
+)
+
 total_queued = Gauge(
     'drakkar_total_queued',
     'Total messages buffered in partition queues plus in-flight tasks',

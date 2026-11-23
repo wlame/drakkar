@@ -251,6 +251,30 @@
     - config:split.http.result_retention
     - config:split.http.status_topic
 
+- key: drakkar_split_http_jobs_accepted_total
+  summary: HTTP requests stored as split jobs.
+  meaning: Counts each POST on the HTTP source whose request was written to the source topic and answered 202. A repeated POST of a known request id is not counted.
+  healthy: Follows the rate of new HTTP split job requests.
+  related:
+    - metric:drakkar_split_http_jobs
+    - config:split.http.enabled
+
+- key: drakkar_split_http_status_reads_total
+  summary: Status reads of HTTP split jobs by answered status.
+  meaning: Counts each GET of a job status by the status it answered (accepted, running, done, failed), or not_found for an unknown id or an id of another client.
+  healthy: not_found stays a small share; a high share means clients poll ids that are unknown, expired or not theirs.
+  related:
+    - metric:drakkar_split_http_jobs
+    - config:split.http.result_retention
+
+- key: drakkar_split_http_status_write_failures_total
+  summary: Status records of HTTP split jobs that could not be written.
+  meaning: Counts every failed write of a status record to the status topic, best-effort writes and every failed attempt of an end-state write. An end-state write is tried again until it works, so its job ends late but never without a status.
+  healthy: 0. A steady rise means the status topic or the brokers behind split.connection are not reachable.
+  related:
+    - config:split.http.status_topic
+    - metric:drakkar_split_http_jobs
+
 - key: drakkar_total_queued
   summary: Messages in all partition queues plus tasks in flight.
   meaning: The total work held by the worker.

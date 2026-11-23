@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `f75afdda4c468438`.
+Registry version: `65b410b9623f814e`.
 
 ## Concepts
 
@@ -1263,6 +1263,36 @@ HTTP split jobs in the status map by state.
 **Healthy:** done and failed follow the request rate times the retention; accepted stays small.
 
 **Related:** `config:split.http.result_retention`, `config:split.http.status_topic`
+
+### `metric:drakkar_split_http_jobs_accepted_total`
+
+HTTP requests stored as split jobs.
+
+**Meaning:** Counts each POST on the HTTP source whose request was written to the source topic and answered 202. A repeated POST of a known request id is not counted.
+
+**Healthy:** Follows the rate of new HTTP split job requests.
+
+**Related:** `metric:drakkar_split_http_jobs`, `config:split.http.enabled`
+
+### `metric:drakkar_split_http_status_reads_total`
+
+Status reads of HTTP split jobs by answered status.
+
+**Meaning:** Counts each GET of a job status by the status it answered (accepted, running, done, failed), or not_found for an unknown id or an id of another client.
+
+**Healthy:** not_found stays a small share; a high share means clients poll ids that are unknown, expired or not theirs.
+
+**Related:** `metric:drakkar_split_http_jobs`, `config:split.http.result_retention`
+
+### `metric:drakkar_split_http_status_write_failures_total`
+
+Status records of HTTP split jobs that could not be written.
+
+**Meaning:** Counts every failed write of a status record to the status topic, best-effort writes and every failed attempt of an end-state write. An end-state write is tried again until it works, so its job ends late but never without a status.
+
+**Healthy:** 0. A steady rise means the status topic or the brokers behind split.connection are not reachable.
+
+**Related:** `config:split.http.status_topic`, `metric:drakkar_split_http_jobs`
 
 ### `metric:drakkar_total_queued`
 

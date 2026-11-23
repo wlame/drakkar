@@ -414,3 +414,23 @@ async def test_a_delivery_report_that_names_no_offset_gives_the_mark_for_no_offs
     producer._delivery_callback(loop, future)(None, message)
 
     assert await asyncio.wait_for(future, 2) == NO_OFFSET
+
+
+async def test_publish_located_gives_the_partition_and_the_offset(producer, log):
+    assert await producer.publish(TOPIC, record(0, partition=3)) == 0
+
+    assert await producer.publish_located(TOPIC, record(1, partition=3)) == (3, 1)
+    assert await producer.publish_located(TOPIC, record(2, partition=5)) == (5, 0)
+
+
+async def test_a_located_report_that_names_no_offset_gives_the_mark_for_no_offset(producer):
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[tuple[int, int]] = loop.create_future()
+    message = MagicMock()
+    message.error.return_value = None
+    message.offset.return_value = None
+    message.partition.return_value = 2
+
+    producer._delivery_callback(loop, future, located=True)(None, message)
+
+    assert await asyncio.wait_for(future, 2) == (2, NO_OFFSET)

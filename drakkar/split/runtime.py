@@ -13,7 +13,9 @@ from confluent_kafka import Producer
 from confluent_kafka.aio import AIOConsumer
 
 from drakkar.config import DrakkarConfig
+from drakkar.providers.resilience import RateLimitedLog
 from drakkar.split.http_follower import StatusFollower
+from drakkar.split.http_jobs import HttpJobGateway, StatusWriter
 from drakkar.split.http_status import StatusMap
 from drakkar.split.owner import OwnerHost, OwnerSettings, SplitOwner
 from drakkar.split.producer import SplitProducer
@@ -94,9 +96,21 @@ class HttpJobsRuntime:
             self.source_producer = SplitProducer(source_connection, producer_factory=producer_factory)
         else:
             self.source_producer = split_connection_producer
+        # Status records go to the status topic, on the split connection.
+        self.writer = StatusWriter(
+            split_connection_producer,
+            self.status_topic,
+            clock=clock,
+            sleep=sleep,
+            log_limit=RateLimitedLog(time.monotonic),
+        )
+        self.gateway = HttpJobGateway(self, clock=clock)
+        # The loop the runtime started on; the gateway runs only there.
+        self.loop: asyncio.AbstractEventLoop | None = None
 
     async def start(self) -> None:
         """Start the source producer when it is one of its own, and the follower."""
+        self.loop = asyncio.get_running_loop()
         if self.owns_source_producer:
             await self.source_producer.start()
         self.follower.start()
