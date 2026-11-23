@@ -21,7 +21,15 @@ from drakkar.split.http_jobs import running_record
 from drakkar.split.http_status import PartCounts, StatusMap, StatusRecord
 from drakkar.split.owner import RUNNING_MIN_INTERVAL_SECONDS
 from tests.split_owner_helpers import PARTITION, SplittingHandler, World, items, source_message, summary, wait_until
-from tests.test_split_http_end import CLIENT, HTTP_ID, STATUS_TOPIC, HttpWorker, RestoredFollower, http_message
+from tests.test_split_http_end import (
+    CLIENT,
+    HTTP_ID,
+    STATUS_TOPIC,
+    HttpWorker,
+    RestoredFollower,
+    complete_job,
+    http_message,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -179,6 +187,58 @@ async def test_redelivered_message_of_a_begun_id_is_not_a_duplicate():
 
     assert owner._first_offset_of(HTTP_ID, 500) is None
     assert owner._first_offset_of(HTTP_ID, 501) == 500
+    await http.worker.stop()
+
+
+async def test_id_reused_after_its_first_job_ended_runs_as_a_new_job():
+    world = World()
+    handler = SplittingHandler({500: items(1), 900: items(1)}, answer=summary())
+    http = await HttpWorker(world, handler).start(http_message(500))
+    await wait_until(lambda: world.kinds() == ['open', 'split-done'])
+    world.report_all()
+    await wait_until(lambda: http.worker.committed == 501)
+
+    # The status entry of the first job has expired from the map; the client sends the id again.
+    with capture_logs() as logs:
+        http.worker.give(http_message(900))
+        await wait_until(lambda: len(world.parts(offset=900)) == 1)
+    world.report_all(world.parts(offset=900))
+    await wait_until(lambda: http.worker.committed == 901)
+
+    assert handler.split_calls == [500, 900] and duplicates(logs) == []
+    assert [closed['outcome'] for closed in world.closed()] == ['aggregated', 'aggregated']
+    await http.worker.stop()
+
+
+async def test_a_job_the_log_has_is_followed_even_when_the_map_names_a_lower_offset():
+    world = World()
+    complete_job(world, 500)
+    handler = SplittingHandler(answer=summary())
+    http = HttpWorker(world, handler)
+    # An ended entry of an older job of the same id that the sweep has not removed yet.
+    put(http, dataclasses.replace(known(400, 'done'), updated_at=world.seconds()))
+    assert http.status_map.get(HTTP_ID) is not None
+    with capture_logs() as logs:
+        await http.start(http_message(500))
+        await wait_until(lambda: http.worker.committed == 501)
+
+    assert duplicates(logs) == []
+    assert len(handler.jobs) == 1 and world.kinds()[-1] == 'closed'
+    await http.worker.stop()
+
+
+async def test_a_duplicate_closes_the_orphans_below_it():
+    world = World()
+    complete_job(world, 400)
+    http = HttpWorker(world, SplittingHandler(answer=summary()))
+    put(http, known(300))
+    with capture_logs() as logs:
+        await http.start(http_message(500))
+        await wait_until(lambda: http.worker.committed == 501)
+        await wait_until(lambda: 'closed' in world.kinds())
+
+    assert len(duplicates(logs)) == 1
+    assert world.closed()[0]['outcome'] == 'orphaned'
     await http.worker.stop()
 
 
@@ -359,3 +419,33 @@ async def test_running_write_failure_is_logged_and_dropped():
 def test_running_record_needs_an_http_job_message():
     with pytest.raises(ValueError, match='HTTP job'):
         running_record(source_message(500), parts=PartCounts(None, 0, 0), now=1.0)
+
+
+async def test_no_running_after_an_end_state_of_an_attempt_that_another_instance_replaced():
+    world = World()
+    gate_answer = asyncio.Event()
+
+    async def answer(job: Any) -> Any:
+        await gate_answer.wait()
+        return summary(job.attempt)
+
+    http = HttpWorker(world, SplittingHandler({500: items(2)}, answer=answer))
+    await start_timed(http, http_message(500))
+    await wait_until(lambda: world.kinds() == ['open', 'split-done'])
+    world.report_all()
+    await wait_until(lambda: len(http.worker.handler.jobs) == 1)
+
+    # While the hook runs, another instance opens attempt 2: the done of this end is ignored by the log.
+    world.put_open(500, 'e' * 16, attempt=2, instance='b' * 16)
+    await http.worker.caught_up()
+    with capture_logs() as logs:
+        gate_answer.set()
+        await wait_until(lambda: any(line['event'] == 'split_job_end_superseded' for line in logs))
+
+    # The owner follows attempt 2, whose counters change; it writes no running record after its done.
+    world.put(world.ref(500, 'e' * 16, 2), 'split-done', {'parts': 2})
+    await http.worker.caught_up()
+    await asyncio.sleep(0.05)
+    states = [record.state for record in http.statuses(running=True)]
+    assert 'done' in states and 'running' not in states[states.index('done') :]
+    await http.worker.stop()

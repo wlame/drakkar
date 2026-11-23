@@ -248,6 +248,9 @@ class _HeldJob:
     unread_closed: int = 0
     # The ``running`` records of an HTTP job; None before the first one and after the end began.
     progress: _Progress | None = None
+    # Whether this owner wrote an end state of the job: no ``running`` record may follow it, also when the
+    # owner goes on with a newer attempt of another instance.
+    end_state_written: bool = False
 
     @property
     def busy(self) -> bool:
@@ -397,7 +400,8 @@ class SplitOwner:
             decided = await self._begin_http_job(message)
             if decided is not None:
                 return decided
-        self._close_orphans_below(offset)
+        else:
+            self._close_orphans_below(offset)
         self._restored_waiting.discard(offset)
         job = self._table.job(offset)
         if job is None:
@@ -441,6 +445,9 @@ class SplitOwner:
         a lower offset of this partition: in the map, or among the jobs this
         owner began. It completes with no hook call and no status record.
         The same offset is the same message given again, never a duplicate.
+        A job the results log already has is never a duplicate: its offset
+        completes only by the log, so the owner follows it. Every message,
+        a duplicate too, first closes the orphans below its offset.
         """
         side = self._settings.status
         http_job = message.http_job
@@ -451,8 +458,9 @@ class SplitOwner:
         if not await side.follower.wait_restored(self._stopped):
             self._host.hold_job_offset(offset)
             return BeginOutcome.JOB
+        self._close_orphans_below(offset)
         request_id = http_job.request_id
-        first = self._first_offset_of(request_id, offset)
+        first = None if self._table.job(offset) is not None else self._first_offset_of(request_id, offset)
         if first is None:
             self._begun_ids.setdefault(request_id, offset)
             return None
@@ -531,6 +539,8 @@ class SplitOwner:
         rebuild = functools.partial(local_facts, message, result)
         ended = await self._ender.end(message, MessageDLQState(), rebuild(), '', rebuild=rebuild, closing_ref=None)
         # A local message writes no record, so the answer is never one.
+        if ended is True:
+            self._forget_begun(message)
         return ended is True
 
     # --- what the job tracker tells ---
@@ -634,6 +644,7 @@ class SplitOwner:
             and self._ender.is_http_job(held.message)
             and held.end_task is None
             and not held.settling
+            and not held.end_state_written
             and self._jobs.get(held.message.offset) is held
         )
 
@@ -942,6 +953,17 @@ class SplitOwner:
         self._end_progress(held)
         if self._jobs.get(held.message.offset) is held:
             del self._jobs[held.message.offset]
+        self._forget_begun(held.message)
+
+    def _forget_begun(self, message: SourceMessage) -> None:
+        """Forget the request id of an HTTP job whose offset is settled, so the id may name a new job later.
+
+        Its end state is acknowledged by then, and the status map carries
+        the id from there on. Only the entry of this very offset goes.
+        """
+        http_job = message.http_job
+        if http_job is not None and self._begun_ids.get(http_job.request_id) == message.offset:
+            del self._begun_ids[http_job.request_id]
 
     def _ref_of(self, job: JobState) -> JobRef:
         """The current attempt of a job of the table."""
@@ -1211,6 +1233,7 @@ class SplitOwner:
                 held.message, state='failed', outcome=outcome, error=error, parts=None, duration=None, now=side.clock()
             )
             status_written = await self._ender.write_status(status)
+            held.end_state_written = status_written != 'stopped'
             if status_written == 'stopped':
                 self._host.hold_job_offset(offset)
                 return BeginOutcome.JOB
@@ -1302,6 +1325,8 @@ class SplitOwner:
             return self._follow_newer_attempt(held)
         try:
             ended = await self._end_attempt(held, attempt, self._facts(held, attempt, timed_out), timed_out)
+            # The end ran to its answer, so it wrote the end state of an HTTP job.
+            held.end_state_written = True
         except asyncio.CancelledError:
             # A stop: the job stays held, and the next owner ends it.
             raise

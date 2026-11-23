@@ -277,7 +277,8 @@ async def _start_path(path: str, *, hold_status: bool = False) -> tuple[HttpWork
 def _path_ended(http: HttpWorker, path: str) -> bool:
     """Whether a path started by :func:`_start_path` has ended: its offset committed (and, for an orphan, closed)."""
     if path == 'orphan':
-        return http.worker.committed == 503 and 'closed' in http.world.kinds()
+        # The event, not the log: the delivery thread appends the record to the log before it notes the event.
+        return http.worker.committed == 503 and ('results', 'closed') in http.events
     return http.worker.committed == 501
 
 
@@ -688,7 +689,7 @@ async def test_orphan_without_map_entry_writes_no_status():
     await wait_until(lambda: 'closed' in world.kinds())
 
     assert world.closed()[0]['outcome'] == 'orphaned'
-    assert http.statuses() == []
+    assert http.statuses(running=True) == []
     await http.worker.stop()
 
 
@@ -700,7 +701,7 @@ async def test_orphan_of_another_job_in_the_map_writes_no_status():
     await http.start(source_message(502))
     await wait_until(lambda: 'closed' in world.kinds())
 
-    assert http.statuses() == []
+    assert http.statuses(running=True) == []
     await http.worker.stop()
 
 
@@ -716,7 +717,7 @@ async def test_orphan_status_not_acknowledged_writes_no_closed():
     # The stop waits for the tasks of the owner, so a closed record would be written by now.
     await http.worker.stop()
 
-    assert 'closed' not in world.kinds() and http.statuses() == []
+    assert 'closed' not in world.kinds() and http.statuses(running=True) == []
 
 
 async def test_orphan_keeps_a_stored_end_status_and_writes_only_closed():
@@ -737,7 +738,7 @@ async def test_orphan_keeps_a_stored_end_status_and_writes_only_closed():
     await wait_until(lambda: 'closed' in world.kinds())
 
     assert world.closed()[0]['outcome'] == 'orphaned'
-    assert http.statuses() == []
+    assert http.statuses(running=True) == []
     assert http.status_map.get(REQUEST_ID) == done
     await http.worker.stop()
 
@@ -828,9 +829,24 @@ async def test_kafka_job_end_unchanged():
 
     assert world.kinds() == ['open', 'split-done', 'result', 'result', 'closed']
     assert world.closed()[0]['outcome'] == 'aggregated'
-    assert http.statuses() == []
+    assert http.statuses(running=True) == []
     assert handler.result_jobs == []
     assert http.worker.aggregate_sink.calls == 1
+    await http.worker.stop()
+
+
+async def test_kafka_job_writes_no_running_record_while_its_parts_report():
+    world = World()
+    http = await HttpWorker(world, SplittingHandler({500: items(3)}, answer=summary())).start(source_message(500))
+    await wait_until(lambda: world.kinds() == ['open', 'split-done'])
+    parts = world.parts()
+    for part in parts:
+        world.clock.advance(6000)
+        world.report(part)
+        await http.worker.caught_up()
+    await wait_until(lambda: http.worker.committed == 501)
+
+    assert http.statuses(running=True) == []
     await http.worker.stop()
 
 
@@ -855,7 +871,7 @@ async def test_orphan_waits_for_the_restored_map_and_a_stop_ends_the_wait_with_n
     await wait_until(lambda: waits == [True] and http.worker.committed == 503)
     await http.worker.stop()
 
-    assert 'closed' not in world.kinds() and http.statuses() == []
+    assert 'closed' not in world.kinds() and http.statuses(running=True) == []
 
 
 async def test_fail_unparsed_after_the_owner_stopped_holds_the_offset_and_starts_no_end():
