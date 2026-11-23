@@ -205,6 +205,17 @@ class StatusMap:
     higher or equal state rank wins. The outcome does not depend on the order
     in which records arrive, with one exception: ``done`` and ``failed`` of
     the same job have the same rank, so the one that arrives last wins.
+
+    An end-state record older than the retention is not stored. It removes
+    the stored entry of its own job, and the map marks the job as ended, so
+    that a lower-rank record of that job read after it is not stored again.
+    Without the mark, a restore that reads ``done`` before a late
+    ``accepted`` would show the job as not ended for ever. A mark lives
+    through at least one full round of :meth:`forget_old_marks`; within one
+    partition of the topic, a lower-rank record follows the end state of its
+    job by at most a few seconds of writes, so a restore has read every such
+    record before its mark goes. A record of another job of the same id (a
+    new job of a reused id) is not affected by the mark.
     """
 
     def __init__(self, result_retention: float) -> None:
@@ -214,6 +225,9 @@ class StatusMap:
         self._heap: list[tuple[float, str, int]] = []
         self._generation = 0
         self._counts = dict.fromkeys(STATE_RANK, 0)
+        # The jobs whose end state expired, by request id: marks of this round and of the round before.
+        self._marks: dict[str, str] = {}
+        self._old_marks: dict[str, str] = {}
 
     def __len__(self) -> int:
         """The number of stored entries."""
@@ -231,6 +245,12 @@ class StatusMap:
     def put(self, record: StatusRecord, *, now: float) -> bool:
         """Offer ``record``; True when it is now the stored record of its id."""
         if record.is_ended and record.updated_at + self._retention <= now:
+            self._end_expired(record)
+            return False
+        if not record.is_ended and record.job in (
+            self._marks.get(record.request_id),
+            self._old_marks.get(record.request_id),
+        ):
             return False
         entry = self._entries.get(record.request_id)
         if entry is not None:
@@ -246,6 +266,25 @@ class StatusMap:
         if record.is_ended:
             heapq.heappush(self._heap, (record.updated_at + self._retention, record.request_id, self._generation))
         return True
+
+    def _end_expired(self, record: StatusRecord) -> None:
+        """Mark the job of an expired end-state record as ended, and remove the entry of that job it beats."""
+        self._marks[record.request_id] = record.job
+        entry = self._entries.get(record.request_id)
+        if entry is None:
+            return
+        stored = entry[0]
+        if stored.job != record.job:
+            return
+        if stored.is_ended and stored.updated_at > record.updated_at:
+            return
+        del self._entries[record.request_id]
+        self._counts[stored.state] -= 1
+
+    def forget_old_marks(self) -> None:
+        """Start a new round of marks: the marks of the round before this one are forgotten."""
+        self._old_marks = self._marks
+        self._marks = {}
 
     @staticmethod
     def _wins(new: StatusRecord, stored: StatusRecord) -> bool:

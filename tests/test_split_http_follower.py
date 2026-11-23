@@ -669,3 +669,29 @@ async def test_follower_keeps_the_end_state_when_an_older_state_arrives_late(wor
     world.write(status('r1'))
     await wait_until(lambda: world.consumers[0]._positions.get((STATUS_TOPIC, 0)) == 2)
     assert world.follower.get('r1').state == 'done'
+
+
+async def test_follower_restore_forgets_a_job_whose_end_expired_and_takes_a_new_job_of_its_id(world):
+    old = NOW - RETENTION - 10
+    world.write(status('r1', updated_at=old))
+    world.write(status('r1', 'done', updated_at=old))
+    # The best-effort ``accepted`` can follow the end state of a short job in the log.
+    world.write(status('r1', updated_at=old))
+    world.write(status('r1', 'running', updated_at=old, parts=PartCounts(total=None, received=0, failed=0)))
+    await restored(world)
+
+    assert world.follower.get('r1') is None
+    assert gauge('accepted') == 0 and gauge('running') == 0
+
+    world.write(status('r1', offset=900))
+    await wait_until(lambda: world.follower.get('r1') is not None)
+    assert (world.follower.get('r1').state, world.follower.get('r1').offset) == ('accepted', 900)
+
+
+async def test_follower_sweep_starts_a_new_round_of_marks(world):
+    await restored(world)
+    world.map.put(status('r1', 'done', updated_at=NOW - RETENTION - 10), now=NOW)
+    await world.follower._sweep()
+    assert not world.map.put(status('r1'), now=NOW)
+    await world.follower._sweep()
+    assert world.map.put(status('r1'), now=NOW)

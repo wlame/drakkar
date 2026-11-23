@@ -399,8 +399,11 @@ class StatusFollower:
         """Remove every ended entry past its retention, ``EXPIRY_SWEEP_LIMIT`` heap items at a time.
 
         The loop gets a turn between two calls, so a large backlog is removed
-        in one sweep without holding the loop.
+        in one sweep without holding the loop. Each sweep also starts a new
+        round of the marks of jobs whose end expired; the first sweep comes
+        after the restore, so the restore keeps every mark it made.
         """
+        self.status_map.forget_old_marks()
         now = self._clock()
         removed = self.status_map.expire(now, limit=EXPIRY_SWEEP_LIMIT)
         while self.status_map.has_due(now):

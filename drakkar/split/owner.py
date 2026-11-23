@@ -405,6 +405,7 @@ class SplitOwner:
         self._restored_waiting.discard(offset)
         job = self._table.job(offset)
         if job is None:
+            self._note_begun(message)
             held = _HeldJob(message=message, opened_at=self._settings.clock())
             return await self._until_stop(held, self._start_attempt(held, None))
         if job.closed is not None:
@@ -417,6 +418,7 @@ class SplitOwner:
             )
             self._host.complete_job_offset(offset)
             return BeginOutcome.DONE
+        self._note_begun(message)
         held = _HeldJob(message=message, opened_at=job.opened_at_ms / MS_PER_SECOND)
         if job.parts is None and self._due_kind(job) is None:
             return await self._until_stop(held, self._start_attempt(held, job))
@@ -462,7 +464,6 @@ class SplitOwner:
         request_id = http_job.request_id
         first = None if self._table.job(offset) is not None else self._first_offset_of(request_id, offset)
         if first is None:
-            self._begun_ids.setdefault(request_id, offset)
             return None
         logger.info(
             'split_http_duplicate',
@@ -954,6 +955,18 @@ class SplitOwner:
         if self._jobs.get(held.message.offset) is held:
             del self._jobs[held.message.offset]
         self._forget_begun(held.message)
+
+    def _note_begun(self, message: SourceMessage) -> None:
+        """Remember the request id of an HTTP job that goes on to its split or to the rules of a holder.
+
+        Only such a message settles its offset through :meth:`_drop` or
+        :meth:`end_local`, which forget the id again. A message that ends in
+        ``begin`` itself (a closed job, a duplicate, a stop) is never noted,
+        so its id cannot stay behind for the life of the owner.
+        """
+        http_job = message.http_job
+        if http_job is not None and self._ender.is_http_job(message):
+            self._begun_ids.setdefault(http_job.request_id, message.offset)
 
     def _forget_begun(self, message: SourceMessage) -> None:
         """Forget the request id of an HTTP job whose offset is settled, so the id may name a new job later.

@@ -23,6 +23,7 @@ from drakkar.split.owner import RUNNING_MIN_INTERVAL_SECONDS
 from tests.split_owner_helpers import PARTITION, SplittingHandler, World, items, source_message, summary, wait_until
 from tests.test_split_http_end import (
     CLIENT,
+    FIRST,
     HTTP_ID,
     STATUS_TOPIC,
     HttpWorker,
@@ -207,6 +208,25 @@ async def test_id_reused_after_its_first_job_ended_runs_as_a_new_job():
 
     assert handler.split_calls == [500, 900] and duplicates(logs) == []
     assert [closed['outcome'] for closed in world.closed()] == ['aggregated', 'aggregated']
+    await http.worker.stop()
+
+
+async def test_a_redelivered_message_of_a_closed_job_does_not_keep_its_id():
+    world = World()
+    world.put_open(500, FIRST)
+    world.put_closed(500, FIRST)
+    handler = SplittingHandler({900: items(1)}, answer=summary())
+    http = await HttpWorker(world, handler).start(http_message(500))
+    await wait_until(lambda: http.worker.committed == 501)
+    owner = http.worker.owner
+    assert owner is not None
+    assert owner._begun_ids == {}
+
+    # The client sends the id again later: it is a new job, not a duplicate of the closed one.
+    with capture_logs() as logs:
+        http.worker.give(http_message(900))
+        await wait_until(lambda: len(world.parts(offset=900)) == 1)
+    assert handler.split_calls == [900] and duplicates(logs) == []
     await http.worker.stop()
 
 

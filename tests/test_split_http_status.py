@@ -167,7 +167,7 @@ def test_map_does_not_store_ended_records_older_than_retention():
     assert not m.put(done(), now=UPDATED + 100)
     assert m.get('order-1') is None
     assert len(m) == 0
-    assert m.put(make(), now=UPDATED + 10_000)
+    assert m.put(make(offset=900), now=UPDATED + 10_000)
 
 
 def test_map_expires_ended_entries_after_retention():
@@ -258,3 +258,46 @@ def test_answer_body_shapes():
 def test_constants():
     assert STATE_RANK == {'accepted': 0, 'running': 1, 'done': 2, 'failed': 2}
     assert 'response_failed' in FAILED_OUTCOMES
+
+
+def test_map_expired_end_removes_the_open_entries_of_its_job_in_every_order():
+    records = [make(), running(), done()]
+    for order in itertools.permutations(records):
+        m = StatusMap(100)
+        for record in order:
+            m.put(record, now=UPDATED + 1000)
+        assert m.get('order-1') is None, order
+        assert len(m) == 0 and sum(m.counts().values()) == 0, order
+
+
+def test_map_expired_end_does_not_remove_a_newer_end_of_its_job():
+    m = StatusMap(100)
+    m.put(done(updated=UPDATED + 1000), now=UPDATED + 1000)
+    m.put(failed(), now=UPDATED + 1000)
+    assert m.get('order-1').state == 'done'
+
+
+def test_map_expired_end_does_not_touch_another_job_of_the_id():
+    m = StatusMap(100)
+    m.put(make(offset=900, updated=UPDATED + 1000), now=UPDATED + 1000)
+    m.put(done(offset=500), now=UPDATED + 1000)
+    assert m.get('order-1').offset == 900
+
+
+def test_map_new_job_of_an_id_whose_old_job_expired_is_stored():
+    m = StatusMap(100)
+    for record in (make(), done(), running()):
+        m.put(record, now=UPDATED + 1000)
+    later = UPDATED + 1000
+    assert m.put(make(offset=900, updated=later), now=later)
+    assert m.put(running(offset=900, updated=later), now=later)
+    assert (m.get('order-1').state, m.get('order-1').offset) == ('running', 900)
+
+
+def test_map_forgets_an_expired_job_after_two_mark_rounds():
+    m = StatusMap(100)
+    m.put(done(), now=UPDATED + 1000)
+    m.forget_old_marks()
+    assert not m.put(make(), now=UPDATED + 1000)
+    m.forget_old_marks()
+    assert m.put(make(), now=UPDATED + 1000)
