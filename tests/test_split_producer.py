@@ -60,6 +60,46 @@ async def test_client_config_has_the_connection_and_the_delivery_settings(produc
     assert (client.config['acks'], client.config['enable.idempotence'], client.config['linger.ms']) == ('all', True, 5)
 
 
+async def test_client_config_pins_partitioner(log):
+    connection = KafkaConnectionConfig(client_config={'partitioner': 'murmur2_random'})
+    client = FakeProducerClient(log)
+
+    def factory(config: dict) -> FakeProducerClient:
+        client.config = config
+        return client
+
+    split_producer = SplitProducer(connection, producer_factory=factory)
+    await split_producer.start()
+    await split_producer.close(1.0)
+    assert client.config['partitioner'] == 'consistent_random'
+
+
+@pytest.mark.parametrize(
+    ('code', 'too_large'),
+    [
+        (KafkaError.MSG_SIZE_TOO_LARGE, True),
+        (KafkaError.RECORD_LIST_TOO_LARGE, True),
+        (KafkaError.UNKNOWN_TOPIC_OR_PART, False),
+        (KafkaError._MSG_TIMED_OUT, False),
+    ],
+)
+async def test_too_large_error_is_marked(producer, client, code, too_large):
+    client.fail_next_deliveries(KafkaError(code))
+    with pytest.raises(SplitProduceError) as reported:
+        await producer.publish(TOPIC, record())
+    assert reported.value.too_large is too_large
+    client.fail_next('produce', KafkaException(KafkaError(code)))
+    with pytest.raises(SplitProduceError) as refused:
+        await producer.enqueue(TOPIC, record())
+    assert refused.value.too_large is too_large
+    if too_large:
+        assert refused.value.final and reported.value.final
+
+
+def test_produce_error_is_not_too_large_by_default():
+    assert SplitProduceError('x', final=True).too_large is False
+
+
 @pytest.mark.parametrize(
     ('code', 'expected_final'),
     [

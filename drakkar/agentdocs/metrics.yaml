@@ -243,6 +243,14 @@
   related:
     - metric:drakkar_split_restoring_partitions
 
+- key: drakkar_split_http_jobs
+  summary: HTTP split jobs in the status map by state.
+  meaning: Every worker with split.http.enabled follows the status topic into memory; the states are accepted, running, done and failed. An ended job leaves the map split.http.result_retention after its last status.
+  healthy: done and failed follow the request rate times the retention; accepted stays small.
+  related:
+    - config:split.http.result_retention
+    - config:split.http.status_topic
+
 - key: drakkar_total_queued
   summary: Messages in all partition queues plus tasks in flight.
   meaning: The total work held by the worker.

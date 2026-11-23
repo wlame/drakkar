@@ -1,4 +1,4 @@
-"""The start check of the two internal topics of the split feature, and the real broker queries it uses."""
+"""The start checks of the internal topics of the split feature, and the real broker queries they use."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from drakkar.models import ConfigurationError
 
 ADMIN_TIMEOUT_SECONDS = 10.0
 RETENTION_KEY = 'retention.ms'
+CLEANUP_POLICY_KEY = 'cleanup.policy'
+COMPACT_POLICY = 'compact'
 NO_RETENTION_LIMIT_MS = -1
 MS_PER_SECOND = 1000
 
@@ -40,6 +42,24 @@ def _retention_warning(topic: str, retention_ms: int, job_timeout_seconds: int) 
 
 def _unreadable_retention_warning(topic: str, error: Exception) -> str:
     return f"split: the retention of the topic '{topic}' could not be read: {error}"
+
+
+def _status_retention_warning(topic: str, retention_ms: int, result_retention_seconds: int) -> str:
+    return (
+        f"split.http.status_topic '{topic}' keeps records for {format_duration(retention_ms)}, "
+        f'less than split.http.result_retention ({format_duration(result_retention_seconds * MS_PER_SECOND)})'
+    )
+
+
+def _compact_policy_warning(topic: str, policy: str) -> str:
+    return (
+        f"split.http.status_topic '{topic}' has cleanup.policy={policy}; use delete: "
+        'compaction can keep an older status of a job and drop the end state'
+    )
+
+
+def _unreadable_policy_warning(topic: str, error: Exception) -> str:
+    return f"split: the cleanup.policy of the topic '{topic}' could not be read: {error}"
 
 
 async def check_split_topics(
@@ -91,6 +111,43 @@ async def _retention_warnings(
     return warnings
 
 
+async def check_status_topic(
+    topic: str,
+    *,
+    result_retention: int,
+    metadata: Callable[[], Awaitable[Mapping[str, int]]],
+    retention: Callable[[str], Awaitable[int | None]],
+    cleanup_policy: Callable[[str], Awaitable[str | None]],
+) -> list[str]:
+    """Check the status topic of HTTP split jobs; any partition count is fine.
+
+    Raises ``ConfigurationError`` when the topic does not exist. Returns the
+    warnings: a retention shorter than ``result_retention`` (seconds), a
+    cleanup policy with compaction, and one for each setting that could not
+    be read (that never raises).
+    """
+    if topic not in await metadata():
+        raise ConfigurationError(_missing_topic_message(topic))
+    warnings = []
+    try:
+        retention_ms = await retention(topic)
+    except Exception as exc:
+        # As for the other topics: the worker may not describe topic configs, and this check only warns.
+        warnings.append(_unreadable_retention_warning(topic, exc))
+    else:
+        limited = retention_ms is not None and retention_ms != NO_RETENTION_LIMIT_MS
+        if limited and retention_ms < result_retention * MS_PER_SECOND:
+            warnings.append(_status_retention_warning(topic, retention_ms, result_retention))
+    try:
+        policy = await cleanup_policy(topic)
+    except Exception as exc:
+        warnings.append(_unreadable_policy_warning(topic, exc))
+    else:
+        if policy is not None and COMPACT_POLICY in (part.strip() for part in policy.split(',')):
+            warnings.append(_compact_policy_warning(topic, policy))
+    return warnings
+
+
 def _admin_config(connection: KafkaConnectionConfig) -> dict[str, Any]:
     return merge_client_config({'bootstrap.servers': connection.brokers}, connection.security, connection.client_config)
 
@@ -111,6 +168,15 @@ def topic_partition_counts(
     return counts
 
 
+def _topic_config_value(connection: KafkaConnectionConfig, admin_factory: Callable[[dict], Any], topic: str, key: str):
+    """The value of one config entry of ``topic``, or None when the broker names none; a blocking call."""
+    admin = admin_factory(_admin_config(connection))
+    resource = ConfigResource(ConfigResource.Type.TOPIC, topic)
+    entries = admin.describe_configs([resource])[resource].result(timeout=ADMIN_TIMEOUT_SECONDS)
+    entry = entries.get(key)
+    return entry.value if entry is not None else None
+
+
 def topic_retention_ms(
     connection: KafkaConnectionConfig, *, admin_factory: Callable[[dict], Any] = AdminClient
 ) -> Callable[[str], Awaitable[int | None]]:
@@ -121,13 +187,24 @@ def topic_retention_ms(
     """
 
     def read(topic: str) -> int | None:
-        admin = admin_factory(_admin_config(connection))
-        resource = ConfigResource(ConfigResource.Type.TOPIC, topic)
-        entries = admin.describe_configs([resource])[resource].result(timeout=ADMIN_TIMEOUT_SECONDS)
-        entry = entries.get(RETENTION_KEY)
-        return int(entry.value) if entry is not None and entry.value is not None else None
+        value = _topic_config_value(connection, admin_factory, topic, RETENTION_KEY)
+        return int(value) if value is not None else None
 
     async def retention(topic: str) -> int | None:
         return await asyncio.to_thread(read, topic)
 
     return retention
+
+
+def topic_cleanup_policy(
+    connection: KafkaConnectionConfig, *, admin_factory: Callable[[dict], Any] = AdminClient
+) -> Callable[[str], Awaitable[str | None]]:
+    """A ``cleanup_policy`` callable for ``check_status_topic``: the blocking client call runs on a thread.
+
+    A read the broker refuses raises ``KafkaException``; ``check_status_topic`` turns it into a warning.
+    """
+
+    async def cleanup_policy(topic: str) -> str | None:
+        return await asyncio.to_thread(_topic_config_value, connection, admin_factory, topic, CLEANUP_POLICY_KEY)
+
+    return cleanup_policy

@@ -6,7 +6,7 @@ A worker with `agent.enabled: true` serves the same entries on `GET /api/v1/agen
 
 PromQL queries keep the placeholders `{{worker}}` and `{{cluster}}`. A worker fills them from `ui.prometheus.worker_label` and `ui.prometheus.cluster_label`.
 
-Registry version: `3065b09c198cfc1d`.
+Registry version: `f75afdda4c468438`.
 
 ## Concepts
 
@@ -1253,6 +1253,16 @@ Seconds to restore the split jobs of one source partition.
 **Healthy:** Seconds, not minutes.
 
 **Related:** `metric:drakkar_split_restoring_partitions`
+
+### `metric:drakkar_split_http_jobs`
+
+HTTP split jobs in the status map by state.
+
+**Meaning:** Every worker with split.http.enabled follows the status topic into memory; the states are accepted, running, done and failed. An ended job leaves the map split.http.result_retention after its last status.
+
+**Healthy:** done and failed follow the request rate times the retention; accepted stays small.
+
+**Related:** `config:split.http.result_retention`, `config:split.http.status_topic`
 
 ### `metric:drakkar_total_queued`
 

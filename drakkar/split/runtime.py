@@ -1,4 +1,5 @@
-"""What one worker holds for the split feature: the producer, the job tracker, the owners and the resolved names."""
+"""What one worker holds for the split feature: the producer, the job tracker, the owners, the resolved names,
+and, with ``split.http.enabled``, the status follower of HTTP jobs."""
 
 from __future__ import annotations
 
@@ -12,11 +13,19 @@ from confluent_kafka import Producer
 from confluent_kafka.aio import AIOConsumer
 
 from drakkar.config import DrakkarConfig
+from drakkar.split.http_follower import StatusFollower
+from drakkar.split.http_status import StatusMap
 from drakkar.split.owner import OwnerHost, OwnerSettings, SplitOwner
 from drakkar.split.producer import SplitProducer
 from drakkar.split.reader import results_consumer_factory
 from drakkar.split.table import JobState, JobTable
-from drakkar.split.topics import check_split_topics, topic_partition_counts, topic_retention_ms
+from drakkar.split.topics import (
+    check_split_topics,
+    check_status_topic,
+    topic_cleanup_policy,
+    topic_partition_counts,
+    topic_retention_ms,
+)
 from drakkar.split.tracker import JobTracker, TimeoutKind
 
 if TYPE_CHECKING:
@@ -31,6 +40,75 @@ MIN_PRODUCER_CLOSE_SECONDS = 0.5
 
 TopicCounts = Callable[[], Awaitable[Mapping[str, int]]]
 TopicRetention = Callable[[str], Awaitable[int | None]]
+TopicCleanupPolicy = Callable[[str], Awaitable[str | None]]
+
+
+def _close_seconds(deadline: float) -> float:
+    """The time a producer gets to deliver what it still holds: what is left to ``deadline`` (monotonic), bounded."""
+    return min(max(deadline - time.monotonic(), MIN_PRODUCER_CLOSE_SECONDS), PRODUCER_CLOSE_SECONDS)
+
+
+class HttpJobsRuntime:
+    """What a worker holds for split jobs that arrive over HTTP.
+
+    The status map and its follower read the status topic on the split
+    connection. ``source_producer`` writes the request into the source topic:
+    the split producer when the source and the split topics share their
+    connection, else a producer of its own on the source connection.
+    """
+
+    def __init__(
+        self,
+        config: DrakkarConfig,
+        *,
+        split_connection_producer: SplitProducer,
+        group: str,
+        producer_factory: Callable[[dict], Any],
+        consumer_factory: Callable[[dict], Any],
+        clock: Callable[[], float],
+        sleep: Callable[[float], Awaitable[None]],
+    ) -> None:
+        http = config.split.http
+        self.status_topic = http.status_topic
+        self.source_topic = config.sources.kafka.topic
+        self.result_retention = http.result_retention
+        self.max_response = http.max_response
+        self.deliver_sinks_default = config.sources.http.deliver_to_sinks
+        self.status_map = StatusMap(http.result_retention)
+        split_connection = config.declared_connection('split.connection', 'kafka', config.split.connection)
+        self.follower = StatusFollower(
+            connection=split_connection,
+            topic=self.status_topic,
+            group=group,
+            status_map=self.status_map,
+            consumer_factory=consumer_factory,
+            clock=clock,
+            sleep=sleep,
+        )
+        # The request must reach the cluster of the source topic, which can be another one than that of the split topics.
+        self.owns_source_producer = config.sources.kafka.connection != config.split.connection
+        if self.owns_source_producer:
+            source_connection = config.declared_connection(
+                'sources.kafka.connection', 'kafka', config.sources.kafka.connection
+            )
+            self.source_producer = SplitProducer(source_connection, producer_factory=producer_factory)
+        else:
+            self.source_producer = split_connection_producer
+
+    async def start(self) -> None:
+        """Start the source producer when it is one of its own, and the follower."""
+        if self.owns_source_producer:
+            await self.source_producer.start()
+        self.follower.start()
+
+    async def stop(self) -> None:
+        """Stop the follower."""
+        await self.follower.stop()
+
+    async def close_source_producer(self, deadline: float) -> None:
+        """Close the source producer when it is one of its own, with the time left to ``deadline`` (monotonic)."""
+        if self.owns_source_producer:
+            await self.source_producer.close(_close_seconds(deadline))
 
 
 class _OwnerEvents:
@@ -119,10 +197,12 @@ class SplitRuntime:
         producer_factory: Callable[[dict], Any] = Producer,
         metadata: TopicCounts | None = None,
         retention: TopicRetention | None = None,
+        cleanup_policy: TopicCleanupPolicy | None = None,
         consumer_factory: Callable[[dict], Any] = AIOConsumer,
         results_reader: Callable[[], Any] | None = None,
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        http_enabled: bool = False,
     ) -> None:
         self._config = config
         self.worker = worker
@@ -139,6 +219,7 @@ class SplitRuntime:
         self.parts_partition_count = 0
         self._metadata = metadata if metadata is not None else topic_partition_counts(self.connection)
         self._retention = retention if retention is not None else topic_retention_ms(self.connection)
+        self._cleanup_policy = cleanup_policy if cleanup_policy is not None else topic_cleanup_policy(self.connection)
         self._results_reader = (
             results_reader
             if results_reader is not None
@@ -162,12 +243,25 @@ class SplitRuntime:
         )
         # The start of the job tracker, made by the first ``follow``; None until then.
         self._tracker_start: asyncio.Task[None] | None = None
+        # HTTP split jobs: only when the app turned them on before ``on_startup`` and the config still has them.
+        self.http: HttpJobsRuntime | None = None
+        if http_enabled and config.split.http.enabled:
+            self.http = HttpJobsRuntime(
+                config,
+                split_connection_producer=self.producer,
+                group=self.results_group,
+                producer_factory=producer_factory,
+                consumer_factory=consumer_factory,
+                clock=clock,
+                sleep=sleep,
+            )
 
     async def start(self) -> None:
-        """Start the producer and check the two topics.
+        """Start the producer and check the topics; with HTTP jobs, also start following the status topic.
 
         The job tracker starts with the first source partition it follows: a
-        worker that owns no source partition reads no results.
+        worker that owns no source partition reads no results. The restore
+        of the status map runs in the background.
 
         Raises:
             ConfigurationError: a topic does not exist, or the results topic has another
@@ -181,6 +275,14 @@ class SplitRuntime:
 
         warnings = await check_split_topics(self._config, metadata=read_counts, retention=self._retention)
         self.parts_partition_count = counts[self.parts_topic]
+        if self.http is not None:
+            warnings += await check_status_topic(
+                self.http.status_topic,
+                result_retention=self.http.result_retention,
+                metadata=read_counts,
+                retention=self._retention,
+                cleanup_policy=self._cleanup_policy,
+            )
         for detail in warnings:
             await logger.awarning('split_topic_retention_short', category='split', detail=detail)
         await logger.ainfo(
@@ -191,6 +293,14 @@ class SplitRuntime:
             parts_group=self.parts_group,
             results_group=self.results_group,
         )
+        if self.http is not None:
+            await self.http.start()
+            await logger.ainfo(
+                'split_http_enabled',
+                category='split',
+                status_topic=self.http.status_topic,
+                result_retention_seconds=self.http.result_retention,
+            )
 
     def owners(self) -> dict[int, SplitOwner]:
         """The owners of the split jobs, by source partition; a copy, read-only."""
@@ -275,15 +385,20 @@ class SplitRuntime:
             self.tracker.note_source_commit(partition, offset)
 
     async def stop(self, deadline: float) -> None:
-        """Stop the job tracker, then close the producer.
+        """Stop the status follower and the job tracker, then close the producers.
 
-        What the producer still holds gets the time left to ``deadline``
+        What a producer still holds gets the time left to ``deadline``
         (monotonic), within bounds.
         """
         self._events.clear()
         try:
+            if self.http is not None:
+                await self.http.stop()
             if self._tracker_start is not None:
                 await self.tracker.stop()
         finally:
-            time_left = deadline - time.monotonic()
-            await self.producer.close(min(max(time_left, MIN_PRODUCER_CLOSE_SECONDS), PRODUCER_CLOSE_SECONDS))
+            try:
+                await self.producer.close(_close_seconds(deadline))
+            finally:
+                if self.http is not None:
+                    await self.http.close_source_producer(deadline)

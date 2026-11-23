@@ -1285,7 +1285,9 @@ class AppLifecycle:
     def _build_split_runtime(self) -> SplitRuntime:
         """The split runtime of this worker, from the config in effect after ``on_startup``."""
         app = self._app
-        return SplitRuntime(app._config, worker=app._worker_id, instance=app._instance)
+        return SplitRuntime(
+            app._config, worker=app._worker_id, instance=app._instance, http_enabled=app._split_http_enabled
+        )
 
     async def _warn_ignored_source_config(self) -> None:
         """A disabled source block with invalid values is ignored, not fatal — say so once.

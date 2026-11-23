@@ -36,6 +36,7 @@ CLOSED_MESSAGE = 'the split producer was closed before the record was delivered'
 FINAL_ERROR_CODES: frozenset[int] = frozenset(
     {
         KafkaError.MSG_SIZE_TOO_LARGE,
+        KafkaError.RECORD_LIST_TOO_LARGE,
         KafkaError.UNKNOWN_TOPIC_OR_PART,
         KafkaError.TOPIC_AUTHORIZATION_FAILED,
         KafkaError.CLUSTER_AUTHORIZATION_FAILED,
@@ -47,12 +48,21 @@ FINAL_ERROR_CODES: frozenset[int] = frozenset(
 )
 
 
-class SplitProduceError(Exception):
-    """A record was not delivered. ``final`` is true when sending it again cannot work."""
+# Errors that say the record or its batch is larger than the client or the broker takes.
+TOO_LARGE_ERROR_CODES: frozenset[int] = frozenset({KafkaError.MSG_SIZE_TOO_LARGE, KafkaError.RECORD_LIST_TOO_LARGE})
 
-    def __init__(self, message: str, *, final: bool) -> None:
+
+class SplitProduceError(Exception):
+    """A record was not delivered.
+
+    ``final`` is true when sending it again cannot work; ``too_large`` is true
+    when the record is larger than the client or the broker takes.
+    """
+
+    def __init__(self, message: str, *, final: bool, too_large: bool = False) -> None:
         super().__init__(message)
         self.final = final
+        self.too_large = too_large
 
 
 def is_final_error(error: KafkaError) -> bool:
@@ -63,7 +73,7 @@ def is_final_error(error: KafkaError) -> bool:
 
 
 def _produce_error(error: KafkaError) -> SplitProduceError:
-    return SplitProduceError(str(error), final=is_final_error(error))
+    return SplitProduceError(str(error), final=is_final_error(error), too_large=error.code() in TOO_LARGE_ERROR_CODES)
 
 
 def _report_error(error: KafkaError | None, message: Message | None) -> KafkaError | SplitProduceError | None:
@@ -103,7 +113,8 @@ class SplitProducer:
             self._connection.security,
             self._connection.client_config,
         )
-        config.update({'acks': 'all', 'enable.idempotence': True, 'linger.ms': 5})
+        # The partitioner is pinned: a record with no partition must land where every worker puts the same key.
+        config.update({'acks': 'all', 'enable.idempotence': True, 'linger.ms': 5, 'partitioner': 'consistent_random'})
         return config
 
     async def start(self) -> None:

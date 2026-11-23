@@ -9,7 +9,13 @@ from confluent_kafka import KafkaError, KafkaException
 from drakkar.config import DrakkarConfig
 from drakkar.config.connections import KafkaConnectionConfig
 from drakkar.models import ConfigurationError
-from drakkar.split.topics import check_split_topics, topic_partition_counts, topic_retention_ms
+from drakkar.split.topics import (
+    check_split_topics,
+    check_status_topic,
+    topic_cleanup_policy,
+    topic_partition_counts,
+    topic_retention_ms,
+)
 from tests.conftest import kafka_connections
 
 PARTS = 'items_g_split_parts'
@@ -100,7 +106,10 @@ class FakeAdmin:
             entries = (
                 {}
                 if topic == 'bare'
-                else {'retention.ms': SimpleNamespace(value='abc' if topic == 'malformed' else '60000')}
+                else {
+                    'retention.ms': SimpleNamespace(value='abc' if topic == 'malformed' else '60000'),
+                    'cleanup.policy': SimpleNamespace(value='compact,delete'),
+                }
             )
             future.set_result(entries)
         return {resources[0]: future}
@@ -154,3 +163,82 @@ async def test_malformed_retention_value_from_the_real_query_is_a_warning():
 
     warnings = await check_split_topics(make_config(job_timeout='24h'), metadata=metadata, retention=retention)
     assert warnings[0].startswith(f"split: the retention of the topic '{PARTS}' could not be read: ")
+
+
+STATUS = 'items_status'
+DAY_SECONDS = 86400
+
+
+def status_check(counts: dict[str, int], retention_ms: int | None = None, policy: str | None = 'delete'):
+    async def metadata():
+        return counts
+
+    async def retention(topic: str):
+        assert topic == STATUS
+        return retention_ms
+
+    async def cleanup_policy(topic: str):
+        assert topic == STATUS
+        return policy
+
+    return {'metadata': metadata, 'retention': retention, 'cleanup_policy': cleanup_policy}
+
+
+async def test_status_topic_missing_fails():
+    with pytest.raises(ConfigurationError) as raised:
+        await check_status_topic(STATUS, result_retention=DAY_SECONDS, **status_check({'items': 1}))
+    assert str(raised.value) == f"split: the topic '{STATUS}' does not exist; create it before the worker starts"
+
+
+async def test_status_topic_short_retention_warns():
+    warnings = await check_status_topic(
+        STATUS, result_retention=DAY_SECONDS, **status_check({STATUS: 1}, retention_ms=HOUR_MS)
+    )
+    assert warnings == [
+        f"split.http.status_topic '{STATUS}' keeps records for 1h, less than split.http.result_retention (1d)"
+    ]
+
+
+@pytest.mark.parametrize('retention_ms', [None, -1, 24 * HOUR_MS, 48 * HOUR_MS])
+async def test_status_topic_long_or_unlimited_retention_gives_no_warning(retention_ms):
+    check = status_check({STATUS: 1}, retention_ms=retention_ms)
+    assert await check_status_topic(STATUS, result_retention=DAY_SECONDS, **check) == []
+
+
+@pytest.mark.parametrize('policy', ['compact', 'compact,delete', 'delete,compact'])
+async def test_status_topic_compact_warns(policy):
+    warnings = await check_status_topic(
+        STATUS, result_retention=DAY_SECONDS, **status_check({STATUS: 1}, policy=policy)
+    )
+    assert warnings == [
+        f"split.http.status_topic '{STATUS}' has cleanup.policy={policy}; use delete: "
+        'compaction can keep an older status of a job and drop the end state'
+    ]
+
+
+@pytest.mark.parametrize('count', [1, 3, 50])
+async def test_status_topic_any_partition_count(count):
+    check = status_check({STATUS: count, 'items': 4})
+    assert await check_status_topic(STATUS, result_retention=DAY_SECONDS, **check) == []
+
+
+async def test_status_topic_unreadable_settings_are_warnings():
+    async def metadata():
+        return {STATUS: 1}
+
+    async def fails(topic: str):
+        raise KafkaException('no right to describe configs')
+
+    warnings = await check_status_topic(
+        STATUS, result_retention=DAY_SECONDS, metadata=metadata, retention=fails, cleanup_policy=fails
+    )
+    assert warnings == [
+        f"split: the retention of the topic '{STATUS}' could not be read: no right to describe configs",
+        f"split: the cleanup.policy of the topic '{STATUS}' could not be read: no right to describe configs",
+    ]
+
+
+async def test_cleanup_policy_is_read_and_none_when_unset():
+    read = topic_cleanup_policy(KafkaConnectionConfig(), admin_factory=FakeAdmin)
+    assert await read('x') == 'compact,delete'
+    assert await read('bare') is None

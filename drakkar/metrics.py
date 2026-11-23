@@ -453,6 +453,12 @@ split_restore_duration = Histogram(
     buckets=(0.05, 0.25, 1, 5, 15, 60, 300),
 )
 
+split_http_jobs = Gauge(
+    'drakkar_split_http_jobs',
+    'HTTP split jobs in the status map by state',
+    ['state'],
+)
+
 total_queued = Gauge(
     'drakkar_total_queued',
     'Total messages buffered in partition queues plus in-flight tasks',

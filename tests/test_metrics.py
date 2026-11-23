@@ -1098,6 +1098,14 @@ def test_split_parts_gauges_have_their_names_and_help():
     )
 
 
+def test_split_http_jobs_gauge_has_its_name_help_and_state_label():
+    from drakkar.metrics import split_http_jobs
+
+    assert split_http_jobs._name == 'drakkar_split_http_jobs'
+    assert split_http_jobs._documentation == 'HTTP split jobs in the status map by state'
+    assert split_http_jobs._labelnames == ('state',)
+
+
 async def test_split_parts_gauges_sum_known_parts_of_live_partitions():
     from confluent_kafka import KafkaException as RawKafkaException
 
