@@ -52,6 +52,9 @@ logger = structlog.get_logger()
 RESULTS_RETRY_SECONDS = 30.0
 MAX_RESULTS_RETRIES = 20
 
+# The error of the ``failed`` status of an HTTP job whose aggregate sink put the message on the DLQ.
+AGGREGATE_SINK_FAILED = 'an aggregate sink failed'
+
 SleepFn = Callable[[float], Awaitable[None]]
 # How a ``closed`` write ended: acknowledged, refused for good, or given up at a stop.
 # How the write of a ``closed`` record ended without the record: it can never be written, or a stop ended the retries.
@@ -302,6 +305,8 @@ class JobEnder:
             may_complete = await self._deliver(answer, message, state)
             # A failing aggregate sink under ``on_failure: dlq`` put the original message on the DLQ.
             sent_to_dlq = state.dlq_written or state.dlq_lost
+            if sent_to_dlq:
+                dlq_error = AGGREGATE_SINK_FAILED
         elif answer is JobAction.DLQ:
             dlq_fields = self._dlq_fields(facts, timed_out)
             dlq_error = dlq_fields['error']

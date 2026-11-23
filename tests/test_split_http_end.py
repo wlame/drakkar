@@ -87,13 +87,20 @@ class HttpWorker:
     ``('results', kind)`` when a record of the results log is written, and
     ``('complete', offset)`` when the processor completes an offset.
     ``status_errors`` are the delivery errors of the next status records.
+    While ``hold_status`` is set, the delivery of every status record waits
+    in ``held_status`` (``('status_held', None)`` in ``events``) until
+    :meth:`release_status`.
     """
 
-    def __init__(self, world: World, handler: Any, *, max_response: int = 65536, **options: Any) -> None:
+    def __init__(
+        self, world: World, handler: Any, *, max_response: int = 65536, hold_status: bool = False, **options: Any
+    ) -> None:
         self.world = world
         self.worker = OwnerWorker(world, handler, http_jobs=True, **options)
         self.events: list[tuple[str, Any]] = []
         self.status_errors: deque[KafkaError] = deque()
+        self.hold_status = hold_status
+        self.held_status: list[Any] = []
         self.status_map = StatusMap(86400)
         writer = StatusWriter(
             self.worker.runtime.producer,
@@ -118,6 +125,10 @@ class HttpWorker:
         deliver = client._deliver
 
         def recorded(item: Any) -> None:
+            if item.topic == STATUS_TOPIC and self.hold_status:
+                self.events.append(('status_held', None))
+                self.held_status.append(item)
+                return
             if item.topic == STATUS_TOPIC and self.status_errors:
                 self.events.append(('status_refused', None))
                 item.on_delivery(self.status_errors.popleft(), FakeMessage(topic=item.topic, partition=item.partition))
@@ -131,6 +142,14 @@ class HttpWorker:
                 self.events.append(('results', None if entry is None else entry.kind))
 
         client._deliver = recorded  # ty: ignore[invalid-assignment]
+        self._deliver_recorded = recorded
+
+    def release_status(self) -> None:
+        """Deliver the held status records, in order, and stop holding new ones."""
+        self.hold_status = False
+        held, self.held_status = self.held_status, []
+        for item in held:
+            self._deliver_recorded(item)
 
     def _wrap_completions(self) -> None:
         tracker = self.worker.processor.offset_tracker
@@ -189,8 +208,8 @@ async def timed_out_job(world: World, worker: OwnerWorker) -> None:
 # --- every path that ends an HTTP job ---
 
 
-async def _run_path(path: str) -> tuple[HttpWorker, str | None]:
-    """Run one end path to its end; the worker, and the ``closed`` outcome the path writes (None for none)."""
+async def _start_path(path: str, *, hold_status: bool = False) -> tuple[HttpWorker, str | None]:
+    """Start one end path up to its last wait; the worker, and the ``closed`` outcome it writes (None for none)."""
     world = World()
     if path in ('aggregated', 'aggregate_dlq', 'aggregate_raised', 'job_action_dlq'):
         answers = {
@@ -200,49 +219,63 @@ async def _run_path(path: str) -> tuple[HttpWorker, str | None]:
             'job_action_dlq': JobAction.DLQ,
         }
         handler = SplittingHandler({500: items(2)}, answer=answers[path])
-        http = await HttpWorker(world, handler, aggregate_sink_fails=path == 'aggregate_dlq').start(http_message())
+        http = HttpWorker(world, handler, aggregate_sink_fails=path == 'aggregate_dlq', hold_status=hold_status)
+        await http.start(http_message())
         await wait_until(lambda: world.kinds() == ['open', 'split-done'])
         world.report_all()
-        await wait_until(lambda: http.worker.committed == 501)
         return http, 'aggregated' if path == 'aggregated' else 'dlq'
     if path == 'timeout':
         handler = SplittingHandler({500: items(3)})
-        http = HttpWorker(world, handler, config=owner_config(job_timeout='1m'))
+        http = HttpWorker(world, handler, config=owner_config(job_timeout='1m'), hold_status=hold_status)
         await http.start(http_message())
         await wait_until(lambda: world.kinds() == ['open', 'split-done'])
         await timed_out_job(world, http.worker)
-        await wait_until(lambda: http.worker.committed == 501)
         return http, 'timeout'
     if path == 'failed_split':
-        http = await HttpWorker(world, SplittingHandler({500: [RuntimeError('boom')]})).start(http_message())
-        await wait_until(lambda: http.worker.committed == 501)
+        http = HttpWorker(world, SplittingHandler({500: [RuntimeError('boom')]}), hold_status=hold_status)
+        await http.start(http_message())
         return http, 'split_failed'
     if path == 'spent_attempts':
         world.put_open(500, FIRST)
-        http = HttpWorker(world, SplittingHandler({500: items(1)}), config=owner_config(max_attempts=1))
+        http = HttpWorker(
+            world, SplittingHandler({500: items(1)}), config=owner_config(max_attempts=1), hold_status=hold_status
+        )
         await http.start(http_message())
-        await wait_until(lambda: http.worker.committed == 501)
         return http, 'attempts_spent'
     if path == 'orphan':
         complete_job(world)
-        http = HttpWorker(world, SplittingHandler(answer=summary()))
+        http = HttpWorker(world, SplittingHandler(answer=summary()), hold_status=hold_status)
         put_known(http, 500)
         await http.start(source_message(502))
-        await wait_until(lambda: http.worker.committed == 503 and 'closed' in world.kinds())
         return http, 'orphaned'
     if path == 'local_done':
-        http = await HttpWorker(world, SplittingHandler(answer=summary())).start(http_message())
-        await wait_until(lambda: http.worker.committed == 501)
+        http = await HttpWorker(world, SplittingHandler(answer=summary()), hold_status=hold_status).start(
+            http_message()
+        )
         return http, None
     if path == 'local_dlq':
-        http = await HttpWorker(world, ArrangeFails()).start(http_message())
-        await wait_until(lambda: http.worker.committed == 501)
+        http = await HttpWorker(world, ArrangeFails(), hold_status=hold_status).start(http_message())
         return http, None
     policy = 'dlq' if path == 'parse_dlq' else 'skip'
-    http = HttpWorker(world, ParsingHandler({500: items(1)}), config=owner_config(on_parse_error=policy))
+    http = HttpWorker(
+        world, ParsingHandler({500: items(1)}), config=owner_config(on_parse_error=policy), hold_status=hold_status
+    )
     await http.start(http_message(value=NOT_JSON))
-    await wait_until(lambda: http.worker.committed == 501)
     return http, None
+
+
+def _path_ended(http: HttpWorker, path: str) -> bool:
+    """Whether a path started by :func:`_start_path` has ended: its offset committed (and, for an orphan, closed)."""
+    if path == 'orphan':
+        return http.worker.committed == 503 and 'closed' in http.world.kinds()
+    return http.worker.committed == 501
+
+
+async def _run_path(path: str) -> tuple[HttpWorker, str | None]:
+    """Run one end path to its end; the worker, and the ``closed`` outcome the path writes (None for none)."""
+    http, closed = await _start_path(path)
+    await wait_until(lambda: _path_ended(http, path))
+    return http, closed
 
 
 def put_known(http: HttpWorker, offset: int) -> None:
@@ -287,6 +320,26 @@ async def test_every_end_path_acknowledges_status_before_closed_or_completion(pa
     await http.worker.stop()
 
 
+@pytest.mark.parametrize('path', ['aggregated', 'local_done', 'failed_split', 'parse_dlq', 'parse_skip'])
+async def test_held_status_delivery_holds_closed_and_completion(path):
+    http, closed = await _start_path(path, hold_status=True)
+    await wait_until(lambda: ('status_held', None) in http.events)
+    # The owner had every chance to go on: only the acknowledgement of the status is missing.
+    await asyncio.sleep(0.2)
+
+    assert 'closed' not in http.world.kinds()
+    assert not [event for event in http.events if event[0] == 'complete']
+
+    http.release_status()
+    await wait_until(lambda: _path_ended(http, path))
+
+    released_at = http.index(('status', 'failed' if path not in ('aggregated', 'local_done') else 'done'))
+    if closed is not None:
+        assert released_at < http.index(('results', 'closed'))
+    assert released_at < http.index(('complete', 500))
+    await http.worker.stop()
+
+
 @pytest.mark.parametrize('path', [path for path, (state, _) in END_PATHS.items() if state == 'failed'])
 async def test_failed_outcomes_map(path):
     http, _ = await _run_path(path)
@@ -302,6 +355,7 @@ async def test_failed_outcomes_map(path):
     ('path', 'error'),
     [
         ('aggregate_raised', 'aggregate failed: bad sum'),
+        ('aggregate_dlq', 'an aggregate sink failed'),
         ('job_action_dlq', 'aggregate chose the DLQ: 0 of 2 parts failed'),
         ('timeout', 'job timed out after 1m1s: 0 of 3 parts'),
         ('failed_split', 'split failed: boom'),
@@ -653,6 +707,29 @@ async def test_orphan_status_not_acknowledged_writes_no_closed():
     await http.worker.stop()
 
     assert 'closed' not in world.kinds() and http.statuses() == []
+
+
+async def test_orphan_keeps_a_stored_end_status_and_writes_only_closed():
+    world = World()
+    complete_job(world)
+    http = HttpWorker(world, SplittingHandler(answer=summary()))
+    done = StatusRecord(
+        request_id=REQUEST_ID,
+        state='done',
+        partition=PARTITION,
+        offset=500,
+        client=CLIENT,
+        updated_at=world.seconds(),
+        result_json='7',
+    )
+    http.status_map.put(done, now=world.seconds())
+    await http.start(source_message(502))
+    await wait_until(lambda: 'closed' in world.kinds())
+
+    assert world.closed()[0]['outcome'] == 'orphaned'
+    assert http.statuses() == []
+    assert http.status_map.get(REQUEST_ID) == done
+    await http.worker.stop()
 
 
 async def test_orphan_status_carries_the_client_and_the_parts_of_the_job():

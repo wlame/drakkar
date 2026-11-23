@@ -845,7 +845,8 @@ class SplitOwner:
         HTTP job and whose: the map must hold the request id of the job's
         ``open`` with this very job. The map is read only once it is
         restored. A job the map does not know is a job of the source topic,
-        and writes no status.
+        and writes no status. A job whose end state the map holds already
+        keeps it: only ``closed`` is written.
         """
         side = self._settings.status
         if side is None or job.request_id is None:
@@ -854,6 +855,9 @@ class SplitOwner:
             return False
         known = side.status_map.get(job.request_id)
         if known is None or known.job != f'{self._partition}:{job.offset}':
+            return True
+        if known.is_ended:
+            # An earlier owner wrote the end state and stopped before ``closed``; the client may have read it.
             return True
         record = StatusRecord(
             request_id=job.request_id,
