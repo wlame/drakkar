@@ -33,6 +33,24 @@ sources:
       enabled: true
       lease: 40s
       cooldown: "0"
+  # The HTTP door of split jobs (scenario-split-http.sh): a POST stores the
+  # request as one message of split-requests and answers with its id; a GET
+  # with ?request_id= reads the job's status from split-requests_status.
+  # Sinks stay off for these jobs (deliver_to_sinks defaults to false).
+  http:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8090
+    path: "/jobs"
+    request_timeout: 30s
+    max_concurrent: 16
+    clients:
+      - name: tenant-a
+        token: "integration-split-tenant-a-token-do-not-use-in-prod"
+        rpm: 600
+      - name: tenant-b
+        token: "integration-split-tenant-b-token-do-not-use-in-prod"
+        rpm: 600
 
 split:
   enabled: true
@@ -40,6 +58,10 @@ split:
   # Overridden from the environment (DK_SPLIT__JOB_TIMEOUT): the scenario
   # runs one check with a short timeout.
   job_timeout: 5m
+  # Every worker of the group sets this alike.
+  http:
+    enabled: true
+    status_topic: "split-requests_status"
 
 executor:
   binary_path: "/usr/local/bin/split-task"

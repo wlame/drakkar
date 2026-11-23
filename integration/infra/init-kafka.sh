@@ -46,6 +46,18 @@ for topic in \
         --replication-factor 1
 done
 
+# The status topic of the split worker's HTTP jobs: one record per change of
+# a job, read from the start by every split worker. The delete cleanup
+# policy is required (a compacted topic could keep a late `accepted` record
+# and drop the end state), and the retention covers the result retention.
+/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+    --create --if-not-exists \
+    --topic split-requests_status \
+    --partitions 3 \
+    --replication-factor 1 \
+    --config cleanup.policy=delete \
+    --config retention.ms=86400000
+
 echo "Topics created successfully"
 
 /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list

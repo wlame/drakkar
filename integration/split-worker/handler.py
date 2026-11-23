@@ -20,7 +20,12 @@ stop the owner while the split runs. ``fail_policy`` decides what a failed
 item does: ``dlq`` sends the message to the DLQ (``ErrorAction.DLQ``), any
 other value skips the task. The ``request_id`` hook gives the payload's
 ``request_id`` to every log line of a job, so a scenario finds the owner of a
-request in the logs (``split_job_opened``).
+request in the logs (``split_job_opened``); a request that comes over HTTP
+takes its id from the ``x-request-id`` header when it has one.
+
+Requests also arrive over HTTP (``POST /jobs``): such a request is a split job
+whose sinks are off, and ``http_job_result`` gives the client the items
+counted from ``job.results()`` and the number of parts.
 """
 
 import asyncio
@@ -39,6 +44,8 @@ HANG_SECONDS = 150
 ITEMS_SINK = 'split_items'
 SUMMARIES_SINK = 'split_summaries'
 WORKER_ID = os.environ.get('WORKER_ID', 'unknown')
+# The HTTP header that names the id of a job that comes over HTTP.
+REQUEST_ID_HEADER = 'x-request-id'
 
 
 class Item(BaseModel):
@@ -105,7 +112,14 @@ class SplitHandler(dk.BaseDrakkarHandler[SplitRequest, ItemRecord]):
         return f'{msg.partition}:{msg.offset}'
 
     def request_id(self, msg: dk.SourceMessage) -> str:
-        """The request id of the payload, so log lines of a job name the request."""
+        """The ``x-request-id`` header when there is one, else the request id of the payload.
+
+        So log lines of a job name the request, and an HTTP client can choose
+        the id of its job.
+        """
+        for name, value in msg.headers:
+            if name.lower() == REQUEST_ID_HEADER and value:
+                return value.decode('utf-8')
         if msg.payload is not None:
             return msg.payload.request_id
         return super().request_id(msg)
@@ -184,3 +198,13 @@ class SplitHandler(dk.BaseDrakkarHandler[SplitRequest, ItemRecord]):
         return dk.CollectResult(
             kafka=[dk.KafkaPayload(sink=SUMMARIES_SINK, data=summary, key=request.request_id.encode())],
         )
+
+    async def http_job_result(self, job: dk.SplitJob) -> dict:
+        """The result an HTTP client reads: the items counted from the part results, and the parts."""
+        items = 0
+        async for result in job.results():
+            if isinstance(result.data, PartCounts):
+                items += result.data.items
+        if job.local:
+            return {'items': items}
+        return {'items': items, 'parts': job.total_parts}

@@ -696,7 +696,9 @@ services:
   # own (the detach budget). scenario-split.sh starts them, kills and
   # restarts them, and removes them; a plain `just integration-up` does not
   # start them. The job timeout comes from SPLIT_JOB_TIMEOUT, so the
-  # scenario can recreate the workers with a short one.
+  # scenario can recreate the workers with a short one. Each worker also
+  # serves split jobs over HTTP on port 8090, published as 8120 to 8122
+  # (scenario-split-http.sh), with the status topic split-requests_status.
   split-worker-1:
     profiles: ["split"]
     build:
@@ -722,6 +724,8 @@ services:
     ports:
       - "9111:9111"
       - "8110:8110"
+      # The HTTP source of split jobs (port 8090 in the container).
+      - "8120:8090"
     volumes:
       - split-shared:/split-shared
 
@@ -745,6 +749,8 @@ services:
     ports:
       - "9112:9112"
       - "8111:8111"
+      # The HTTP source of split jobs (port 8090 in the container).
+      - "8121:8090"
     volumes:
       - split-shared:/split-shared
 
@@ -766,6 +772,8 @@ services:
     ports:
       - "9113:9113"
       - "8112:8112"
+      # The HTTP source of split jobs (port 8090 in the container).
+      - "8122:8090"
     volumes:
       - split-shared:/split-shared
 
