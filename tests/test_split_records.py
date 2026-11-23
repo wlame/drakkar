@@ -268,8 +268,9 @@ def _http_part_record(*, deliver_sinks):
 
 @pytest.mark.parametrize(('deliver_sinks', 'text'), [(True, b'on'), (False, b'off')])
 def test_part_record_of_http_job_has_sinks_header_after_origin(deliver_sinks, text):
-    names = [name for name, _ in _http_part_record(deliver_sinks=deliver_sinks).headers]
-    headers = dict(_http_part_record(deliver_sinks=deliver_sinks).headers)
+    record = _http_part_record(deliver_sinks=deliver_sinks)
+    names = [name for name, _ in record.headers]
+    headers = dict(record.headers)
 
     assert headers['dk-split-sinks'] == text
     assert names.index('dk-split-sinks') == names.index('dk-split-origin') + 1

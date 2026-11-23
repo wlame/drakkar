@@ -211,7 +211,7 @@ def closed_body(*, outcome: ClosedOutcome, received: int, parts: int | None, dur
     return {'outcome': outcome, 'received': received, 'parts': parts, 'duration_seconds': duration_seconds}
 
 
-def _header_map(headers: Sequence[Header] | None) -> dict[str, bytes | None]:
+def header_map(headers: Sequence[Header] | None) -> dict[str, bytes | None]:
     """The first value of each header name."""
     found: dict[str, bytes | None] = {}
     for name, value in headers or ():
@@ -227,7 +227,8 @@ def _decimal(raw: bytes | None) -> int | None:
     return number if number <= INT64_MAX else None
 
 
-def _utf8(raw: bytes | None) -> str | None:
+def utf8_text(raw: bytes | None) -> str | None:
+    """The UTF-8 text of a header value; None for no value or bytes that are not UTF-8."""
     if raw is None:
         return None
     try:
@@ -240,7 +241,8 @@ def _reject_constant(name: str) -> None:
     raise ValueError(f'{name} is not JSON')
 
 
-def _object(value: bytes | None) -> dict[str, Any] | None:
+def json_object(value: bytes | None) -> dict[str, Any] | None:
+    """The JSON object of a record value; None for no value, text that is not UTF-8 JSON, or another JSON type."""
     if value is None:
         return None
     try:
@@ -254,16 +256,16 @@ def _object(value: bytes | None) -> dict[str, Any] | None:
 
 def parse_log_record(headers: Sequence[Header] | None, value: bytes | None) -> LogEntry | None:
     """Read a results-log record; ``None`` for anything that is not a valid record of version 1."""
-    found = _header_map(headers)
+    found = header_map(headers)
     if found.get(H_VERSION) != SPLIT_VERSION.encode():
         return None
-    kind = _utf8(found.get(H_RECORD))
-    group = _utf8(found.get(H_GROUP))
-    attempt_id = _utf8(found.get(H_ATTEMPT_ID))
+    kind = utf8_text(found.get(H_RECORD))
+    group = utf8_text(found.get(H_GROUP))
+    attempt_id = utf8_text(found.get(H_ATTEMPT_ID))
     partition = _decimal(found.get(H_PARTITION))
     offset = _decimal(found.get(H_OFFSET))
     attempt = _decimal(found.get(H_ATTEMPT))
-    body = _object(value)
+    body = json_object(value)
     if kind not in RECORD_KINDS or not group or not attempt_id or body is None:
         return None
     if partition is None or offset is None or attempt is None:
@@ -302,7 +304,7 @@ def part_record(
     value: bytes,
     source_headers: Sequence[Header],
     partition_count: int,
-    origin: str = ORIGIN_KAFKA,
+    origin: Literal['kafka', 'http'] = ORIGIN_KAFKA,
     deliver_sinks: bool = True,
 ) -> WireRecord:
     """The parts-topic record of part ``index``: source headers without ``dk-`` ones, then the split headers.
@@ -335,13 +337,13 @@ def part_record(
 
 def parse_part_headers(headers: Sequence[Header] | None) -> SplitPart | None:
     """Read the split headers of a parts-topic message; ``None`` when they are missing or invalid."""
-    found = _header_map(headers)
+    found = header_map(headers)
     if found.get(H_VERSION) != SPLIT_VERSION.encode():
         return None
-    group = _utf8(found.get(H_GROUP))
-    topic = _utf8(found.get(H_TOPIC))
-    attempt_id = _utf8(found.get(H_ATTEMPT_ID))
-    origin = _utf8(found.get(H_ORIGIN))
+    group = utf8_text(found.get(H_GROUP))
+    topic = utf8_text(found.get(H_TOPIC))
+    attempt_id = utf8_text(found.get(H_ATTEMPT_ID))
+    origin = utf8_text(found.get(H_ORIGIN))
     numbers = [_decimal(found.get(name)) for name in (H_PARTITION, H_OFFSET, H_ATTEMPT, H_INDEX)]
     if not group or not topic or not attempt_id or None in numbers:
         return None

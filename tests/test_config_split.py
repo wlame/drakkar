@@ -497,4 +497,6 @@ def test_on_startup_change_of_split_http_enabled_is_ignored():
     # What ``on_startup`` did: the key is on now, but the worker was built with it off.
     app._config.split.http.enabled = True
 
+    # The check after ``on_startup`` reads the value the worker was built with, so it must not raise
+    # the message of an HTTP job with no status topic; a raise fails the test.
     app._lifecycle._check_config_after_startup()

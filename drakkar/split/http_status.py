@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from drakkar.sinks.dlq_record import cut_error
-from drakkar.split.records import ANY_PARTITION, Header, WireRecord, _header_map, _object, encode_value
+from drakkar.split.records import ANY_PARTITION, Header, WireRecord, encode_value, header_map, json_object
 from drakkar.timefmt import format_rfc3339_micro
 
 STATUS_VERSION = '1'
@@ -141,13 +141,13 @@ def parse_status_record(
     key: bytes | None, headers: Sequence[Header] | None, value: bytes | None
 ) -> StatusRecord | None:
     """Read a status-topic record; ``None`` for anything that is not a valid record of version 1."""
-    if _header_map(headers).get(H_STATUS_VERSION) != STATUS_VERSION.encode() or not key:
+    if header_map(headers).get(H_STATUS_VERSION) != STATUS_VERSION.encode() or not key:
         return None
     try:
         request_id = key.decode('utf-8')
     except UnicodeDecodeError:
         return None
-    body = _object(value)
+    body = json_object(value)
     if body is None:
         return None
     job = body.get('job')
@@ -192,7 +192,8 @@ def _end_fields(state: str, body: Mapping[str, Any]) -> dict[str, Any] | None:
         if body.get('outcome') not in FAILED_OUTCOMES or not isinstance(error, str):
             return None
         fields['outcome'] = body['outcome']
-        fields['error'] = error
+        # A record from outside may carry any text: the map keeps no more than a record of a worker writes.
+        fields['error'] = cut_error(error)
     return fields
 
 
@@ -202,7 +203,8 @@ class StatusMap:
     A new record replaces the stored one by the rules of the status topic:
     for another job the lower source offset wins, for the same job the
     higher or equal state rank wins. The outcome does not depend on the order
-    in which records arrive.
+    in which records arrive, with one exception: ``done`` and ``failed`` of
+    the same job have the same rank, so the one that arrives last wins.
     """
 
     def __init__(self, result_retention: float) -> None:
@@ -250,6 +252,10 @@ class StatusMap:
         if new.job != stored.job:
             return (new.offset, new.partition) < (stored.offset, stored.partition)
         return STATE_RANK[new.state] >= STATE_RANK[stored.state]
+
+    def has_due(self, now: float) -> bool:
+        """Whether a heap item is due at ``now``: a call of :meth:`expire` has work left."""
+        return bool(self._heap) and self._heap[0][0] <= now
 
     def expire(self, now: float, *, limit: int) -> int:
         """Remove ended entries past their retention, looking at no more than ``limit`` heap items."""

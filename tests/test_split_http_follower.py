@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 from types import SimpleNamespace
 from typing import Any
 
@@ -99,7 +100,7 @@ def status(request_id: str, state: str = 'accepted', *, offset: int = 500, resul
         state=state,  # ty: ignore[invalid-argument-type]
         partition=7,
         offset=offset,
-        client='tenant-a',
+        client=fields.pop('client', 'tenant-a'),
         updated_at=fields.pop('updated_at', NOW),
         **fields,
     )
@@ -196,7 +197,7 @@ async def test_follower_skips_and_logs_invalid_records_rate_limited(world):
 
 async def test_follower_wait_for_returns_record_that_arrives_within_timeout(world):
     await restored(world)
-    waiter = asyncio.ensure_future(world.follower.wait_for('r1', 5.0))
+    waiter = asyncio.ensure_future(world.follower.wait_for('r1', 5.0, client='tenant-a'))
     await asyncio.sleep(0.01)
     assert not waiter.done()
     world.write(status('r1'))
@@ -207,24 +208,54 @@ async def test_follower_wait_for_returns_record_that_arrives_within_timeout(worl
 async def test_follower_wait_for_returns_a_stored_record_at_once(world):
     world.write(status('r1'))
     await restored(world)
-    assert (await world.follower.wait_for('r1', 0.0)).request_id == 'r1'
+    assert (await world.follower.wait_for('r1', 0.0, client='tenant-a')).request_id == 'r1'
 
 
 async def test_follower_wait_for_returns_none_after_timeout(world):
     await restored(world)
-    assert await world.follower.wait_for('r1', 0.05) is None
+    assert await world.follower.wait_for('r1', 0.05, client='tenant-a') is None
     assert world.follower._waiting == 0
 
 
 async def test_follower_wait_for_over_cap_returns_at_once(world, monkeypatch):
     monkeypatch.setattr(http_follower, 'MAX_STATUS_WAITERS', 1)
     await restored(world)
-    first = asyncio.ensure_future(world.follower.wait_for('r1', 5.0))
+    first = asyncio.ensure_future(world.follower.wait_for('r1', 5.0, client='tenant-a'))
     await asyncio.sleep(0.01)
     loop = asyncio.get_running_loop()
     started = loop.time()
-    assert await world.follower.wait_for('r2', 5.0) is None
+    assert await world.follower.wait_for('r2', 5.0, client='tenant-a') is None
     assert loop.time() - started < 1.0
+    first.cancel()
+    await asyncio.gather(first, return_exceptions=True)
+    assert world.follower._waiting == 0
+
+
+async def test_follower_wait_for_ends_only_on_a_record_of_its_client(world):
+    world.write(status('r1', client='tenant-b'))
+    await restored(world)
+    # A stored record of another client answers nothing at once: the read waits as for an unknown id.
+    waiter = asyncio.ensure_future(world.follower.wait_for('r1', 5.0, client='tenant-a'))
+    await asyncio.sleep(0.01)
+    world.write(status('r1', 'running', client='tenant-b'))
+    await wait_until(lambda: world.follower.get('r1').state == 'running')
+    await asyncio.sleep(0.01)
+    assert not waiter.done()
+
+    world.write(status('r1', 'done', client='tenant-a'))
+    found = await asyncio.wait_for(waiter, 5)
+    assert found is not None and (found.state, found.client) == ('done', 'tenant-a')
+    assert world.follower._waiting == 0 and world.follower._waiters == {}
+
+
+async def test_follower_wait_for_of_another_client_stays_inside_the_cap(world, monkeypatch):
+    monkeypatch.setattr(http_follower, 'MAX_STATUS_WAITERS', 1)
+    world.write(status('r1', client='tenant-b'))
+    await restored(world)
+    first = asyncio.ensure_future(world.follower.wait_for('r1', 5.0, client='tenant-a'))
+    await asyncio.sleep(0.01)
+    assert not first.done() and world.follower._waiting == 1
+    assert await world.follower.wait_for('r1', 5.0, client='tenant-a') is None
     first.cancel()
     await asyncio.gather(first, return_exceptions=True)
     assert world.follower._waiting == 0
@@ -232,28 +263,45 @@ async def test_follower_wait_for_over_cap_returns_at_once(world, monkeypatch):
 
 async def test_follower_stop_ends_every_wait_with_none(world):
     await restored(world)
-    waiter = asyncio.ensure_future(world.follower.wait_for('r1', 5.0))
+    waiter = asyncio.ensure_future(world.follower.wait_for('r1', 5.0, client='tenant-a'))
     await asyncio.sleep(0.01)
     await world.follower.stop()
     assert await asyncio.wait_for(waiter, 5) is None
+
+
+async def _sizes_while_restoring(world: World, count: int) -> list[int]:
+    """Restore, and note the size of the map at every turn of the loop until it holds ``count`` entries."""
+    sizes: list[int] = []
+
+    async def watch() -> None:
+        while len(world.map) < count:
+            sizes.append(len(world.map))
+            await asyncio.sleep(0)
+        sizes.append(len(world.map))
+
+    watcher = asyncio.ensure_future(watch())
+    await restored(world)
+    await asyncio.wait_for(watcher, 5)
+    return sizes
 
 
 async def test_follower_yields_between_chunks(world):
     big = '"' + 'x' * (64 * KIB) + '"'
     for index in range(200):
         world.write(status(f'r{index}', 'done', result=big), partition=index % 2)
-    sizes: list[int] = []
-
-    async def watch() -> None:
-        while len(world.map) < 200:
-            sizes.append(len(world.map))
-            await asyncio.sleep(0)
-
-    watcher = asyncio.ensure_future(watch())
-    await restored(world)
-    await asyncio.wait_for(watcher, 5)
+    sizes = await _sizes_while_restoring(world, 200)
     partial = {size for size in sizes if 0 < size < 200}
     assert len(partial) > 1
+
+
+async def test_follower_applies_small_records_in_chunks_of_at_most_64(world):
+    # 200 small records of one partition come in one batch; only the record count makes the chunks.
+    for index in range(200):
+        world.write(status(f'r{index}'))
+    sizes = await _sizes_while_restoring(world, 200)
+    steps = [after - before for before, after in itertools.pairwise(sizes) if after != before]
+    assert {size for size in sizes if 0 < size < 200}
+    assert steps and max(steps) <= http_follower.CHUNK_RECORDS
 
 
 async def test_follower_never_commits_and_uses_the_results_group(world):
@@ -485,6 +533,57 @@ async def test_follower_restore_passes_offsets_that_hold_no_record(world, monkey
     world.log.skip(STATUS_TOPIC, 0, 2)
     await restored(world)
     assert world.follower.get('r1') is not None
+
+
+async def test_follower_restore_checks_ends_on_time_while_other_partitions_bring_records(world, monkeypatch):
+    monkeypatch.setattr(http_follower, 'RESTORE_END_CHECK_SECONDS', 0.05)
+    # Partition 0 ends in offsets that hold no record; partition 1 brings a record with every read.
+    world.write(status('r1'), partition=0)
+    world.log.skip(STATUS_TOPIC, 0, 2)
+    world.write(status('busy-0'), partition=1)
+    build = world._consumer
+    written = iter(range(1, 10**9))
+
+    def busy(config: dict) -> StatusConsumer:
+        consumer = build(config)
+        consume = consumer.consume
+
+        async def consume_with_traffic(num_messages: int = 1, timeout: float = -1) -> Any:
+            world.write(status(f'busy-{next(written)}'), partition=1)
+            return await consume(num_messages=num_messages, timeout=timeout)
+
+        consumer.consume = consume_with_traffic  # ty: ignore[invalid-assignment]
+        return consumer
+
+    world.follower._consumer_factory = busy
+    await restored(world)
+    assert world.follower.get('r1') is not None
+
+
+async def test_follower_sweep_removes_a_backlog_larger_than_its_limit_in_one_sweep(monkeypatch):
+    monkeypatch.setattr(http_follower, 'EXPIRY_SWEEP_LIMIT', 2)
+    sweep_now = asyncio.Event()
+    sweeps = 0
+
+    async def gated_sleep(seconds: float) -> None:
+        nonlocal sweeps
+        if seconds == http_follower.EXPIRY_SWEEP_SECONDS:
+            sweeps += 1
+            await sweep_now.wait()
+            sweep_now.clear()
+        await asyncio.sleep(0.001)
+
+    world = World(sleep=gated_sleep)
+    for index in range(7):
+        world.write(status(f'r{index}', 'done'))
+    await restored(world)
+    await wait_until(lambda: sweeps == 1)
+
+    world.clock.now = NOW + RETENTION + 1
+    sweep_now.set()
+    await wait_until(lambda: sweeps == 2)
+    assert len(world.map) == 0
+    await world.follower.stop()
 
 
 async def test_follower_restore_retries_while_the_topic_is_not_described(world):

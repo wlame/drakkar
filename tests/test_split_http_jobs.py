@@ -243,6 +243,64 @@ async def test_accept_timeout_answers_503():
     assert gate.status.writes == []
 
 
+def store_failures(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [line for line in logs if line['event'] == 'split_http_store_failed']
+
+
+@pytest.mark.parametrize(
+    ('failure', 'error'),
+    [
+        (SplitProduceError('broker down', final=False), 'broker down'),
+        (SplitProduceError('too large', final=True, too_large=True), 'too large'),
+        ('hang', 'timed out'),
+    ],
+)
+async def test_accept_logs_a_failed_source_write_at_most_once_per_interval(failure, error):
+    gate = Gate(source=FakeProducer(failure, failure))
+    with capture_logs() as logs:
+        await gate.accept(timeout=0.01)
+        await gate.accept('req-2', timeout=0.01)
+
+    [line] = store_failures(logs)
+    assert (line['log_level'], line['category'], line['request_id'], line['client']) == (
+        'warning',
+        'split',
+        'req-1',
+        CLIENT,
+    )
+    assert (line['error'], line['suppressed']) == (error, 0)
+
+
+async def test_accept_with_no_offset_in_the_report_writes_no_accepted_record_and_answers_202():
+    gate = Gate(source=FakeProducer((7, -1)))
+
+    answer = await gate.accept()
+
+    assert (answer.status_code, body(answer)) == (202, {'request_id': 'req-1', 'status': 'accepted'})
+    assert gate.status.writes == []
+
+
+async def test_write_bounded_reads_the_outcome_of_a_write_whose_caller_was_cancelled():
+    delivery: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+
+    class Pending(FakeProducer):
+        async def publish(self, topic: str, record: WireRecord) -> int:
+            return await delivery
+
+    gate = Gate(status=Pending(), sleep=lambda seconds: asyncio.Event().wait())
+    writing = asyncio.ensure_future(gate.writer.write_bounded(record('accepted'), 5.0))
+    await asyncio.sleep(0.01)
+    writing.cancel()
+    await asyncio.gather(writing, return_exceptions=True)
+
+    with capture_logs() as logs:
+        delivery.set_exception(SplitProduceError('broker down', final=False))
+        await asyncio.sleep(0.01)
+
+    [line] = [line for line in logs if line['event'] == 'split_http_status_write_failed']
+    assert (line['state'], line['error']) == ('accepted', 'broker down')
+
+
 async def test_accept_answers_202_when_accepted_write_fails():
     gate = Gate(status=FakeProducer(SplitProduceError('broker down', final=False)))
     before = sample('drakkar_split_http_status_write_failures_total')
@@ -331,13 +389,17 @@ async def test_read_each_status(stored, expected):
 NOT_FOUND = {'error': 'not_found', 'request_id': 'req-1'}
 
 
-async def test_read_other_client_is_404():
+async def test_read_other_client_is_404_after_the_wait_of_an_unknown_id():
     gate = Gate()
     gate.put(record('done', client=OTHER, result_json='1'))
+    loop = asyncio.get_running_loop()
+    started = loop.time()
 
     answer = await gate.gateway.read(request_id='req-1', client=CLIENT)
 
     assert (answer.status_code, answer.metric_status, body(answer)) == (404, 'not_found', NOT_FOUND)
+    # The same wait as for an unknown id: the time of the answer does not show that the id exists.
+    assert STATUS_WAIT_SECONDS - 0.1 <= loop.time() - started < STATUS_WAIT_SECONDS + 0.5
 
 
 async def test_read_waits_up_to_1_second_for_unknown_id():

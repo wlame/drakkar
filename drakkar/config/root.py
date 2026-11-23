@@ -469,7 +469,10 @@ class DrakkarConfig(BaseSettings):
         the keys: both give the same messages.
 
         Raises:
-            ValueError: with the pinned message of the first broken rule.
+            ValueError: with the pinned message of the first broken rule; for the
+                HTTP keys ``SPLIT_HTTP_WITHOUT_SPLIT_MESSAGE`` (``split.http.enabled``
+                with the feature off) and ``SPLIT_HTTP_WITHOUT_STATUS_TOPIC_MESSAGE``
+                (``split.http.enabled`` with no ``split.http.status_topic``).
         """
         split = self.split
         if enabled is None:

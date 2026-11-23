@@ -84,6 +84,14 @@ def test_status_record_error_is_cut_to_2000_bytes():
     assert body['error'].startswith('é')
 
 
+def test_parse_cuts_a_long_error_to_2000_bytes():
+    body = json.loads(status_record(failed()).value)
+    body['error'] = 'x' * 100_000
+    parsed = parse_status_record(b'order-1', VERSION_HEADER, json.dumps(body).encode())
+    assert parsed is not None
+    assert parsed.error == 'x' * 2000
+
+
 def _good_value(**override):
     body = json.loads(status_record(running()).value)
     body.update(override)
@@ -185,6 +193,28 @@ def test_map_expire_respects_limit():
     assert m.expire(UPDATED + 100, limit=2) == 2
     assert len(m) == 3
     assert m.expire(UPDATED + 100, limit=10) == 3
+
+
+def test_map_done_and_failed_of_one_job_follow_arrival_order():
+    first = StatusMap(3600)
+    first.put(done(), now=UPDATED)
+    first.put(failed(), now=UPDATED)
+    second = StatusMap(3600)
+    second.put(failed(), now=UPDATED)
+    second.put(done(), now=UPDATED)
+    assert (first.get('order-1').state, second.get('order-1').state) == ('failed', 'done')
+
+
+def test_map_expire_spends_its_limit_on_the_stale_heap_items_of_replaced_entries():
+    m = StatusMap(100)
+    # Three ended records of one id: the first two leave stale heap items with the same deadline.
+    for state in (done, failed, done):
+        m.put(state(rid='a'), now=UPDATED)
+    m.put(done(rid='b'), now=UPDATED)
+    assert m.expire(UPDATED + 100, limit=2) == 0
+    assert len(m) == 2
+    assert m.expire(UPDATED + 100, limit=10) == 2
+    assert len(m) == 0
 
 
 def test_map_replaced_ended_entry_does_not_expire_early():

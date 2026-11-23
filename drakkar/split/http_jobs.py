@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -44,6 +45,7 @@ TOO_LARGE_DETAIL = 'the request is larger than the broker accepts'
 QUEUE_FULL_TEXT = 'the client queue is full'
 NOT_ACKNOWLEDGED_TEXT = 'the record was not acknowledged in time'
 LOG_KEY = 'status_write'
+STORE_LOG_KEY = 'store'
 
 SleepFn = Callable[[float], Awaitable[None]]
 EndWrite = int | Literal['stopped', 'final']
@@ -168,11 +170,18 @@ class StatusWriter:
             self._note_failure(record, error)
 
     async def write_bounded(self, record: StatusRecord, seconds: float) -> bool:
-        """Write ``record`` and wait at most ``seconds`` for its acknowledgement; True when it came."""
+        """Write ``record`` and wait at most ``seconds`` for its acknowledgement; True when it came.
+
+        A caller that is cancelled leaves the write to run on; its outcome is
+        still read and noted, so no error of it is left unretrieved.
+        """
         publish = asyncio.ensure_future(self._producer.publish(self._topic, status_record(record)))
         timer = asyncio.ensure_future(self._sleep(seconds))
         try:
             await asyncio.wait({publish, timer}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            publish.add_done_callback(lambda done: self._note_outcome(record, done))
+            raise
         finally:
             timer.cancel()
         if not publish.done():
@@ -300,6 +309,7 @@ class HttpJobGateway:
     def __init__(self, runtime: HttpJobsRuntime, *, clock: Callable[[], float]) -> None:
         self._runtime = runtime
         self._clock = clock
+        self._log_limit = RateLimitedLog(time.monotonic)
 
     @property
     def is_ready(self) -> bool:
@@ -332,6 +342,7 @@ class HttpJobGateway:
                 runtime.source_producer.publish_located(runtime.source_topic, message), timeout
             )
         except SplitProduceError as error:
+            self._note_store_failure(request_id, client, error)
             if error.too_large:
                 return HttpAnswer(
                     413,
@@ -339,20 +350,41 @@ class HttpJobGateway:
                     'error',
                 )
             return self._unavailable(request_id)
-        except (TimeoutError, RuntimeError):
+        except (TimeoutError, RuntimeError) as error:
+            self._note_store_failure(request_id, client, error)
             return self._unavailable(request_id)
-        accepted = StatusRecord(
-            request_id=request_id,
-            state='accepted',
-            partition=partition,
-            offset=offset,
-            client=client,
-            updated_at=self._clock(),
-        )
-        await runtime.writer.write_bounded(accepted, ACCEPTED_WRITE_SECONDS)
+        job: str | None = None
+        if offset >= 0:
+            accepted = StatusRecord(
+                request_id=request_id,
+                state='accepted',
+                partition=partition,
+                offset=offset,
+                client=client,
+                updated_at=self._clock(),
+            )
+            job = accepted.job
+            await runtime.writer.write_bounded(accepted, ACCEPTED_WRITE_SECONDS)
+        # Else the delivery report named no offset: an ``accepted`` record of job ``<partition>:-1`` would win
+        # over every later record of the id by the lowest-offset rule. The request is stored, so it is answered,
+        # and its job writes the next states.
         split_http_jobs_accepted.inc()
-        logger.info('split_http_job_accepted', category='split', request_id=request_id, job=accepted.job, client=client)
+        logger.info('split_http_job_accepted', category='split', request_id=request_id, job=job, client=client)
         return HttpAnswer(202, _json({'request_id': request_id, 'status': 'accepted'}), 'accepted')
+
+    def _note_store_failure(self, request_id: str, client: str, error: BaseException) -> None:
+        """Log a request that could not be stored in the source topic, at most one line per interval."""
+        suppressed = self._log_limit.admit(STORE_LOG_KEY)
+        if suppressed is None:
+            return
+        logger.warning(
+            'split_http_store_failed',
+            category='split',
+            request_id=request_id,
+            client=client,
+            error=describe_error(error),
+            suppressed=suppressed,
+        )
 
     @staticmethod
     def _unavailable(request_id: str) -> HttpAnswer:
@@ -363,14 +395,14 @@ class HttpJobGateway:
     async def read(self, *, request_id: str, client: str) -> HttpAnswer:
         """Answer the status of a job; an unknown id first waits a little for its first record.
 
-        An id of another client answers as an unknown one. An id that breaks
-        the request id rule never waits.
+        An id of another client answers as an unknown one, after the same
+        wait. An id that breaks the request id rule never waits.
         """
         self._check_loop()
         follower = self._runtime.follower
         record = follower.get(request_id)
         if (record is None or record.client != client) and _is_valid_request_id(request_id):
-            record = await follower.wait_for(request_id, STATUS_WAIT_SECONDS)
+            record = await follower.wait_for(request_id, STATUS_WAIT_SECONDS, client=client)
         if record is None or record.client != client:
             split_http_status_reads.labels(status='not_found').inc()
             return HttpAnswer(404, _json({'error': 'not_found', 'request_id': request_id}), 'not_found')

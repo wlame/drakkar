@@ -36,7 +36,7 @@ CONSUMER_ERROR_PAUSE_SECONDS = 0.5
 LOOP_RESTART_SECONDS = 3.0
 RESTORE_BACKOFF_FIRST_SECONDS = 1.0
 RESTORE_BACKOFF_MAX_SECONDS = 30.0
-# How often a restore that gets no record asks the broker again where its partitions end.
+# How often a restore asks the broker again where its partitions end.
 RESTORE_END_CHECK_SECONDS = 1.0
 # A turn of the loop after this many records or bytes of record values: a status can be close to 1 MiB.
 CHUNK_RECORDS = 64
@@ -102,7 +102,8 @@ class StatusFollower:
         self._stopped = False
         # The next offset to read of each partition, after the last record the follower applied.
         self._next: dict[int, int] = {}
-        self._waiters: dict[str, list[asyncio.Future[StatusRecord | None]]] = {}
+        # The reads that wait for an id, each with the client it answers.
+        self._waiters: dict[str, list[tuple[str, asyncio.Future[StatusRecord | None]]]] = {}
         self._waiting = 0
         self._rate_limited = RateLimitedLog(time.monotonic)
 
@@ -124,8 +125,8 @@ class StatusFollower:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        for futures in self._waiters.values():
-            for future in futures:
+        for waiters in self._waiters.values():
+            for _, future in waiters:
                 if not future.done():
                     future.set_result(None)
         self._waiters.clear()
@@ -156,18 +157,21 @@ class StatusFollower:
         """The stored status of ``request_id``, if any."""
         return self.status_map.get(request_id)
 
-    async def wait_for(self, request_id: str, timeout: float) -> StatusRecord | None:
-        """The status of ``request_id``, waiting up to ``timeout`` seconds for its first record.
+    async def wait_for(self, request_id: str, timeout: float, *, client: str) -> StatusRecord | None:
+        """The status of ``request_id`` for ``client``, waiting up to ``timeout`` seconds for a record of that client.
 
-        A stored status answers at once. So does a read beyond
-        ``MAX_STATUS_WAITERS`` waiting reads, with what the map holds, so a
-        flood of polls holds no unbounded number of waits.
+        A stored status of the client answers at once. A status of another
+        client is no answer: the read waits as for an unknown id, so the time
+        of the answer does not show that the id exists. A read beyond
+        ``MAX_STATUS_WAITERS`` waiting reads answers at once, so a flood of
+        polls holds no unbounded number of waits.
         """
-        found = self.status_map.get(request_id)
+        found = self._of_client(request_id, client)
         if found is not None or timeout <= 0 or self._stopped or self._waiting >= MAX_STATUS_WAITERS:
             return found
         future: asyncio.Future[StatusRecord | None] = asyncio.get_running_loop().create_future()
-        self._waiters.setdefault(request_id, []).append(future)
+        waiter = (client, future)
+        self._waiters.setdefault(request_id, []).append(waiter)
         self._waiting += 1
         try:
             return await asyncio.wait_for(future, timeout)
@@ -175,24 +179,32 @@ class StatusFollower:
             return None
         finally:
             self._waiting -= 1
-            self._drop_waiter(request_id, future)
+            self._drop_waiter(request_id, waiter)
 
-    def _drop_waiter(self, request_id: str, future: asyncio.Future[StatusRecord | None]) -> None:
+    def _of_client(self, request_id: str, client: str) -> StatusRecord | None:
+        """The stored status of ``request_id`` when it belongs to ``client``; None otherwise."""
+        found = self.status_map.get(request_id)
+        return found if found is not None and found.client == client else None
+
+    def _drop_waiter(self, request_id: str, waiter: tuple[str, asyncio.Future[StatusRecord | None]]) -> None:
+        """Forget one waiting read; the id leaves the table with its last read."""
         waiters = self._waiters.get(request_id)
-        if waiters is None or future not in waiters:
+        if waiters is None or waiter not in waiters:
             return
-        waiters.remove(future)
+        waiters.remove(waiter)
         if not waiters:
             del self._waiters[request_id]
 
     def _wake(self, request_id: str) -> None:
-        """Give every read that waits for ``request_id`` its stored status."""
-        waiters = self._waiters.pop(request_id, None)
+        """Give every read that waits for ``request_id`` the stored status, when it belongs to the read's client."""
+        waiters = self._waiters.get(request_id)
         if not waiters:
             return
         record = self.status_map.get(request_id)
-        for future in waiters:
-            if not future.done():
+        if record is None:
+            return
+        for client, future in waiters:
+            if client == record.client and not future.done():
                 future.set_result(record)
 
     # --- restore ---
@@ -244,7 +256,9 @@ class StatusFollower:
             messages = await consumer.consume(num_messages=BATCH_SIZE, timeout=POLL_TIMEOUT_SECONDS)
             records += await self._apply(messages)
             self._drop_reached(pending)
-            if pending and not messages and loop.time() - last_end_check >= RESTORE_END_CHECK_SECONDS:
+            # On time, whatever the batch held: records of other partitions must not hold a partition whose
+            # log was cut below its end.
+            if pending and loop.time() - last_end_check >= RESTORE_END_CHECK_SECONDS:
                 last_end_check = loop.time()
                 await self._check_ends(consumer, pending)
             await asyncio.sleep(0)
@@ -376,11 +390,24 @@ class StatusFollower:
     # --- expiry and gauge ---
 
     async def _sweep_loop(self) -> None:
-        """Remove ended entries past their retention, every ``EXPIRY_SWEEP_SECONDS``."""
+        """Sweep every ``EXPIRY_SWEEP_SECONDS``."""
         while True:
             await self._sleep(EXPIRY_SWEEP_SECONDS)
-            if self.status_map.expire(self._clock(), limit=EXPIRY_SWEEP_LIMIT):
-                self._set_gauge()
+            await self._sweep()
+
+    async def _sweep(self) -> None:
+        """Remove every ended entry past its retention, ``EXPIRY_SWEEP_LIMIT`` heap items at a time.
+
+        The loop gets a turn between two calls, so a large backlog is removed
+        in one sweep without holding the loop.
+        """
+        now = self._clock()
+        removed = self.status_map.expire(now, limit=EXPIRY_SWEEP_LIMIT)
+        while self.status_map.has_due(now):
+            await asyncio.sleep(0)
+            removed += self.status_map.expire(now, limit=EXPIRY_SWEEP_LIMIT)
+        if removed:
+            self._set_gauge()
 
     def _set_gauge(self) -> None:
         for state, count in self.status_map.counts().items():

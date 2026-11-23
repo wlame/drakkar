@@ -66,6 +66,9 @@ def test_is_http_origin_only_for_the_http_value():
     assert not is_http_origin([('dk-origin', b'kafka')])
     assert not is_http_origin([])
     assert not is_http_origin(None)
+    # The first header of the name decides, as it does for every header read.
+    assert is_http_origin([('other', b'x'), ('dk-origin', b'http'), ('dk-origin', b'kafka')])
+    assert not is_http_origin([('dk-origin', b'kafka'), ('dk-origin', b'http')])
 
 
 def _message(**fields):

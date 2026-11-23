@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from drakkar.models import HttpJob, SourceMessage
-from drakkar.split.records import ANY_PARTITION, H_REQUEST_ID, Header, WireRecord, _header_map, _utf8
+from drakkar.split.records import ANY_PARTITION, H_REQUEST_ID, Header, WireRecord, header_map, utf8_text
 from drakkar.utils import validate_request_id
 
 H_ORIGIN_HTTP = 'dk-origin'
@@ -37,8 +37,11 @@ def source_message_record(*, request_id: str, client: str, deliver_sinks: bool, 
 
 
 def is_http_origin(headers: Sequence[Header] | None) -> bool:
-    """True when the headers carry ``dk-origin`` with the value ``http``."""
-    return _header_map(headers).get(H_ORIGIN_HTTP) == ORIGIN_HTTP_VALUE
+    """True when the first ``dk-origin`` header has the value ``http``; runs for every source message, so no dict."""
+    for name, value in headers or ():
+        if name == H_ORIGIN_HTTP:
+            return value == ORIGIN_HTTP_VALUE
+    return False
 
 
 def read_http_job(headers: Sequence[Header] | None) -> HttpJob | None:
@@ -48,10 +51,10 @@ def read_http_job(headers: Sequence[Header] | None) -> HttpJob | None:
     ``validate_request_id``. A missing or non-UTF-8 client reads as an empty
     text; a switch other than exactly ``true`` reads as no sink writes.
     """
-    found = _header_map(headers)
+    found = header_map(headers)
     if found.get(H_ORIGIN_HTTP) != ORIGIN_HTTP_VALUE:
         return None
-    request_id = _utf8(found.get(H_REQUEST_ID))
+    request_id = utf8_text(found.get(H_REQUEST_ID))
     if not request_id:
         return None
     try:
@@ -60,7 +63,7 @@ def read_http_job(headers: Sequence[Header] | None) -> HttpJob | None:
         return None
     return HttpJob(
         request_id=request_id,
-        client=_utf8(found.get(H_HTTP_CLIENT)) or '',
+        client=utf8_text(found.get(H_HTTP_CLIENT)) or '',
         deliver_sinks=found.get(H_DELIVER_SINKS) == TRUE_TEXT,
     )
 

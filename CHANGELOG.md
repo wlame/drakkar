@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Split: the config block `split.http` (`enabled`, `status_topic`, `result_retention` of `24h`, `max_response` of `64KiB`) for split jobs that arrive over HTTP, with its load checks. The config summary shows `split=http` when it is on.
 
+### Changed
+
+- Split: the split producer now treats a record batch that the broker refuses as too large as a final error; it was tried again before.
+
 ### Fixed
 
 - Split: a record that the client delivered while the split producer closed could be reported as not delivered. On newer Python 3.13 releases a wait for a thread can end with no turn of the event loop, and the close failed the delivery reports that were still queued. A part whose result was delivered at a stop then ran again after a restart. The close now runs the queued reports first.
