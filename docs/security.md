@@ -211,8 +211,8 @@ With [`split.http.enabled`](split.md#http-jobs) a `POST` on the HTTP source
 writes the raw request body to the Kafka source topic, and the result of the
 job is kept in the status topic for `split.http.result_retention`.
 
-- No header of the client reaches Kafka, the `Authorization` token above
-  all. The message carries only the request id, the name of the matched
+- No header of the client reaches Kafka. This includes the `Authorization`
+  token. The message carries only the request id, the name of the matched
   client and the sinks switch, in `dk-` headers.
 - The status of a job and its result are visible only to the client that
   created it. A `GET` with an id of another client answers `404` after the

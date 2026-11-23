@@ -288,10 +288,9 @@ parametrize).
     I/O and no handler call, and applies the same rules in restore and in
     live reading; a second rule set for one of the two would let a restart
     rebuild a different state than the live owner had.
-    With `split.http.enabled` the end-state status record of an HTTP job is
-    acknowledged before its `closed` record, and before the completion of a
-    local message, of an unparsed message and of nothing else; a duplicate
-    writes no status. The status map is fed only by the follower
+    With `split.http.enabled`, the end-state status record of an HTTP job is
+    acknowledged first. Only then does the owner write `closed`, or complete
+    a local or unparsed message. A duplicate writes no status. The status map is fed only by the follower
     (`drakkar/split/http_follower.py`) and is read and written only on the
     main loop; the HTTP source thread reaches it through `dispatch_to_loop`.
 

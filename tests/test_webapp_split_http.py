@@ -431,7 +431,9 @@ async def test_get_missing_request_id_is_422(main_loop, params):
     response = await _get(webapp, params)
 
     assert response.status_code == 422
-    assert response.json() == {'error': 'invalid_request', 'details': 'request_id is required'}
+    body = response.json()
+    assert body.pop('request_id').startswith('req_')
+    assert body == {'error': 'invalid_request', 'details': 'request_id is required'}
     assert gateway.calls == []
 
 
@@ -465,7 +467,11 @@ async def test_get_shutdown_and_not_ready_503(main_loop):
 
     webapp, gateway = _webapp(main_loop)
     gateway.is_ready = False
-    assert (await _get(webapp, {'request_id': 'r-1'})).json()['status'] == 'not_ready'
+    body = (await _get(webapp, {'request_id': 'r-1'})).json()
+    assert (body['status'], body['error']) == (
+        'not_ready',
+        'webapp is starting; the status of HTTP jobs is not restored yet',
+    )
     assert gateway.calls == []
 
 

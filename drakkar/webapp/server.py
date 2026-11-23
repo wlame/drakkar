@@ -171,6 +171,8 @@ BODY_READ_TIMEOUT_MARGIN_SECONDS = 30
 DISPATCH_MARGIN_SECONDS = 1.0
 
 STATUS_READ_FAILED_TEXT = 'the status could not be read'
+NOT_READY_PIPELINE_TEXT = 'webapp is starting; main pipeline is not yet ready'
+NOT_READY_STATUS_TEXT = 'webapp is starting; the status of HTTP jobs is not restored yet'
 
 
 def _unavailable_answer(request_id: str, error: str) -> HttpAnswer:
@@ -542,13 +544,14 @@ class WebApp:
         """
         if self.shutdown_event.is_set():
             return self._shutdown_answer(request, metric_client, gate_request_id)
-        if not self._app.is_ready or (self._jobs is not None and not self._jobs.is_ready):
+        pipeline_ready = self._app.is_ready
+        if not pipeline_ready or (self._jobs is not None and not self._jobs.is_ready):
             self._observe_outcome(request=request, client=metric_client, status='not_ready')
             return JSONResponse(
                 status_code=503,
                 content={
                     'status': 'not_ready',
-                    'error': 'webapp is starting; main pipeline is not yet ready',
+                    'error': NOT_READY_PIPELINE_TEXT if not pipeline_ready else NOT_READY_STATUS_TEXT,
                     'request_id': gate_request_id,
                     'hint': KAFKA_FALLBACK_HINT,
                 },
@@ -828,7 +831,11 @@ class WebApp:
                 self._observe_outcome(request=request, client=metric_client, status='error')
                 return JSONResponse(
                     status_code=422,
-                    content={'error': 'invalid_request', 'details': 'request_id is required'},
+                    content={
+                        'error': 'invalid_request',
+                        'request_id': gate_request_id,
+                        'details': 'request_id is required',
+                    },
                 )
             answer = await self._dispatch_job_call(
                 jobs.read(request_id=request_id, client=client.name),

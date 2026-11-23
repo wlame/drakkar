@@ -337,9 +337,11 @@ async def test_every_end_path_acknowledges_status_before_closed_or_completion(pa
 @pytest.mark.parametrize('path', ['aggregated', 'local_done', 'failed_split', 'parse_dlq', 'parse_skip'])
 async def test_held_status_delivery_holds_closed_and_completion(path):
     http, closed = await _start_path(path, hold_status=True)
+    # The positive event first: the end-state record reached the producer and its delivery is held.
     await wait_until(lambda: ('status_held', None) in http.events)
-    # The owner had every chance to go on: only the acknowledgement of the status is missing.
-    await asyncio.sleep(0.2)
+    # Then many turns of the loop, with no wall-clock wait: every task that could go on has run.
+    for _ in range(100):
+        await asyncio.sleep(0)
 
     assert 'closed' not in http.world.kinds()
     assert not [event for event in http.events if event[0] == 'complete']

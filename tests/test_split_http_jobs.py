@@ -15,6 +15,7 @@ from structlog.testing import capture_logs
 
 from drakkar.config.connections import KafkaConnectionConfig
 from drakkar.providers.resilience import RateLimitedLog
+from drakkar.split import http_jobs
 from drakkar.split.http_follower import StatusFollower
 from drakkar.split.http_jobs import (
     ACCEPTED_WRITE_SECONDS,
@@ -400,7 +401,15 @@ async def test_read_each_status(stored, expected):
 NOT_FOUND = {'error': 'not_found', 'request_id': 'req-1'}
 
 
-async def test_read_other_client_is_404_after_the_wait_of_an_unknown_id():
+SHORT_WAIT_SECONDS = 0.05
+
+
+def test_status_read_waits_one_second_for_an_unknown_id():
+    assert STATUS_WAIT_SECONDS == 1.0
+
+
+async def test_read_other_client_is_404_after_the_wait_of_an_unknown_id(monkeypatch):
+    monkeypatch.setattr(http_jobs, 'STATUS_WAIT_SECONDS', SHORT_WAIT_SECONDS)
     gate = Gate()
     gate.put(record('done', client=OTHER, result_json='1'))
     loop = asyncio.get_running_loop()
@@ -410,10 +419,11 @@ async def test_read_other_client_is_404_after_the_wait_of_an_unknown_id():
 
     assert (answer.status_code, answer.metric_status, body(answer)) == (404, 'not_found', NOT_FOUND)
     # The same wait as for an unknown id: the time of the answer does not show that the id exists.
-    assert STATUS_WAIT_SECONDS - 0.1 <= loop.time() - started < STATUS_WAIT_SECONDS + 0.5
+    assert loop.time() - started >= SHORT_WAIT_SECONDS - 0.01
 
 
-async def test_read_waits_up_to_1_second_for_unknown_id():
+async def test_read_waits_for_an_unknown_id_before_404(monkeypatch):
+    monkeypatch.setattr(http_jobs, 'STATUS_WAIT_SECONDS', SHORT_WAIT_SECONDS)
     gate = Gate()
     loop = asyncio.get_running_loop()
     started = loop.time()
@@ -421,7 +431,7 @@ async def test_read_waits_up_to_1_second_for_unknown_id():
     answer = await gate.gateway.read(request_id='req-1', client=CLIENT)
 
     assert (answer.status_code, body(answer)) == (404, NOT_FOUND)
-    assert STATUS_WAIT_SECONDS - 0.1 <= loop.time() - started < STATUS_WAIT_SECONDS + 0.5
+    assert loop.time() - started >= SHORT_WAIT_SECONDS - 0.01
 
 
 async def test_read_of_an_unknown_id_answers_the_record_that_arrives_during_the_wait():

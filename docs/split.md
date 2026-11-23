@@ -1100,10 +1100,10 @@ Checklist before you turn it on:
 
 1. The client sends `POST <sources.http.path>` with the body of one source
    message.
-2. The worker that receives it checks the body with the input model of the
-   handler, asks the `request_id` hook for the id, and writes the body as a
-   message to the source topic. The key is the request id. It waits for
-   the broker to acknowledge the message.
+2. The worker checks the body with the input model of the handler. It asks
+   the `request_id` hook for the id. It writes the body as a message to the
+   source topic, with the request id as the key, and waits for the broker
+   to acknowledge the message.
 3. It writes an `accepted` record to the status topic and answers `202`
    with the request id.
 4. The owner of the source partition reads the message as any other
@@ -1116,11 +1116,11 @@ Checklist before you turn it on:
    acknowledgement, and then writes `closed`. Any other end writes a
    `failed` record.
 6. Every worker with the feature on follows the status topic into memory.
-   A `GET` on any worker that serves the HTTP source answers from there.
+   A `GET` on any worker that serves the HTTP source reads this map.
 
 The source offset of an HTTP job completes only after the end state of the
-job (`done` or `failed`) is acknowledged by the broker. So a client never
-waits for ever for a job whose message is already committed. The one
+job (`done` or `failed`) is acknowledged by the broker. A committed job
+always has an end state that the client can read. The one
 exception is a duplicate: see [The request id and
 duplicates](#http-jobs-duplicates).
 
@@ -1267,18 +1267,27 @@ class ItemHandler(dk.BaseDrakkarHandler[Request, ItemResult]):
 The default `aggregate` sends a job with a failed part to the DLQ, so the
 client then reads `failed` with the outcome `dlq`.
 
-A client session:
+A client session. The file `order-123.json` holds a `Request` with 600
+items, more than `LOCAL_LIMIT`, so the job is split into 6 parts. The
+answers are shown byte for byte: the status body has sorted keys, and
+`result` comes last.
 
 ```bash
 curl -s -X POST http://worker-1:8090/jobs \
   -H 'Authorization: Bearer <token of tenant-a>' \
-  -d '{"request_id": "order-123", "items": ["a", "b", "c"]}'
-# {"request_id":"req_20261123T101500_...","status":"accepted"}
+  -d @order-123.json
+# {"request_id":"req_20261123T101500_1a2b3c4d_0001","status":"accepted"}
 
 curl -s -H 'Authorization: Bearer <token of tenant-a>' \
-  'http://worker-2:8090/jobs?request_id=req_20261123T101500_...'
-# {"request_id":"...","status":"running","updated_at":"...","parts":{"total":null,"received":0,"failed":0}}
+  'http://worker-2:8090/jobs?request_id=req_20261123T101500_1a2b3c4d_0001'
+# {"parts":{"failed":0,"received":2,"total":6},"request_id":"req_20261123T101500_1a2b3c4d_0001","status":"running","updated_at":"2026-11-23T10:15:02.123456Z"}
+
+# Later, when every part has a result:
+# {"duration_seconds":29.4,"parts":{"failed":0,"received":6,"total":6},"request_id":"req_20261123T101500_1a2b3c4d_0001","status":"done","updated_at":"2026-11-23T10:15:31.500000Z","result":{"parts":6,"failed_parts":0,"items_done":600}}
 ```
+
+A request with at most 500 items is a local message: it runs on the owner
+and writes no `running` record, so a `GET` shows `accepted` and then `done`.
 
 The id in the answer comes from the `request_id` hook. By default it is a
 generated id. To let the client choose the id, override the hook, for
@@ -1292,7 +1301,8 @@ The gates run in the usual order of the HTTP source: `401`, `429` (the
 the body check (`422`) and the `max_concurrent` slot (`503 capacity`). Their
 bodies are the ones of [Status codes](webapp.md#status-codes). `503
 not_ready` has one more cause: the status map of this worker is not
-restored yet (see [The status topic](#the-status-topic)).
+restored yet (see [The status topic](#the-status-topic)). Its `error` is then
+`webapp is starting; the status of HTTP jobs is not restored yet`.
 
 Then:
 
@@ -1343,7 +1353,7 @@ memory. `503 shutdown` and `503 not_ready` apply.
 |---|---|---|---|
 | 200 | The status body | `status_read` | The id is known and belongs to this client. |
 | 404 | `{"error": "not_found", "request_id": "<id>"}` | `not_found` | The id is unknown, or belongs to another client. |
-| 422 | `{"error": "invalid_request", "details": "request_id is required"}` | `error` | The parameter is missing or empty. |
+| 422 | `{"error": "invalid_request", "request_id": "<generated id>", "details": "request_id is required"}` | `error` | The parameter is missing or empty. |
 | 503 | `{"status": "unavailable", "error": "the status could not be read", "request_id": "<id>"}` | `unavailable` | The main loop did not answer in time. |
 | 503 | The `shutdown` body of the gates | `shutdown` | The worker started to stop while the read waited for an unknown id. |
 
@@ -1357,10 +1367,11 @@ read answers at once.
 The status body:
 
 ```json
-{"request_id": "order-123", "status": "running",
- "updated_at": "2026-11-23T10:15:02.123456Z",
- "parts": {"total": 1000, "received": 412, "failed": 0}}
+{"parts":{"failed":0,"received":412,"total":1000},"request_id":"order-123","status":"running","updated_at":"2026-11-23T10:15:02.123456Z"}
 ```
+
+The keys are sorted. In a `done` body the `result` comes last, as the
+handler's hook gave it.
 
 | `status` | Fields besides `request_id`, `status` and `updated_at` |
 |---|---|
@@ -1441,8 +1452,8 @@ With the switch off:
   `on_group_complete` and `on_message_complete` of a part or of a local
   message is dropped before delivery, and `PartResult.deliveries` stays
   empty. `part_data` runs.
-- `on_window_complete`: a window result has no message to tell its
-  deliveries apart. When one message of the window belongs to a job with
+- `on_window_complete`: a window result belongs to all messages of the
+  window, not to one message. When one message of the window belongs to a job with
   the switch off, the whole window result is dropped, also the share of the
   other messages. Keep window results out of a handler that mixes such jobs
   with other messages, or use `on_message_complete`.
@@ -1636,6 +1647,12 @@ and cleanup policy.
 5. The status map lives in memory on every worker with the feature on. See
    **Memory** in [The status topic](#the-status-topic).
 6. A job cannot be cancelled.
+7. Two clients that `POST` the same new id at the same moment both get
+   `202`, because neither worker has a status of the id yet. The message
+   with the higher offset is dropped as a duplicate, and its client reads
+   `404` for the id, or the status of the other job when it is the same
+   client. After a restart, the `accepted` record of the dropped message
+   can show again for that id once the other job has left the map.
 
 ### Metrics and log events of HTTP jobs {#http-jobs-observability}
 
