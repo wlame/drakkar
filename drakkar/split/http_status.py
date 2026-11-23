@@ -32,6 +32,7 @@ FAILED_OUTCOMES: tuple[str, ...] = (
     'orphaned',
     'parse',
     'response_failed',
+    'duplicate',
 )
 ENDED_STATES = frozenset({'done', 'failed'})
 
@@ -231,9 +232,10 @@ class StatusMap:
         self._heap: list[tuple[float, str, int]] = []
         self._generation = 0
         self._counts = dict.fromkeys(STATE_RANK, 0)
-        # The jobs whose end state expired, by request id: marks of this round and of the round before.
-        self._marks: dict[str, str] = {}
-        self._old_marks: dict[str, str] = {}
+        # The jobs whose end state expired, by request id: marks of this round and of the round before. An id
+        # can have several such jobs (a reused id, a dropped duplicate), so each id keeps a set.
+        self._marks: dict[str, set[str]] = {}
+        self._old_marks: dict[str, set[str]] = {}
 
     def __len__(self) -> int:
         """The number of stored entries."""
@@ -253,10 +255,7 @@ class StatusMap:
         if record.is_ended and record.updated_at + self._retention <= now:
             self._end_expired(record)
             return False
-        if not record.is_ended and record.job in (
-            self._marks.get(record.request_id),
-            self._old_marks.get(record.request_id),
-        ):
+        if not record.is_ended and self._is_marked(record):
             return False
         entry = self._entries.get(record.request_id)
         if entry is not None:
@@ -273,9 +272,15 @@ class StatusMap:
             heapq.heappush(self._heap, (record.updated_at + self._retention, record.request_id, self._generation))
         return True
 
+    def _is_marked(self, record: StatusRecord) -> bool:
+        """Whether the end state of the job of ``record`` expired in this round of marks or the one before."""
+        return record.job in self._marks.get(record.request_id, ()) or record.job in self._old_marks.get(
+            record.request_id, ()
+        )
+
     def _end_expired(self, record: StatusRecord) -> None:
         """Mark the job of an expired end-state record as ended, and remove the entry of that job it beats."""
-        self._marks[record.request_id] = record.job
+        self._marks.setdefault(record.request_id, set()).add(record.job)
         entry = self._entries.get(record.request_id)
         if entry is None:
             return

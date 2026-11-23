@@ -15,7 +15,8 @@
     "attempts_spent",
     "orphaned",
     "parse",
-    "response_failed"
+    "response_failed",
+    "duplicate"
   ],
   "state_rank": {
     "accepted": 0,
@@ -276,6 +277,24 @@
         ["dk-status-version", "1"]
       ],
       "value": "{\"client\":\"tenant-a\",\"error\":\"the result is 70000 bytes, the limit is 65536\",\"job\":\"7:500\",\"outcome\":\"response_failed\",\"state\":\"failed\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "failed_duplicate",
+      "input": {
+        "request_id": "order-123",
+        "state": "failed",
+        "partition": 7,
+        "offset": 501,
+        "client": "tenant-a",
+        "updated_at": "2026-11-23T10:15:02.123456Z",
+        "outcome": "duplicate",
+        "error": "another request with this request_id was stored first"
+      },
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"error\":\"another request with this request_id was stored first\",\"job\":\"7:501\",\"outcome\":\"duplicate\",\"state\":\"failed\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
     }
   ],
   "invalid_status_cases": [
@@ -620,6 +639,94 @@
         "client": "tenant-a",
         "updated_at": "2026-11-23T10:15:09.500000Z"
       }
+    },
+    {
+      "name": "a_dropped_duplicate_whose_end_expired_with_its_first_job",
+      "retention_seconds": 60,
+      "now": "2026-11-23T10:15:09.500000Z",
+      "records": [
+        {
+          "request_id": "order-123",
+          "state": "accepted",
+          "partition": 7,
+          "offset": 500,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:00:00.500000Z"
+        },
+        {
+          "request_id": "order-123",
+          "state": "done",
+          "partition": 7,
+          "offset": 500,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:00:01.000000Z",
+          "result": "null",
+          "duration_seconds": 1.0
+        },
+        {
+          "request_id": "order-123",
+          "state": "accepted",
+          "partition": 7,
+          "offset": 501,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:00:00.600000Z"
+        },
+        {
+          "request_id": "order-123",
+          "state": "failed",
+          "partition": 7,
+          "offset": 501,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:00:01.000000Z",
+          "outcome": "duplicate",
+          "error": "another request with this request_id was stored first"
+        }
+      ],
+      "expected": null
+    },
+    {
+      "name": "two_expired_jobs_of_one_id_keep_both_marks",
+      "retention_seconds": 60,
+      "now": "2026-11-23T10:15:09.500000Z",
+      "records": [
+        {
+          "request_id": "order-123",
+          "state": "done",
+          "partition": 7,
+          "offset": 500,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:00:01.000000Z",
+          "result": "null",
+          "duration_seconds": 1.0
+        },
+        {
+          "request_id": "order-123",
+          "state": "done",
+          "partition": 7,
+          "offset": 900,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:00:01.000000Z",
+          "result": "null",
+          "duration_seconds": 1.0
+        },
+        {
+          "request_id": "order-123",
+          "state": "accepted",
+          "partition": 7,
+          "offset": 500,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:00:00.500000Z"
+        },
+        {
+          "request_id": "order-123",
+          "state": "accepted",
+          "partition": 7,
+          "offset": 900,
+          "client": "tenant-a",
+          "updated_at": "2026-11-23T10:00:00.600000Z"
+        }
+      ],
+      "expected": null
     }
   ]
 }

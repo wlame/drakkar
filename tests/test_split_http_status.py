@@ -307,3 +307,13 @@ def test_map_forgets_an_expired_job_after_two_mark_rounds():
 def test_status_record_refuses_a_failed_record_without_a_known_outcome(outcome):
     with pytest.raises(ValueError, match='a failed status needs an outcome'):
         status_record(failed(outcome=outcome))
+
+
+def test_map_marks_every_expired_job_of_one_id():
+    m = StatusMap(100)
+    now = UPDATED + 1000
+    m.put(done(offset=500), now=now)
+    m.put(done(offset=900), now=now)
+    assert not m.put(make(offset=500), now=now)
+    assert not m.put(make(offset=900), now=now)
+    assert len(m) == 0

@@ -290,7 +290,9 @@ parametrize).
     rebuild a different state than the live owner had.
     With `split.http.enabled`, the end-state status record of an HTTP job is
     acknowledged first. Only then does the owner write `closed`, or complete
-    a local or unparsed message. A duplicate writes no status. The status map is fed only by the follower
+    a local, unparsed or duplicate message. A duplicate gets the status
+    `failed` with the outcome `duplicate`; readers keep the earlier job,
+    because the lower offset wins. The status map is fed only by the follower
     (`drakkar/split/http_follower.py`) and is read and written only on the
     main loop; the HTTP source thread reaches it through `dispatch_to_loop`.
 

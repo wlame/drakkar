@@ -111,6 +111,8 @@ class BeginOutcome(StrEnum):
 
 # The longest the owner waits for the status follower to read the end of the status topic before the duplicate rule.
 DUPLICATE_CHECK_WAIT_SECONDS = 5.0
+# The error text of the ``failed`` status that ends a dropped duplicate.
+DUPLICATE_ERROR = 'another request with this request_id was stored first'
 
 
 class OwnerHost(Protocol):
@@ -449,11 +451,16 @@ class SplitOwner:
 
         A message is a duplicate when its request id belongs to a message of
         a lower offset of this partition: in the map, or among the jobs this
-        owner began. It completes with no hook call and no status record.
-        The same offset is the same message given again, never a duplicate.
-        A job the results log already has is never a duplicate: its offset
-        completes only by the log, so the owner follows it. Every message,
-        a duplicate too, first closes the orphans below its offset.
+        owner began. No hook runs for it. Its own job ends with the status
+        ``failed``, outcome ``duplicate``, written as a task of the processor
+        (:meth:`end_duplicate`), so its ``accepted`` record never stands
+        alone in the topic. Readers keep the first job: the lower offset wins.
+        The same offset is the same message given again, never a duplicate,
+        unless the map shows that very job ended as a duplicate: the message
+        was given again after its end was written. A job the results log
+        already has is never a duplicate: its offset completes only by the
+        log, so the owner follows it. Every message, a duplicate too, first
+        closes the orphans below its offset.
         """
         side = self._settings.status
         http_job = message.http_job
@@ -470,8 +477,10 @@ class SplitOwner:
             return BeginOutcome.JOB
         self._close_orphans_below(offset)
         request_id = http_job.request_id
-        first = None if self._table.job(offset) is not None else self._first_offset_of(request_id, offset)
-        if first is None:
+        if self._table.job(offset) is not None:
+            return None
+        first = self._first_offset_of(request_id, offset)
+        if first is None and not self._ended_as_duplicate(request_id, offset):
             return None
         logger.info(
             'split_http_duplicate',
@@ -479,10 +488,12 @@ class SplitOwner:
             partition=self._label,
             request_id=request_id,
             job=f'{self._partition}:{offset}',
-            first_job=f'{self._partition}:{first}',
+            first_job=None if first is None else f'{self._partition}:{first}',
         )
-        self._host.complete_job_offset(offset)
-        return BeginOutcome.DONE
+        # The duplicate is never noted among the begun ids, so its end cannot forget the id of the first job.
+        self._host.hold_job_offset(offset)
+        self._host.start_job_end(message, functools.partial(self.end_duplicate, message))
+        return BeginOutcome.JOB
 
     async def _wait_for_status_follower(self, side: HttpOwnerSide) -> None:
         """Wait at most ``DUPLICATE_CHECK_WAIT_SECONDS`` for the status follower to read what the topic holds now.
@@ -514,6 +525,18 @@ class SplitOwner:
             found.append(begun)
         return min(found, default=None)
 
+    def _ended_as_duplicate(self, request_id: str, offset: int) -> bool:
+        """Whether the map holds the end of the job at ``offset`` as a dropped duplicate."""
+        side = self._settings.status
+        assert side is not None
+        known = side.status_map.get(request_id)
+        return (
+            known is not None
+            and (known.partition, known.offset) == (self._partition, offset)
+            and known.state == 'failed'
+            and known.outcome == 'duplicate'
+        )
+
     def fail_unparsed(self, message: SourceMessage) -> None:
         """End an HTTP job whose message could not be parsed; its DLQ record, if any, is already settled.
 
@@ -535,18 +558,25 @@ class SplitOwner:
         record can never be written: the offset stalls. A worker that takes
         no split job over HTTP writes nothing and answers true.
         """
+        return await self._end_unsplit(
+            message, outcome='parse', error=cut_error(message.parse_error or UNKNOWN_PARSE_ERROR)
+        )
+
+    async def end_duplicate(self, message: SourceMessage) -> bool | None:
+        """Write the ``failed`` status, outcome ``duplicate``, of an HTTP job message that was dropped.
+
+        The answers are those of :meth:`end_unparsed`.
+        """
+        return await self._end_unsplit(message, outcome='duplicate', error=DUPLICATE_ERROR)
+
+    async def _end_unsplit(self, message: SourceMessage, *, outcome: str, error: str) -> bool | None:
+        """Write the ``failed`` status of an HTTP job that ends without a split; how its offset settles."""
         if not self._ender.is_http_job(message):
             return True
         side = self._settings.status
         assert side is not None
         record = end_record(
-            message,
-            state='failed',
-            outcome='parse',
-            error=cut_error(message.parse_error or UNKNOWN_PARSE_ERROR),
-            parts=None,
-            duration=None,
-            now=side.clock(),
+            message, state='failed', outcome=outcome, error=error, parts=None, duration=None, now=side.clock()
         )
         written = await self._ender.write_status(record)
         if written == 'stopped':

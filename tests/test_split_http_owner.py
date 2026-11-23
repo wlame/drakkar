@@ -19,7 +19,7 @@ from structlog.testing import capture_logs
 from drakkar import partition as partition_module
 from drakkar.split.http_jobs import running_record
 from drakkar.split.http_status import PartCounts, StatusMap, StatusRecord
-from drakkar.split.owner import DUPLICATE_CHECK_WAIT_SECONDS, RUNNING_MIN_INTERVAL_SECONDS
+from drakkar.split.owner import DUPLICATE_CHECK_WAIT_SECONDS, DUPLICATE_ERROR, RUNNING_MIN_INTERVAL_SECONDS
 from tests.split_owner_helpers import PARTITION, SplittingHandler, World, items, source_message, summary, wait_until
 from tests.test_split_http_end import (
     CLIENT,
@@ -128,7 +128,12 @@ def duplicates(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # --- duplicates ---
 
 
-async def test_duplicate_of_lower_offset_in_map_completes_without_hook_or_status():
+def duplicate_ends(http: HttpWorker) -> list[StatusRecord]:
+    """The ``failed`` status records with the outcome ``duplicate``, in order."""
+    return [record for record in http.statuses() if record.outcome == 'duplicate']
+
+
+async def test_duplicate_of_lower_offset_in_map_ends_with_a_status_and_no_hook():
     world = World()
     handler = SplittingHandler({500: items(2)}, answer=summary())
     http = HttpWorker(world, handler)
@@ -137,15 +142,48 @@ async def test_duplicate_of_lower_offset_in_map_completes_without_hook_or_status
         await http.start(http_message(500))
         await wait_until(lambda: http.worker.committed == 501)
 
-    assert handler.split_calls == [] and handler.jobs == []
-    assert http.statuses(running=True) == [] and world.kinds() == []
+    assert handler.split_calls == [] and handler.jobs == [] and world.kinds() == []
+    [ended] = http.statuses(running=True)
+    assert (ended.state, ended.outcome, ended.job, ended.client) == ('failed', 'duplicate', f'{PARTITION}:500', CLIENT)
+    assert ended.error == DUPLICATE_ERROR == 'another request with this request_id was stored first'
     [line] = duplicates(logs)
     assert (line['log_level'], line['category'], line['request_id']) == ('info', 'split', HTTP_ID)
     assert (line['job'], line['first_job']) == (f'{PARTITION}:500', f'{PARTITION}:400')
+    # Live readers keep the first job: the lower offset wins.
+    assert http.status_map.get(HTTP_ID).offset == 400
     await http.worker.stop()
 
 
-async def test_same_window_duplicate_completes_without_split():
+async def test_the_offset_of_a_duplicate_completes_only_after_its_status_is_acknowledged():
+    world = World()
+    http = HttpWorker(world, SplittingHandler(answer=summary()), hold_status=True)
+    put(http, known(400))
+    await http.start(http_message(500))
+    await wait_until(lambda: ('status_held', None) in http.events)
+    await asyncio.sleep(0.05)
+    assert ('complete', 500) not in http.events and http.worker.commits == []
+
+    http.release_status()
+    await wait_until(lambda: http.worker.committed == 501)
+    assert http.events.index(('status', 'failed')) < http.events.index(('complete', 500))
+    await http.worker.stop()
+
+
+async def test_a_stop_during_the_status_write_of_a_duplicate_leaves_its_offset_pending():
+    world = World()
+    http = HttpWorker(world, SplittingHandler(answer=summary()), hold_status=True)
+    put(http, known(400))
+    await http.start(http_message(500))
+    await wait_until(lambda: ('status_held', None) in http.events)
+
+    http.worker.processor.signal_stop()
+    await asyncio.wait_for(http.worker.processor.drain(), timeout=10)
+
+    assert ('complete', 500) not in http.events and http.worker.commits == []
+    await http.worker.stop()
+
+
+async def test_same_window_duplicate_ends_without_split():
     world = World()
     handler = SplittingHandler({500: items(2), 501: items(2)}, answer=summary())
     http = HttpWorker(world, handler)
@@ -156,11 +194,75 @@ async def test_same_window_duplicate_completes_without_split():
     assert handler.split_calls == [500]
     [line] = duplicates(logs)
     assert (line['job'], line['first_job']) == (f'{PARTITION}:501', f'{PARTITION}:500')
+    assert [record.job for record in duplicate_ends(http)] == [f'{PARTITION}:501']
+    owner = http.worker.owner
+    assert owner is not None
+    # The end of the duplicate does not forget the id of the first job, which is still running.
+    assert owner._begun_ids == {HTTP_ID: 500}
 
     await wait_until(lambda: world.kinds() == ['open', 'split-done'])
     world.report_all()
     await wait_until(lambda: http.worker.committed == 502)
-    assert {record.job for record in http.statuses(running=True)} == {f'{PARTITION}:500'}
+    assert {record.job for record in http.statuses(running=True) if record.outcome != 'duplicate'} == {
+        f'{PARTITION}:500'
+    }
+    await http.worker.stop()
+
+
+async def test_a_third_message_of_an_id_is_a_duplicate_after_the_second_ended():
+    world = World()
+    handler = SplittingHandler({500: items(2)}, answer=summary())
+    http = HttpWorker(world, handler)
+    with capture_logs() as logs:
+        await http.start(http_message(500), http_message(501))
+        await wait_until(lambda: ('complete', 501) in http.events)
+        http.worker.give(http_message(502))
+        await wait_until(lambda: ('complete', 502) in http.events)
+
+    assert handler.split_calls == [500]
+    assert [line['first_job'] for line in duplicates(logs)] == [f'{PARTITION}:500', f'{PARTITION}:500']
+    await http.worker.stop()
+
+
+async def test_a_duplicate_given_again_after_a_restart_writes_its_end_again():
+    world = World()
+    handler = SplittingHandler({500: items(1)}, answer=summary())
+    http = HttpWorker(world, handler)
+    put(http, known(400))
+    put(
+        http,
+        dataclasses.replace(
+            known(500, 'failed'), outcome='duplicate', error=DUPLICATE_ERROR, updated_at=world.seconds()
+        ),
+    )
+    await http.start(http_message(500))
+    await wait_until(lambda: http.worker.committed == 501)
+
+    assert handler.split_calls == []
+    assert [record.job for record in duplicate_ends(http)] == [f'{PARTITION}:500']
+    await http.worker.stop()
+
+
+async def test_a_duplicate_given_again_once_the_first_job_left_the_map_writes_its_end_again():
+    world = World()
+    handler = SplittingHandler({500: items(1)}, answer=summary())
+    http = HttpWorker(world, handler)
+    # Only the end of the dropped duplicate is left: the entries of the first job expired.
+    put(
+        http,
+        dataclasses.replace(
+            known(500, 'failed'), outcome='duplicate', error=DUPLICATE_ERROR, updated_at=world.seconds()
+        ),
+    )
+    assert http.status_map.get(HTTP_ID) is not None
+    with capture_logs() as logs:
+        await http.start(http_message(500))
+        await wait_until(lambda: http.worker.committed == 501)
+
+    assert handler.split_calls == []
+    [line] = duplicates(logs)
+    assert line['first_job'] is None
+    assert [record.job for record in duplicate_ends(http)] == [f'{PARTITION}:500']
     await http.worker.stop()
 
 

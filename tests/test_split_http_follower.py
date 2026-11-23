@@ -826,3 +826,92 @@ async def test_readyz_names_a_status_map_that_is_not_restored():
 def test_split_http_status_counts_as_restored_without_the_feature(enabled, split):
     app = SimpleNamespace(_split_http_enabled=enabled, _split=split)
     assert DrakkarApp.split_http_status_restored.fget(app) is True  # ty: ignore[invalid-argument-type]
+
+
+async def test_caught_up_waits_for_the_batch_behind_the_read_position(world, monkeypatch):
+    # The client moves its position past the whole batch when ``consume`` returns; the batch is applied in
+    # chunks of 64 with a turn of the loop between them. A wait that starts in such a pause must not answer
+    # before the record it waits for, which sits past the first chunk, is in the map.
+    await restored(world)
+    consumer = world.consumers[0]
+    original = consumer.consume
+    answers: list[tuple[bool, StatusRecord | None]] = []
+    checks: list[asyncio.Task[None]] = []
+
+    async def check() -> None:
+        reached = await world.follower.caught_up(5)
+        answers.append((reached, world.follower.get('needed')))
+
+    async def consume_then_check(num_messages: int = 1, timeout: float = -1) -> Any:
+        messages = await original(num_messages=num_messages, timeout=timeout)
+        if messages and not checks:
+            checks.append(asyncio.ensure_future(check()))
+        return messages
+
+    monkeypatch.setattr(consumer, 'consume', consume_then_check)
+    for index in range(3 * http_follower.CHUNK_RECORDS):
+        world.write(status(f'filler{index}'))
+    world.write(status('needed'))
+    await wait_until(lambda: bool(checks))
+    await asyncio.wait_for(checks[0], 5)
+    [(reached, found)] = answers
+    assert reached
+    assert found is not None
+
+
+async def test_follower_restore_leaves_no_entry_for_an_ended_job_and_its_ended_duplicate(world):
+    old = NOW - 2 * RETENTION
+    world.write(status('r1', offset=500, updated_at=old))
+    world.write(status('r1', 'done', offset=500, updated_at=old))
+    world.write(status('r1', offset=900, updated_at=old))
+    world.write(
+        status(
+            'r1',
+            'failed',
+            offset=900,
+            outcome='duplicate',
+            error='another request with this request_id was stored first',
+            updated_at=old,
+        )
+    )
+    await restored(world)
+    assert world.follower.get('r1') is None
+    assert sum(world.map.counts().values()) == 0
+
+
+async def test_caught_up_answers_false_at_once_for_a_while_after_a_wait_that_ran_out(world, monkeypatch):
+    monkeypatch.setattr(http_follower, 'CATCH_UP_SKIP_SECONDS', 0.3)
+    await restored(world)
+    world.write(status('r1'))
+    consumer = world.consumers[0]
+    monkeypatch.setattr(consumer, 'consume', _reads_nothing)
+    assert not await world.follower.caught_up(0.1)
+
+    asked: list[int] = []
+    original = consumer.get_watermark_offsets
+
+    async def counted(*args: Any, **kwargs: Any) -> Any:
+        asked.append(1)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(consumer, 'get_watermark_offsets', counted)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    assert not await world.follower.caught_up(5)
+    assert loop.time() - started < 0.05 and asked == []
+
+    await asyncio.sleep(0.35)
+    monkeypatch.undo()
+    assert await world.follower.caught_up(5)
+
+
+async def test_caught_up_after_a_failed_broker_call_skips_the_next_waits(world, monkeypatch):
+    await restored(world)
+
+    async def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise KafkaException(KafkaError(KafkaError._TRANSPORT, 'broker down'))
+
+    monkeypatch.setattr(world.consumers[0], 'get_watermark_offsets', refuse)
+    assert not await world.follower.caught_up(1)
+    monkeypatch.undo()
+    assert not await world.follower.caught_up(1)

@@ -48,6 +48,9 @@ EXPIRY_SWEEP_LIMIT = 10_000
 MAX_STATUS_WAITERS = 1000
 # How often a wait for the end of the status topic looks at the read positions again when no record came.
 CATCH_UP_CHECK_SECONDS = 0.1
+# After a wait for the end of the status topic that ran out of time or failed, the next waits answer false at
+# once for this long: in an outage of the topic, no message waits the full time and holds its partition loop.
+CATCH_UP_SKIP_SECONDS = 30.0
 
 SleepFn = Callable[[float], Awaitable[None]]
 
@@ -109,10 +112,18 @@ class StatusFollower:
         self._waiters: dict[str, list[tuple[str, asyncio.Future[StatusRecord | None]]]] = {}
         self._waiting = 0
         self._rate_limited = RateLimitedLog(time.monotonic)
+        # The monotonic time before which a wait for the end of the status topic answers false at once.
+        self._skip_catch_up_until = 0.0
         # The partitions of the status topic as the restore found them.
         self._partition_ids: list[int] = []
-        # Set after every batch the follower applied; a wait for the end of the topic clears it.
+        # Set after every live batch the follower ended; a wait for the end of the topic clears it.
         self._advanced = asyncio.Event()
+        # The live batches started (counted at the call of ``consume``) and ended (after ``_apply``). The read
+        # position of the client points past a whole batch as soon as ``consume`` returns, before the
+        # follower applied it; a record below a position read now is in the map once every batch started
+        # by then has ended.
+        self._batches_started = 0
+        self._batches_ended = 0
 
     # --- lifecycle ---
 
@@ -167,14 +178,25 @@ class StatusFollower:
         """Wait until the follower has read up to the end each partition of the status topic has now.
 
         The end offsets are read once, at the call; the wait then follows the
-        read positions of the follower. True when it reached them within
+        records the follower applied, and its read position once the batches
+        behind that position are applied. True when it reached them within
         ``timeout`` seconds. False when the map is not restored, the follower
-        stops, the broker does not answer, or the time runs out. Every
-        broker call is a coroutine of the asyncio consumer, so the loop is
-        never held.
+        stops, the broker does not answer, or the time runs out. After a
+        wait that ran out of time or failed, every wait within
+        ``CATCH_UP_SKIP_SECONDS`` answers false at once. Every broker call is
+        a coroutine of the asyncio consumer, so the loop is never held.
         """
         if self._stopped or not self.is_restored or self._consumer is None:
             return False
+        if time.monotonic() < self._skip_catch_up_until:
+            return False
+        reached = await self._wait_caught_up(timeout)
+        if not reached and not self._stopped:
+            self._skip_catch_up_until = time.monotonic() + CATCH_UP_SKIP_SECONDS
+        return reached
+
+    async def _wait_caught_up(self, timeout: float) -> bool:
+        """The wait of :meth:`caught_up` itself, with no skip."""
         try:
             async with asyncio.timeout(timeout):
                 ends = await self._end_offsets()
@@ -205,13 +227,27 @@ class StatusFollower:
         return ends
 
     async def _reached(self, ends: dict[int, int]) -> bool:
-        """Whether the follower has read up to ``ends``, by the records it applied or by its read position."""
+        """Whether the follower has read up to ``ends``, by the records it applied or by its read position.
+
+        A read position counts only once every live batch that started
+        before the position was read has been applied: the client moves the
+        position past a whole batch as soon as ``consume`` returns.
+        """
         behind = [partition for partition, end in ends.items() if self._next.get(partition, 0) < end]
         if not behind:
             return True
         # Offsets that hold no record (a cut log, markers) move the position but bring no record.
         rows = await self._consumer.position([TopicPartition(self._topic, partition) for partition in behind])
-        return all(row.offset >= ends[row.partition] for row in rows)
+        if not all(row.offset >= ends[row.partition] for row in rows):
+            return False
+        started = self._batches_started
+        while self._batches_ended < started:
+            self._advanced.clear()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._advanced.wait(), CATCH_UP_CHECK_SECONDS)
+            if self._stopped:
+                return False
+        return True
 
     # --- reads ---
 
@@ -377,19 +413,28 @@ class StatusFollower:
 
     async def _read_once(self) -> None:
         """One batch: consume and apply; pause after a failure."""
+        self._batches_started += 1
         try:
-            messages = await self._consumer.consume(num_messages=BATCH_SIZE, timeout=POLL_TIMEOUT_SECONDS)
+            messages = await self._consume_live()
+            if messages is not None:
+                await self._apply(messages)
+        finally:
+            self._batches_ended += 1
+            self._advanced.set()
+        if messages is None or any(message.error() for message in messages):
+            await self._sleep(CONSUMER_ERROR_PAUSE_SECONDS)
+        else:
+            await asyncio.sleep(0)
+
+    async def _consume_live(self) -> list[Any] | None:
+        """The next live batch; None after a failure, which is logged."""
+        try:
+            return await self._consumer.consume(num_messages=BATCH_SIZE, timeout=POLL_TIMEOUT_SECONDS)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self._log_limited('warning', 'consume', 'split_http_status_consume_failed', error=exc)
-            await self._sleep(CONSUMER_ERROR_PAUSE_SECONDS)
-            return
-        await self._apply(messages)
-        if any(message.error() for message in messages):
-            await self._sleep(CONSUMER_ERROR_PAUSE_SECONDS)
-        else:
-            await asyncio.sleep(0)
+            return None
 
     async def _apply(self, messages: list[Any]) -> int:
         """Apply a batch to the map, with a turn of the loop between chunks; the number of records read."""
@@ -414,7 +459,6 @@ class StatusFollower:
                 now = self._clock()
         if read:
             self._set_gauge()
-            self._advanced.set()
         return read
 
     def _apply_one_safely(self, message: Any, value: bytes | None, now: float) -> None:

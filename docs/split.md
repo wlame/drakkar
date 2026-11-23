@@ -1395,6 +1395,7 @@ The `outcome` of `failed`:
 | `orphaned` | The source no longer gives the message of a restored job. | `the source no longer gives the message of this job`. |
 | `parse` | The message could not be parsed on the owner, under any `sources.kafka.on_parse_error`. With `dlq` the DLQ record is written too. | The parse error. |
 | `response_failed` | `http_job_result` raised, its answer is not JSON, its JSON is larger than `split.http.max_response`, or the `done` record could not be written. The job itself ended normally. | Why. |
+| `duplicate` | The message was dropped as a duplicate: an earlier message of the same partition has the same request id. No hook ran for it. The `job` of the record names the dropped message. Readers of the status still see the earlier job, because the lower offset wins. | `another request with this request_id was stored first`. |
 
 `error` is cut to 2000 bytes, as `dk-error` of a DLQ record. The status never
 holds task output: for the outcome `dlq` it names only the stage where the
@@ -1478,10 +1479,17 @@ moment, or a retry after a `503`. The duplicate rule:
 - The owner, before it begins an HTTP job message, waits until its status
   map is restored. A message whose id the map has with a lower offset of the
   same partition, or whose id the owner began at a lower offset since it got
-  the partition, is a duplicate. It completes with no hook call and no
-  status record, and logs `split_http_duplicate`.
+  the partition, is a duplicate. No hook runs for it, and it logs
+  `split_http_duplicate`. The owner writes a `failed` status for the job of
+  the duplicate, with the outcome `duplicate`, and completes the offset only
+  after the broker acknowledged that record. So the `accepted` record of the
+  duplicate is never left alone in the status topic, and no later restore
+  takes it for a job that never ends. Status readers still see the earlier
+  job of the id, because the lower offset wins.
 - The same message given again (the same offset) is the same job, not a
-  duplicate. A job that the results topic already has is never a duplicate.
+  duplicate. The one exception is a duplicate that is given again after
+  its `failed` record was written: it is ended as a duplicate again. A job
+  that the results topic already has is never a duplicate.
 - An id is free again when its entry left the status map:
   `result_retention` after the end of its job. A `POST` with that id then
   starts a new job.
@@ -1635,7 +1643,11 @@ and cleanup policy.
    moment. This covers a follower that lags behind and a new owner after a
    rebalance. A record that reaches the topic after that moment, or a
    follower that needs more than 5 seconds, can still let a second message
-   of the same id run as a second job.
+   of the same id run as a second job. After a wait that ran out of time or
+   failed, the worker does not wait again for 30 seconds, so an outage of
+   the status topic does not hold every partition for 5 seconds a message.
+   In those 30 seconds the owner checks duplicates only with what its
+   status map holds.
 3. When two owners overlap after a rebalance, both can end the job. A
    client can then read `done` and later another end state of the same job:
    `done` and `failed` have the same rank, and the record that arrives last
@@ -1651,8 +1663,9 @@ and cleanup policy.
    `202`, because neither worker has a status of the id yet. The message
    with the higher offset is dropped as a duplicate, and its client reads
    `404` for the id, or the status of the other job when it is the same
-   client. After a restart, the `accepted` record of the dropped message
-   can show again for that id once the other job has left the map.
+   client. Once the other job has left the status map, a read of the id can
+   show the `failed` record of the dropped message, with the outcome
+   `duplicate`, until that record leaves the map too.
 
 ### Metrics and log events of HTTP jobs {#http-jobs-observability}
 
@@ -1686,7 +1699,7 @@ can repeat is rate-limited to one a minute and carries `suppressed`.
 | `split_http_store_failed` | warning | A request could not be stored in the source topic. Fields `request_id`, `client`, `error`. |
 | `split_http_dispatch_failed` | warning | The HTTP source thread did not get an answer from the main loop in time, and answered `503 unavailable`. One line per route a minute. Fields `route` (`submit` or `status`), `request_id`, `client`, `timeout_seconds`, `error`. |
 | `split_http_status_write_failed` | warning | A status record was not written. Fields `request_id`, `state`, `error`. |
-| `split_http_duplicate` | info | The owner completed a duplicate message with no hook call. Fields `partition`, `request_id`, `job`, `first_job`. |
+| `split_http_duplicate` | info | The owner dropped a duplicate message with no hook call; it ends the job of the message with `failed`, outcome `duplicate`. Fields `partition`, `request_id`, `job`, `first_job` (`null` when the message is a duplicate given again after the earlier job left the status map). |
 | `split_http_message_unhandled` | warning | A worker with the feature off got an HTTP job message and runs it as an ordinary message. Fields `partition`, `offset`. |
 | `split_http_delivery_dropped` | debug | A result was dropped because its job writes to no sink. Fields `partition`, `request_id`. |
 | `http_job_result_failed` | error | Category `handler`. `http_job_result` failed; the status is `failed` with `response_failed`. Fields `partition`, `job`, `error`. |
