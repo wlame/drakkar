@@ -162,13 +162,27 @@ class HttpWorker:
                 self.events.append(('status_refused', None))
                 item.on_delivery(self.status_errors.popleft(), FakeMessage(topic=item.topic, partition=item.partition))
                 return
-            deliver(item)
+            event: tuple[str, Any] | None = None
             if item.topic == STATUS_TOPIC:
                 parsed = parse_status_record(item.key, item.headers, item.value)
-                self.events.append(('status', None if parsed is None else parsed.state))
+                event = ('status', None if parsed is None else parsed.state)
             elif item.topic == RESULTS_TOPIC:
                 entry = parse_log_record(item.headers, item.value)
-                self.events.append(('results', None if entry is None else entry.kind))
+                event = ('results', None if entry is None else entry.kind)
+            if event is not None:
+                # The delivery runs on the producer's poll thread, and its report wakes the main loop. The
+                # event is noted after the record is in the log and before the report is handed over, so
+                # nothing the loop does because of the report can come before it in ``events``.
+                report = item.on_delivery
+                noted = event
+
+                def note_then_report(error: Any, message: Any) -> None:
+                    self.events.append(noted)
+                    if report is not None:
+                        report(error, message)
+
+                item.on_delivery = note_then_report
+            deliver(item)
 
         client._deliver = recorded  # ty: ignore[invalid-assignment]
         self._deliver_recorded = recorded
