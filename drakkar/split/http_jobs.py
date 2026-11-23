@@ -16,12 +16,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
+from pydantic import BaseModel
 
 from drakkar.metrics import split_http_jobs_accepted, split_http_status_reads, split_http_status_write_failures
+from drakkar.models import SourceMessage
 from drakkar.providers.resilience import RateLimitedLog, describe_error
 from drakkar.split.http_follower import MAX_STATUS_WAITERS as MAX_STATUS_WAITERS
+from drakkar.split.http_follower import StatusFollower
 from drakkar.split.http_message import source_message_record
-from drakkar.split.http_status import StatusRecord, answer_body, status_record
+from drakkar.split.http_status import PartCounts, State, StatusMap, StatusRecord, answer_body, status_record
 from drakkar.split.partmode import RETRY_FIRST_WAIT_SECONDS, RETRY_MAX_WAIT_SECONDS, publish_or_stop
 from drakkar.split.producer import SplitProduceError, SplitProducer
 from drakkar.utils import validate_request_id
@@ -91,12 +94,15 @@ class StatusWriter:
         self._sleep = sleep
         self._log_limit = log_limit
 
-    async def write_end(self, record: StatusRecord, stopped: asyncio.Event) -> EndWrite:
+    async def write_end(
+        self, record: StatusRecord, stopped: asyncio.Event, *, final_errors: list[str] | None = None
+    ) -> EndWrite:
         """Write an end-state record until it is acknowledged; its offset, or how the write ended.
 
         A failure a retry can fix is tried again after 1, 2, 4 ... 30
         seconds. A stop ends the retries (``stopped``). A record that can
-        never be written, a too large one included, gives ``final``.
+        never be written, a too large one included, gives ``final``; its
+        error text is appended to ``final_errors`` when one is given.
 
         Raises:
             asyncio.CancelledError: the task of the caller was cancelled.
@@ -109,6 +115,8 @@ class StatusWriter:
             except SplitProduceError as error:
                 self._note_failure(record, error)
                 if error.final or error.too_large:
+                    if final_errors is not None:
+                        final_errors.append(describe_error(error))
                     return 'final'
             except asyncio.CancelledError:
                 if _task_is_cancelled():
@@ -192,6 +200,69 @@ class StatusWriter:
             error=text,
             suppressed=suppressed,
         )
+
+
+@dataclass(frozen=True)
+class HttpOwnerSide:
+    """What the owner of a source partition needs to end HTTP jobs: the writer, the map and the result limit."""
+
+    writer: StatusWriter
+    status_map: StatusMap
+    follower: StatusFollower
+    max_response: int
+    clock: Callable[[], float]
+
+
+def encode_result(value: object, max_response: int) -> tuple[str | None, str | None]:
+    """The compact JSON text of a result, or why it cannot be stored: ``(text, None)`` or ``(None, error)``.
+
+    A pydantic model is dumped in its JSON mode first. The size limit counts
+    the UTF-8 bytes of the text.
+    """
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode='json')
+    try:
+        text = json.dumps(value, separators=(',', ':'), ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError, RecursionError) as error:
+        return None, f'the result is not JSON: {error}'
+    size = len(text.encode('utf-8'))
+    if size > max_response:
+        return None, f'the result is {size} bytes, the limit is {max_response}'
+    return text, None
+
+
+def end_record(
+    message: SourceMessage,
+    *,
+    state: State,
+    outcome: str | None = None,
+    error: str | None = None,
+    result_json: str | None = None,
+    parts: PartCounts | None,
+    duration: float | None,
+    now: float,
+) -> StatusRecord:
+    """The end-state status record of the HTTP job of ``message``.
+
+    Raises:
+        ValueError: the message is no HTTP job message.
+    """
+    http_job = message.http_job
+    if http_job is None:
+        raise ValueError('an end status needs the message of an HTTP job')
+    return StatusRecord(
+        request_id=http_job.request_id,
+        state=state,
+        partition=message.partition,
+        offset=message.offset,
+        client=http_job.client,
+        updated_at=now,
+        parts=parts,
+        result_json=result_json,
+        duration_seconds=duration,
+        outcome=outcome,
+        error=error,
+    )
 
 
 @dataclass(frozen=True)

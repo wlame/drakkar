@@ -1461,7 +1461,7 @@ class PartitionProcessor:
                 continue
             if msg.parse_error is not None and msg.http_job is not None and self._owner is not None:
                 # An HTTP job never reaches split without its payload: its owner ends it as failed.
-                self._owner.fail_unparsed(msg)
+                self._fail_unparsed(msg, self._owner)
                 continue
             if self._owner is not None and not await self._begin_split(msg, self._owner):
                 continue
@@ -2446,10 +2446,22 @@ class PartitionProcessor:
         after the job's status says it failed; any other offset completes here.
         """
         if msg.http_job is not None and self._owner is not None:
-            self._owner.fail_unparsed(msg)
+            self._fail_unparsed(msg, self._owner)
             return
         self._offset_tracker.complete(msg.offset)
         await self._note_commit_due()
+
+    def _fail_unparsed(self, msg: SourceMessage, owner: SplitOwner) -> None:
+        """Let the owner end an HTTP job whose message could not be parsed; after a stop, leave its offset pending.
+
+        At a stop the end would only start a status write that the stop
+        ends again, so the offset stays pending and leaves the drain, as a
+        message that a stop keeps from ``begin`` does.
+        """
+        if self._stopping:
+            self._abandoned_offsets.add(msg.offset)
+            return
+        owner.fail_unparsed(msg)
 
     async def _execute_and_track(self, task: ExecutorTask, window: Window, retry_count: int = 0) -> None:
         """Run one task to its last outcome: hooks, delivery, trackers, window.

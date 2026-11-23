@@ -35,6 +35,8 @@ from drakkar.sinks.dlq_record import cut_error
 from drakkar.sinks.manager import CollectCallback, MessageDLQState, SinkManager
 from drakkar.split import partmode
 from drakkar.split.ending import ClosedRecord, EndFacts, EndSettings, JobEnder, local_facts
+from drakkar.split.http_jobs import HttpOwnerSide, end_record
+from drakkar.split.http_status import PartCounts, StatusRecord
 from drakkar.split.models import PartResult, TimedOutKind
 from drakkar.split.producer import NO_OFFSET, SplitProducer
 from drakkar.split.records import ClosedOutcome, JobRef, job_id, new_attempt_id, ref_id
@@ -60,6 +62,11 @@ SleepFn = Callable[[float], Awaitable[None]]
 # ``waiting_message``; the other two come from the job table.
 JobPhase = Literal['splitting', 'waiting', 'waiting_message', 'ending']
 
+
+# The error of the ``failed`` status of an HTTP job that is closed as orphaned.
+ORPHAN_ERROR = 'the source no longer gives the message of this job'
+# The error of a message whose parse failed and that carries no error text of its own.
+UNKNOWN_PARSE_ERROR = 'unknown parse error'
 
 # How many offsets of records that the job tracker could not apply an owner remembers; the oldest go first.
 MAX_UNAPPLIED_OFFSETS = 1024
@@ -157,6 +164,8 @@ class OwnerSettings:
     sleep: SleepFn = asyncio.sleep
     close_timeout: float = STREAM_CLOSE_TIMEOUT
     cancel_write_seconds: float = CANCEL_WRITE_SECONDS
+    # The status side of HTTP jobs; None when the worker takes no split job over HTTP.
+    status: HttpOwnerSide | None = None
 
     def split_settings(self) -> SplitSettings:
         """What a run of ``split`` needs."""
@@ -181,6 +190,7 @@ class OwnerSettings:
             results_reader=self.results_reader,
             clock=self.clock,
             sleep=self.sleep,
+            status=self.status,
         )
 
 
@@ -387,15 +397,42 @@ class SplitOwner:
     def fail_unparsed(self, message: SourceMessage) -> None:
         """End an HTTP job whose message could not be parsed; its DLQ record, if any, is already settled.
 
-        The message never reaches ``split``. The end runs as a task of the
-        processor, so the partition loop does not wait for it, and its
-        answer completes the offset.
+        The message never reaches ``split``. The offset is held, and the end
+        runs as a task of the processor, so the partition loop does not wait
+        for the status topic; its answer settles the offset. At a stop
+        nothing starts and the offset stays held.
         """
+        self._host.hold_job_offset(message.offset)
+        if self._stopping:
+            return
+        self._host.start_job_end(message, functools.partial(self.end_unparsed, message))
 
-        async def end() -> bool:
+    async def end_unparsed(self, message: SourceMessage) -> bool | None:
+        """Write the ``failed`` status of an HTTP job whose message could not be parsed.
+
+        True once the record is acknowledged: the offset may complete. None
+        when a stop ended the retries: the offset stays held. False when the
+        record can never be written: the offset stalls. A worker that takes
+        no split job over HTTP writes nothing and answers true.
+        """
+        if not self._ender.is_http_job(message):
             return True
-
-        self._host.start_job_end(message, end)
+        side = self._settings.status
+        assert side is not None
+        record = end_record(
+            message,
+            state='failed',
+            outcome='parse',
+            error=cut_error(message.parse_error or UNKNOWN_PARSE_ERROR),
+            parts=None,
+            duration=None,
+            now=side.clock(),
+        )
+        written = await self._ender.write_status(record)
+        if written == 'stopped':
+            self._host.hold_job_offset(message.offset)
+            return None
+        return written != 'final'
 
     async def end_local(self, message: SourceMessage, result: PartResult) -> bool:
         """End a local message as a job of one part; no record is written to any topic.
@@ -773,10 +810,14 @@ class SplitOwner:
     async def _close_orphan(self, job: JobState) -> None:
         """Write the ``closed`` record of an orphan; it is counted and logged only when the record is written.
 
-        A write that a stop ended, or that can never work, leaves the job
-        open in the results log: the next holder of the partition judges it
-        again, so it is not counted here.
+        An orphan of an HTTP job writes its ``failed`` status first, and
+        writes no ``closed`` until that status is acknowledged. A write that
+        a stop ended, or that can never work, leaves the job open in the
+        results log: the next holder of the partition judges it again, so it
+        is not counted here.
         """
+        if not await self._orphan_status_written(job):
+            return
         written = await self._ender.write_closed(
             self._ref_of(job),
             'orphaned',
@@ -796,6 +837,37 @@ class SplitOwner:
             parts=job.parts,
             hint='the source no longer gives the message of this job; it is closed with nothing delivered',
         )
+
+    async def _orphan_status_written(self, job: JobState) -> bool:
+        """Write the ``failed`` status of an orphan that is an HTTP job; true when its ``closed`` may follow.
+
+        An orphan has no message, so the status map tells whether it is an
+        HTTP job and whose: the map must hold the request id of the job's
+        ``open`` with this very job. The map is read only once it is
+        restored. A job the map does not know is a job of the source topic,
+        and writes no status.
+        """
+        side = self._settings.status
+        if side is None or job.request_id is None:
+            return True
+        if not await side.follower.wait_restored(self._stopped):
+            return False
+        known = side.status_map.get(job.request_id)
+        if known is None or known.job != f'{self._partition}:{job.offset}':
+            return True
+        record = StatusRecord(
+            request_id=job.request_id,
+            state='failed',
+            partition=self._partition,
+            offset=job.offset,
+            client=known.client,
+            updated_at=side.clock(),
+            parts=PartCounts(job.parts, job.received_count, job.failed_parts),
+            outcome='orphaned',
+            error=ORPHAN_ERROR,
+        )
+        written = await self._ender.write_status(record)
+        return isinstance(written, int)
 
     # --- the split of a job ---
 
@@ -921,7 +993,7 @@ class SplitOwner:
         may_complete = await self._ender.send_to_dlq(
             held.message, held.state, stage='split', error=error, attempts=None
         )
-        return await self._close_failed(held, ref, 'split_failed', may_complete=may_complete)
+        return await self._close_failed(held, ref, 'split_failed', may_complete=may_complete, error=error)
 
     async def _fail_spent_attempts(self, held: _HeldJob, ref: JobRef, spent: int) -> BeginOutcome:
         """End a job whose split did not finish in ``split.max_attempts`` attempts: one DLQ record, then ``closed``.
@@ -937,25 +1009,42 @@ class SplitOwner:
         may_complete = await self._ender.send_to_dlq(
             held.message, held.state, stage='split', error=error, attempts=spent
         )
-        return await self._close_failed(held, ref, 'attempts_spent', may_complete=may_complete)
+        return await self._close_failed(held, ref, 'attempts_spent', may_complete=may_complete, error=error)
 
     async def _close_failed(
-        self, held: _HeldJob, ref: JobRef, outcome: ClosedOutcome, *, may_complete: bool
+        self, held: _HeldJob, ref: JobRef, outcome: ClosedOutcome, *, may_complete: bool, error: str
     ) -> BeginOutcome:
         """Write ``closed`` for a job whose split failed; its offset is settled later, by what the log shows.
 
         With no DLQ record under ``stall`` nothing is closed, so a restart
-        tries the job again. A stop during the retries of the write leaves
-        the offset pending. Once the record is acknowledged the job is held
-        like any open job, and a task of the owner waits for the job table
-        to read the record (:meth:`_settle_failed`): the caller, which can
-        be the partition loop in ``begin``, does not wait for the tracker.
+        tries the job again. An HTTP job first writes its ``failed`` status
+        with ``error``, the text of its DLQ record; ``closed`` follows only
+        once that is acknowledged. A stop during the retries of either write
+        leaves the offset pending, and a status that can never be written
+        stalls it. Once the record is acknowledged the job is held like any
+        open job, and a task of the owner waits for the job table to read
+        the record (:meth:`_settle_failed`): the caller, which can be the
+        partition loop in ``begin``, does not wait for the tracker.
         """
         offset = held.message.offset
         if not may_complete:
             self._drop(held)
             await self._host.stall_offset(offset)
             return BeginOutcome.FAILED
+        if self._ender.is_http_job(held.message):
+            side = self._settings.status
+            assert side is not None
+            status = end_record(
+                held.message, state='failed', outcome=outcome, error=error, parts=None, duration=None, now=side.clock()
+            )
+            status_written = await self._ender.write_status(status)
+            if status_written == 'stopped':
+                self._host.hold_job_offset(offset)
+                return BeginOutcome.JOB
+            if status_written == 'final':
+                self._drop(held)
+                await self._host.stall_offset(offset)
+                return BeginOutcome.FAILED
         duration = self._settings.clock() - held.opened_at
         written = await self._ender.write_closed(ref, outcome, received=0, parts=None, duration=duration)
         if written == 'stopped':

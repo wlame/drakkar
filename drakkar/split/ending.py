@@ -29,11 +29,15 @@ from drakkar.models import CollectResult, SinkDeliveryFailedError, SourceMessage
 from drakkar.providers.resilience import RateLimitedLog
 from drakkar.sinks.dlq_record import DLQStage, cut_error
 from drakkar.sinks.manager import CollectCallback, MessageContext, MessageDLQState, SinkManager
+from drakkar.split.http_jobs import EndWrite, HttpOwnerSide, encode_result, end_record
+from drakkar.split.http_message import delivers_to_sinks
+from drakkar.split.http_status import PartCounts, StatusRecord
 from drakkar.split.models import JobAction, PartResult, SplitJob, SplitResultsUnavailable, TimedOutKind
 from drakkar.split.partmode import (
     RETRY_FIRST_WAIT_SECONDS,
     RETRY_MAX_WAIT_SECONDS,
     STOPPED_MESSAGE,
+    log_dropped_delivery,
     publish_or_stop,
 )
 from drakkar.split.producer import SplitProduceError, SplitProducer
@@ -64,6 +68,8 @@ class EndSettings:
     results_reader: Callable[[], Any]
     clock: Callable[[], float] = time.time
     sleep: SleepFn = asyncio.sleep
+    # The status side of HTTP jobs; None when the worker takes no split job over HTTP.
+    status: HttpOwnerSide | None = None
 
 
 @dataclass(frozen=True)
@@ -277,6 +283,8 @@ class JobEnder:
 
         may_complete = True
         sent_to_dlq = False
+        # The text the DLQ record of the job carries; the error of a ``failed`` status.
+        dlq_error = ''
         if failure_text is not None:
             logger.error(
                 'aggregate_failed',
@@ -287,24 +295,128 @@ class JobEnder:
                 error=failure_text,
                 exc_info=raised if raised is not None else False,
             )
-            error = f'{hook} failed: {failure_text}'
-            may_complete = await self.send_to_dlq(message, state, stage='aggregate', error=error, attempts=None)
+            dlq_error = f'{hook} failed: {failure_text}'
+            may_complete = await self.send_to_dlq(message, state, stage='aggregate', error=dlq_error, attempts=None)
             sent_to_dlq = True
         elif isinstance(answer, CollectResult):
             may_complete = await self._deliver(answer, message, state)
             # A failing aggregate sink under ``on_failure: dlq`` put the original message on the DLQ.
             sent_to_dlq = state.dlq_written or state.dlq_lost
         elif answer is JobAction.DLQ:
-            may_complete = await self.send_to_dlq(message, state, **self._dlq_fields(facts, timed_out))
+            dlq_fields = self._dlq_fields(facts, timed_out)
+            dlq_error = dlq_fields['error']
+            may_complete = await self.send_to_dlq(message, state, **dlq_fields)
             sent_to_dlq = True
         if not may_complete:
+            return False
+        # Every end through ``on_job_timeout`` closes as ``timeout``, whatever the hook answered.
+        outcome: ClosedOutcome = 'timeout' if timed_out else ('dlq' if sent_to_dlq else 'aggregated')
+        if outcome == 'timeout' and not dlq_error:
+            dlq_error = self._dlq_fields(facts, timed_out)['error']
+        if not await self._write_job_status(message, job, outcome, dlq_error):
             return False
         if closing_ref is None:
             split_jobs.labels(outcome='dlq' if sent_to_dlq else 'local').inc()
             return True
-        # Every end through ``on_job_timeout`` closes as ``timeout``, whatever the hook answered.
-        outcome: ClosedOutcome = 'timeout' if timed_out else ('dlq' if sent_to_dlq else 'aggregated')
         return await self._close(closing_ref(), job, outcome)
+
+    # --- the status of an HTTP job ---
+
+    def is_http_job(self, message: SourceMessage) -> bool:
+        """Whether the end of ``message`` writes a status record first."""
+        return self._settings.status is not None and message.http_job is not None
+
+    async def _write_job_status(
+        self, message: SourceMessage, job: SplitJob, outcome: ClosedOutcome, error: str
+    ) -> bool:
+        """Write the end status of an HTTP job and wait for its acknowledgement; false when the offset must stall.
+
+        Any other message writes nothing. A normal end asks
+        ``http_job_result`` for the result and writes ``done``; every other
+        end writes ``failed`` with the outcome of the job. A ``done`` record
+        that can never be written is replaced once by ``failed`` with the
+        outcome ``response_failed``; a ``failed`` record that can never be
+        written stalls the offset.
+
+        Raises:
+            asyncio.CancelledError: a stop ended the retries of the write; the offset stays pending.
+        """
+        side = self._settings.status
+        if side is None or message.http_job is None:
+            return True
+        parts = None if job.local else PartCounts(job.total_parts, job.received_parts, job.failed_parts)
+        if outcome != 'aggregated':
+            failed = end_record(
+                message, state='failed', outcome=outcome, error=error, parts=parts, duration=None, now=side.clock()
+            )
+            return await self._write_end_status(failed)
+        result_json, failure = await self._job_result(job, side.max_response)
+        if failure is None:
+            done = end_record(
+                message,
+                state='done',
+                result_json=result_json,
+                parts=parts,
+                duration=job.duration_seconds,
+                now=side.clock(),
+            )
+            final_errors: list[str] = []
+            if await self._write_end_status(done, final_errors=final_errors):
+                return True
+            failure = f'the result could not be stored: {final_errors[0] if final_errors else "the record was refused"}'
+        failed = end_record(
+            message,
+            state='failed',
+            outcome='response_failed',
+            error=failure,
+            parts=parts,
+            duration=None,
+            now=side.clock(),
+        )
+        return await self._write_end_status(failed)
+
+    async def _job_result(self, job: SplitJob, max_response: int) -> tuple[str | None, str | None]:
+        """Call ``http_job_result`` once and encode its answer: ``(text, None)``, or ``(None, error)`` when it failed."""
+        try:
+            value = await self._call_hook('http_job_result', job)
+        except Exception as error:
+            text, failure, raised = None, error_text(error), error
+        else:
+            text, failure = encode_result(value, max_response)
+            raised = None
+        if failure is not None:
+            logger.error(
+                'http_job_result_failed',
+                category='handler',
+                partition=self._label,
+                job=job.job_id,
+                error=failure,
+                exc_info=raised if raised is not None else False,
+            )
+        return text, failure
+
+    async def _write_end_status(self, record: StatusRecord, *, final_errors: list[str] | None = None) -> bool:
+        """Write one end-state record; true when acknowledged, false when it can never be written.
+
+        Raises:
+            asyncio.CancelledError: a stop ended the retries of the write.
+        """
+        written = await self.write_status(record, final_errors=final_errors)
+        if written == 'stopped':
+            raise asyncio.CancelledError(STOPPED_MESSAGE)
+        return written != 'final'
+
+    async def write_status(self, record: StatusRecord, *, final_errors: list[str] | None = None) -> EndWrite:
+        """Write an end-state status record with the retries of a ``closed`` record; its offset, or how it failed.
+
+        Raises:
+            RuntimeError: the worker takes no split job over HTTP.
+            asyncio.CancelledError: the task of the caller was cancelled.
+        """
+        side = self._settings.status
+        if side is None:
+            raise RuntimeError('a status record needs the status side of HTTP jobs')
+        return await side.writer.write_end(record, self._stopped, final_errors=final_errors)
 
     async def _ask_hook(
         self, hook: str, message: SourceMessage, facts: EndFacts, rebuild: Callable[[], EndFacts]
@@ -385,6 +497,9 @@ class JobEnder:
         """
         if self._deliveries_suppressed():
             raise asyncio.CancelledError(STOPPED_MESSAGE)
+        if not delivers_to_sinks(message):
+            log_dropped_delivery(self._label, message.request_id)
+            return True
         try:
             await self._on_collect(
                 result,

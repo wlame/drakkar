@@ -15,7 +15,7 @@ from confluent_kafka.aio import AIOConsumer
 from drakkar.config import DrakkarConfig
 from drakkar.providers.resilience import RateLimitedLog
 from drakkar.split.http_follower import StatusFollower
-from drakkar.split.http_jobs import HttpJobGateway, StatusWriter
+from drakkar.split.http_jobs import HttpJobGateway, HttpOwnerSide, StatusWriter
 from drakkar.split.http_status import StatusMap
 from drakkar.split.owner import OwnerHost, OwnerSettings, SplitOwner
 from drakkar.split.producer import SplitProducer
@@ -372,6 +372,7 @@ class SplitRuntime:
             idle_timeout=self._config.split.idle_timeout,
             clock=self._clock,
             sleep=self._sleep,
+            status=self._owner_status_side(),
         )
         owner = SplitOwner(
             settings,
@@ -386,6 +387,19 @@ class SplitRuntime:
         )
         self._events.register(partition, owner)
         return owner
+
+    def _owner_status_side(self) -> HttpOwnerSide | None:
+        """What an owner needs to write the status of HTTP jobs; None without them."""
+        http = self.http
+        if http is None:
+            return None
+        return HttpOwnerSide(
+            writer=http.writer,
+            status_map=http.status_map,
+            follower=http.follower,
+            max_response=http.max_response,
+            clock=self._clock,
+        )
 
     async def release(self, partition: int) -> None:
         """Forget the owner of a source partition this worker lost, and stop following its results partition."""
