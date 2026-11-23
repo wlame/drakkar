@@ -1495,6 +1495,14 @@ Who writes what:
   for good) stalls the offset. A `done` record that can never be written is
   first replaced by `failed` with the outcome `response_failed`.
 
+Status records go through a producer of their own, on `split.connection`.
+Its queue is bounded (10 000 records, 64 MiB), and a record that the broker
+does not take within 30 seconds fails. So an outage of the status topic
+fills only that queue. Parts, results, `open`, `closed` and the request
+writes of the `POST` do not wait behind status records. While that queue
+is full, an `accepted` or `running` record is dropped and counted. An end
+state waits for room and is tried again as described above.
+
 **The status map.** Every worker with the feature on runs a **status
 follower**: one consumer that reads every partition of the status topic
 from the beginning, with the group id of `split.results_group`. It only
@@ -1521,7 +1529,11 @@ rank rule prefers. The client would then see the job as accepted for ever.
 after its `updated_at`; a sweep runs every 60 seconds. An entry that has not
 ended never leaves the map by time: its job is still somewhere. After a
 restart the map holds only what the topic still has. Records in an end
-state that are older than `result_retention` are not stored.
+state that are older than `result_retention` are not stored. Such a record
+also removes the stored entry of its own job, and the map does not take a
+lower-rank record of that job after it. So a job that ended before the
+restart does not show `accepted` or `running` after the restore, and its
+id can name a new job.
 
 **The restore.** At start the follower reads every partition up to the end
 it saw at that moment. Until then the `POST` and the `GET` of this worker

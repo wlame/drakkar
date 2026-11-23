@@ -44,6 +44,15 @@ TopicCounts = Callable[[], Awaitable[Mapping[str, int]]]
 TopicRetention = Callable[[str], Awaitable[int | None]]
 TopicCleanupPolicy = Callable[[str], Awaitable[str | None]]
 
+# The status producer: a record the broker does not take within 30 s fails, and the queue is bounded, so an outage of
+# the status topic holds a bounded number of records. End states are written again by their own retries.
+STATUS_PRODUCER_SETTINGS: dict[str, Any] = {
+    'message.timeout.ms': 30_000,
+    'queue.buffering.max.messages': 10_000,
+    'queue.buffering.max.kbytes': 65_536,
+}
+STATUS_PRODUCER_THREAD_NAME = 'split-status-producer'
+
 
 def _close_seconds(deadline: float) -> float:
     """The time a producer gets to deliver what it still holds: what is left to ``deadline`` (monotonic), bounded."""
@@ -96,9 +105,16 @@ class HttpJobsRuntime:
             self.source_producer = SplitProducer(source_connection, producer_factory=producer_factory)
         else:
             self.source_producer = split_connection_producer
-        # Status records go to the status topic, on the split connection.
+        # Status records go to the status topic, on the split connection, through a producer of their own: during
+        # an outage of the status topic its records fill only that queue, never the one of parts and results.
+        self.status_producer = SplitProducer(
+            split_connection,
+            producer_factory=producer_factory,
+            settings=STATUS_PRODUCER_SETTINGS,
+            thread_name=STATUS_PRODUCER_THREAD_NAME,
+        )
         self.writer = StatusWriter(
-            split_connection_producer,
+            self.status_producer,
             self.status_topic,
             clock=clock,
             sleep=sleep,
@@ -109,8 +125,9 @@ class HttpJobsRuntime:
         self.loop: asyncio.AbstractEventLoop | None = None
 
     async def start(self) -> None:
-        """Start the source producer when it is one of its own, and the follower."""
+        """Start the status producer, the source producer when it is one of its own, and the follower."""
         self.loop = asyncio.get_running_loop()
+        await self.status_producer.start()
         if self.owns_source_producer:
             await self.source_producer.start()
         self.follower.start()
@@ -119,10 +136,13 @@ class HttpJobsRuntime:
         """Stop the follower."""
         await self.follower.stop()
 
-    async def close_source_producer(self, deadline: float) -> None:
-        """Close the source producer when it is one of its own, with the time left to ``deadline`` (monotonic)."""
-        if self.owns_source_producer:
-            await self.source_producer.close(_close_seconds(deadline))
+    async def close_producers(self, deadline: float) -> None:
+        """Close the status producer and the source producer of its own, with the time left to ``deadline`` (monotonic)."""
+        try:
+            await self.status_producer.close(_close_seconds(deadline))
+        finally:
+            if self.owns_source_producer:
+                await self.source_producer.close(_close_seconds(deadline))
 
 
 class _OwnerEvents:
@@ -429,4 +449,4 @@ class SplitRuntime:
                 await self.producer.close(_close_seconds(deadline))
             finally:
                 if self.http is not None:
-                    await self.http.close_source_producer(deadline)
+                    await self.http.close_producers(deadline)

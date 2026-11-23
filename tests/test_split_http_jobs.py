@@ -168,7 +168,7 @@ async def test_accept_writes_source_message_then_accepted_and_answers_202():
     job = read_http_job(message.headers)
     assert job is not None and (job.request_id, job.client, job.deliver_sinks) == ('req-1', CLIENT, True)
     [(method, topic, written)] = gate.status.writes
-    assert (method, topic) == ('publish', STATUS_TOPIC)
+    assert (method, topic) == ('enqueue_nowait', STATUS_TOPIC)
     accepted = parse_status_record(written.key, written.headers, written.value)
     assert accepted is not None
     assert (accepted.state, accepted.job, accepted.client, accepted.updated_at) == ('accepted', '3:41', CLIENT, NOW)
@@ -284,8 +284,8 @@ async def test_write_bounded_reads_the_outcome_of_a_write_whose_caller_was_cance
     delivery: asyncio.Future[int] = asyncio.get_running_loop().create_future()
 
     class Pending(FakeProducer):
-        async def publish(self, topic: str, record: WireRecord) -> int:
-            return await delivery
+        def enqueue_nowait(self, topic: str, record: WireRecord) -> asyncio.Future[int] | None:
+            return delivery
 
     gate = Gate(status=Pending(), sleep=lambda seconds: asyncio.Event().wait())
     writing = asyncio.ensure_future(gate.writer.write_bounded(record('accepted'), 5.0))
@@ -327,6 +327,17 @@ async def test_accept_answers_202_when_it_takes_longer_than_5_seconds():
     assert answer.status_code == 202
     assert gate.sleeps == [ACCEPTED_WRITE_SECONDS]
     assert [line['state'] for line in logs if line['event'] == 'split_http_status_write_failed'] == ['accepted']
+
+
+async def test_accept_drops_the_accepted_record_at_once_when_the_status_queue_is_full():
+    gate = Gate(status=FakeProducer(nowait_full=True))
+    with capture_logs() as logs:
+        answer = await gate.accept()
+
+    assert answer.status_code == 202
+    assert gate.sleeps == [] and gate.status.writes == []
+    [line] = [line for line in logs if line['event'] == 'split_http_status_write_failed']
+    assert (line['state'], line['error']) == ('accepted', 'the client queue is full')
 
 
 async def test_gateway_refuses_a_call_from_another_loop():

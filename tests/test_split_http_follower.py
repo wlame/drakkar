@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import itertools
 from types import SimpleNamespace
 from typing import Any
@@ -17,6 +18,7 @@ from drakkar.config.connections import KafkaConnectionConfig
 from drakkar.split import http_follower
 from drakkar.split.http_follower import StatusFollower
 from drakkar.split.http_status import PartCounts, StatusMap, StatusRecord, status_record
+from drakkar.split.records import WireRecord
 from drakkar.split.runtime import SplitRuntime
 from tests.split_helpers import FakeConsumerClient, FakeLog, FakeProducerClient, wait_until
 
@@ -485,8 +487,9 @@ async def test_runtime_with_http_follows_the_status_topic_and_says_so():
     )
     assert http.deliver_sinks_default is True
     assert http.follower.get('nothing') is None and http.status_map is http.follower.status_map
-    # One connection for the source and the split topics: one producer.
-    assert http.source_producer is runtime.producer and len(parts.clients) == 1
+    # One connection for the source and the split topics: one producer for both, and one for the status records.
+    assert http.source_producer is runtime.producer and len(parts.clients) == 2
+    assert http.status_producer is not runtime.producer
     [consumer] = parts.consumers
     assert consumer.config['group.id'] == runtime.results_group
     assert consumer.closed
@@ -512,9 +515,53 @@ async def test_runtime_with_http_on_another_connection_writes_the_source_with_a_
     await runtime.stop(deadline=0.0)
 
     brokers = sorted(client.config['bootstrap.servers'] for client in parts.clients)
-    assert brokers == ['internal:9092', 'localhost:9092']
+    assert brokers == ['internal:9092', 'internal:9092', 'localhost:9092']
     assert thread is not None and not thread.is_alive()
     assert parts.consumers[0].config['bootstrap.servers'] == 'internal:9092'
+
+
+async def test_runtime_with_http_writes_status_records_through_a_bounded_producer_of_their_own():
+    parts = RuntimeParts()
+    runtime = parts.runtime(runtime_config(http=True), http_enabled=True)
+    await runtime.start()
+    http = runtime.http
+    assert http is not None
+    status_thread = http.status_producer._thread
+    [split_client, status_client] = parts.clients
+    await runtime.stop(deadline=0.0)
+
+    assert http.writer._producer is http.status_producer
+    assert status_client.config['message.timeout.ms'] == 30_000
+    assert status_client.config['queue.buffering.max.messages'] == 10_000
+    assert status_client.config['queue.buffering.max.kbytes'] == 65_536
+    assert 'message.timeout.ms' not in split_client.config
+    assert status_thread is not None and status_thread.name == 'split-status-producer' and not status_thread.is_alive()
+
+
+async def test_a_full_status_queue_does_not_delay_a_part_result_write():
+    parts = RuntimeParts()
+    runtime = parts.runtime(runtime_config(http=True), http_enabled=True)
+    await runtime.start()
+    http = runtime.http
+    assert http is not None
+    [_, status_client] = parts.clients
+    status_client.queue_capacity = 0
+    try:
+        running = StatusRecord(
+            request_id='r1', state='running', partition=0, offset=5, client='tenant-a', updated_at=NOW
+        )
+        with capture_logs() as logs:
+            http.writer.write_best_effort(running)
+            assert not await http.writer.write_bounded(dataclasses.replace(running, state='accepted'), 5.0)
+            offset = await asyncio.wait_for(
+                runtime.producer.publish(RESULTS_TOPIC, WireRecord(key=b'0:5', value=b'{}', headers=[], partition=0)),
+                2,
+            )
+        assert offset >= 0
+        errors = [line['error'] for line in logs if line['event'] == 'split_http_status_write_failed']
+        assert errors == ['the client queue is full']
+    finally:
+        await runtime.stop(deadline=0.0)
 
 
 async def test_runtime_with_http_fails_on_a_missing_status_topic():

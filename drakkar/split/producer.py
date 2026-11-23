@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import structlog
@@ -93,9 +93,14 @@ class SplitProducer:
         connection: KafkaConnectionConfig,
         *,
         producer_factory: Callable[[dict], Any] = Producer,
+        settings: Mapping[str, Any] | None = None,
+        thread_name: str = POLL_THREAD_NAME,
     ) -> None:
+        """``settings`` are client properties set after the framework's own, for a producer of a special use."""
         self._connection = connection
         self._producer_factory = producer_factory
+        self._settings = dict(settings or {})
+        self._thread_name = thread_name
         self._producer: Any = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -115,6 +120,7 @@ class SplitProducer:
         )
         # The partitioner is pinned: a record with no partition must land where every worker puts the same key.
         config.update({'acks': 'all', 'enable.idempotence': True, 'linger.ms': 5, 'partitioner': 'consistent_random'})
+        config.update(self._settings)
         return config
 
     async def start(self) -> None:
@@ -124,7 +130,7 @@ class SplitProducer:
         self._loop = asyncio.get_running_loop()
         self._producer = self._producer_factory(self._client_config())
         self._stopping.clear()
-        self._thread = threading.Thread(target=self._poll_loop, name=POLL_THREAD_NAME, daemon=True)
+        self._thread = threading.Thread(target=self._poll_loop, name=self._thread_name, daemon=True)
         self._thread.start()
 
     def _poll_loop(self) -> None:

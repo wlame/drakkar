@@ -172,10 +172,19 @@ class StatusWriter:
     async def write_bounded(self, record: StatusRecord, seconds: float) -> bool:
         """Write ``record`` and wait at most ``seconds`` for its acknowledgement; True when it came.
 
-        A caller that is cancelled leaves the write to run on; its outcome is
-        still read and noted, so no error of it is left unretrieved.
+        A full client queue drops the record at once: the write never waits
+        for room. A caller that is cancelled leaves the write to run on; its
+        outcome is still read and noted, so no error of it is left unretrieved.
         """
-        publish = asyncio.ensure_future(self._producer.publish(self._topic, status_record(record)))
+        try:
+            queued = self._producer.enqueue_nowait(self._topic, status_record(record))
+        except (SplitProduceError, RuntimeError) as error:
+            self._note_failure(record, error)
+            return False
+        if queued is None:
+            self._note_failure(record, QUEUE_FULL_TEXT)
+            return False
+        publish: asyncio.Future[int] = queued
         timer = asyncio.ensure_future(self._sleep(seconds))
         try:
             await asyncio.wait({publish, timer}, return_when=asyncio.FIRST_COMPLETED)
@@ -185,7 +194,8 @@ class StatusWriter:
         finally:
             timer.cancel()
         if not publish.done():
-            publish.cancel()
+            # The record stays in the client queue; its report is still read, and only this wait ends.
+            publish.add_done_callback(lambda done: self._note_outcome(record, done))
             self._note_failure(record, NOT_ACKNOWLEDGED_TEXT)
             return False
         error = publish.exception()
