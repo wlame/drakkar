@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast, get_args
@@ -296,6 +297,20 @@ def part_partition(source_offset: int, index: int, partition_count: int) -> int:
     return (source_offset % partition_count + index) % partition_count
 
 
+def key_partition(key: bytes, partition_count: int) -> int:
+    """The parts-topic partition of a part with an affinity key: the CRC-32 of the key modulo ``N``.
+
+    The CRC-32 is zlib's, which is unsigned, so the same key bytes give the
+    same partition in every process and for every reader of the topic.
+
+    Raises:
+        ValueError: ``partition_count`` is below 1; a topic has at least one partition.
+    """
+    if partition_count < 1:
+        raise ValueError(f'the parts topic needs at least 1 partition, got {partition_count}')
+    return zlib.crc32(key) % partition_count
+
+
 def part_record(
     ref: JobRef,
     *,
@@ -308,10 +323,13 @@ def part_record(
     partition_count: int,
     origin: Literal['kafka', 'http'] = ORIGIN_KAFKA,
     deliver_sinks: bool = True,
+    affinity_key: bytes | None = None,
 ) -> WireRecord:
     """The parts-topic record of part ``index``: source headers without ``dk-`` ones, then the split headers.
 
     The sinks switch header is written only for the origin ``http``; a Kafka job always delivers to sinks.
+    An ``affinity_key`` selects the partition (:func:`key_partition`) and is written nowhere in the record;
+    without one the parts spread evenly (:func:`part_partition`).
     """
     sinks_switch = (SINKS_ON if deliver_sinks else SINKS_OFF) if origin == ORIGIN_HTTP else None
     values: dict[str, str | int | None] = {
@@ -333,7 +351,11 @@ def part_record(
         key=key,
         value=value,
         headers=kept + added,
-        partition=part_partition(ref.offset, index, partition_count),
+        partition=(
+            part_partition(ref.offset, index, partition_count)
+            if affinity_key is None
+            else key_partition(affinity_key, partition_count)
+        ),
     )
 
 

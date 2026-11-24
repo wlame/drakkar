@@ -10,7 +10,7 @@ from drakkar.config import SourcesConfig
 from drakkar.models import ConfigurationError
 
 # Hooks that only a handler with ``split`` can use, in the order the checks report them.
-_SPLIT_ONLY_HOOKS = ('part_data', 'aggregate', 'on_job_timeout')
+_SPLIT_ONLY_HOOKS = ('part_data', 'part_key', 'aggregate', 'on_job_timeout')
 
 
 def validate_handler_for_sources(

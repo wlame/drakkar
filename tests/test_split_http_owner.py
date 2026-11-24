@@ -25,7 +25,18 @@ from drakkar.split.owner import (
     RUNNING_MIN_INTERVAL_SECONDS,
     _BegunJob,
 )
-from tests.split_owner_helpers import PARTITION, SplittingHandler, World, items, source_message, summary, wait_until
+from drakkar.split.records import key_partition
+from tests.split_owner_helpers import (
+    PARTITION,
+    PARTS_PARTITIONS,
+    KeyedHandler,
+    SplittingHandler,
+    World,
+    items,
+    source_message,
+    summary,
+    wait_until,
+)
 from tests.test_split_http_end import (
     CLIENT,
     FIRST,
@@ -736,4 +747,18 @@ async def test_open_record_of_an_http_job_has_origin_http():
 
     origins = {entry.ref.offset: entry.body['origin'] for entry in world.entries() if entry.kind == 'open'}
     assert origins == {500: 'http', 501: 'kafka'}
+    await http.worker.stop()
+
+
+async def test_part_key_applies_to_an_http_job():
+    world = World()
+    handler = KeyedHandler({500: items(3)}, lambda part, index: 'customer-17')
+    http = await HttpWorker(world, handler).start(http_message())
+    await wait_until(lambda: world.kinds() == ['open', 'split-done'])
+
+    assert [partition for partition, _, _ in world.part_records()] == [
+        key_partition(b'customer-17', PARTS_PARTITIONS)
+    ] * 3
+    assert {part.origin for part in world.parts()} == {'http'}
+    assert [index for _, _, index in handler.key_calls] == [0, 1, 2]
     await http.worker.stop()

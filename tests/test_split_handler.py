@@ -239,3 +239,25 @@ def test_http_source_with_split_http_skips_webapp_validation():
 
 async def test_default_http_job_result_returns_none():
     assert await PlainHandler().http_job_result(_job(failed_parts=0)) is None
+
+
+class PartKeyOnly(PlainHandler):
+    def part_key(self, message, part, index):
+        return 'customer-17'
+
+
+def test_part_key_without_split_is_refused():
+    with pytest.raises(ConfigurationError) as excinfo:
+        validate_handler_for_sources(PartKeyOnly(), _sources(), split_enabled=True)
+    assert str(excinfo.value) == (
+        'PartKeyOnly overrides part_key() without split(); it is called only for a handler that splits'
+    )
+
+
+def test_part_key_with_split_off_is_not_checked():
+    validate_handler_for_sources(PartKeyOnly(), _sources(), split_enabled=False)
+
+
+def test_default_part_key_returns_none():
+    message = SourceMessage(topic='t', partition=0, offset=1, value=b'{}', timestamp=0)
+    assert PlainHandler().part_key(message, b'part', 0) is None

@@ -256,6 +256,7 @@ The example reads every part result only to show the loop. Here
 | `arrange()` or `arrange_stream()` | the worker that runs the part | as for an ordinary message | as for an ordinary message |
 | `on_task_complete`, `on_group_complete`, `on_message_complete`, `on_window_complete` | the worker that runs the part | as for an ordinary message | a `CollectResult` for the part sinks, or `None` |
 | `part_data(group)` | the worker that runs the part | after `on_message_complete` and its delivery | a small model, or `None` |
+| `part_key(message, part, index)` | the owner | once for each part that `split` yields, before the part is published | an affinity key (`str` or `bytes`), or `None` |
 | `aggregate(job)` | the owner | every part of the job has a result | a `CollectResult` for the aggregate sinks, `JobAction`, or `None` |
 | `on_job_timeout(job)` | the owner | a timeout of the job fired | the same as `aggregate` |
 
@@ -315,6 +316,60 @@ raises, the data is dropped, `data_error` of the part result says why, and
 the part still counts as finished. A raise also logs `part_data_failed`. It
 runs for a local message too.
 
+### `part_key(message, part, index)`
+
+Optional. It gives a part an affinity key. The hook is synchronous. It runs
+on the owner once for each part that `split` yields, before the part is
+published. `part` is the object that `split` yielded, and `index` is the
+part number.
+
+- A part with a key goes to partition `crc32(key) mod N` of the parts topic.
+  `crc32` is the unsigned CRC-32 of zlib, and `N` is the partition count of
+  the parts topic. A `str` key is hashed as its UTF-8 bytes, so a `str` key
+  and the `bytes` of the same text give the same partition.
+- `None`, `''` and `b''` mean "no key". The part keeps the even spread. So
+  one job can pin some parts and spread the others.
+- A raise, or an answer that is not `str`, `bytes` or `None`, fails the job
+  as a raise of `split` does: the original message goes to the DLQ with stage
+  `split`.
+- The key is not written into the part record. The record key stays the key
+  of the original message, and the worker that runs the part does not see
+  the affinity key.
+- It is not called for a local message. It applies to Kafka jobs and HTTP
+  jobs alike.
+
+The hook runs on the event loop for every part, and a job can have many
+thousands of parts. Keep it short: read a field of the part, and do no I/O.
+
+### Keeping the parts of one entity on one worker {#part-key}
+
+A worker can keep a local cache, for example the data of one customer. When
+the parts of that customer go to different workers, each worker loads the
+same data. Give such parts one key, and they go to one partition of the
+parts topic. One worker of `split.parts_group` reads that partition, so its
+cache stays warm.
+
+```python
+class CustomerHandler(dk.BaseDrakkarHandler[Request, Output]):
+    async def split(self, message: dk.SourceMessage):
+        for chunk in message.payload.chunks:
+            yield chunk  # a model with a customer_id field
+
+    def part_key(self, message: dk.SourceMessage, part, index: int) -> str | None:
+        return part.customer_id or None  # no id: the part keeps the even spread
+```
+
+Know these limits before you use it:
+
+- The affinity holds only while the consumer group of the parts keeps its
+  assignment. A restart, a scale-up or a detach moves partitions. The cache
+  of the new reader then starts cold.
+- Parts with a key lose the even spread. A key that many parts share sends
+  all of them to one worker, and that worker becomes the slowest part of the
+  job.
+- When you add partitions to the parts topic, the partition of every key
+  changes.
+
 ### `aggregate(job)`
 
 It runs on the owner when every part of the current attempt has a result,
@@ -354,7 +409,7 @@ hook answered.
 | Condition | Result |
 |---|---|
 | `split.enabled` is true and the handler does not override `split()` | the start fails |
-| `split.enabled` is true and the handler overrides `part_data()`, `aggregate()` or `on_job_timeout()`, or sets `part_data_model`, without `split()` | the start fails |
+| `split.enabled` is true and the handler overrides `part_data()`, `part_key()`, `aggregate()` or `on_job_timeout()`, or sets `part_data_model`, without `split()` | the start fails |
 | `split.enabled` is true and `split()` is not an async generator function | the start fails |
 | `split.enabled` is false | no split hook is checked: the worker starts and never calls them. A handler that has a `split()` method logs `split_disabled` once |
 
@@ -622,7 +677,8 @@ topic. The worker only checks them.
 
 The part number `i` of a job goes to partition `(source offset + i) mod N`
 of the parts topic, where `N` is its partition count, so the parts of one
-job spread evenly. The records about a job of source partition `p` all go to
+job spread evenly. A part with an affinity key goes to partition
+`crc32(key) mod N` instead (see [`part_key`](#part-key)). The records about a job of source partition `p` all go to
 partition `p` of the results topic.
 
 At start, with the feature on, the worker reads the topic metadata:

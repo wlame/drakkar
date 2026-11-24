@@ -16,6 +16,7 @@ and what happens to a message when a step fails.
 | `arrange_stream(message)` | Instead of `arrange`: one message is ready to process; an async generator | Once per message; one group per `yield` | yields `list[`[`ExecutorTask`](executor.md#executortask)`]` |
 | `split(message)` | Optional; one message is accepted, and `split.enabled` is true; an async generator | Once per source message, and again for each new attempt of a job; one part per `yield` | yields a pydantic model or `bytes` |
 | `part_data(group)` | Optional; after `on_message_complete` of a part and its delivery | Once per part, only with `split` | `BaseModel \| None` |
+| `part_key(message, part, index)` | Optional, synchronous; `split` yielded a part, before the part is published | Once per part, on the owner, only with `split` | `str \| bytes \| None` |
 | `aggregate(job)` | Optional; every part of a split job has a result | Once per job, on the owner, only with `split` | [`CollectResult`](sinks.md#collectresult) `\| JobAction \| None` |
 | `on_job_timeout(job)` | Optional; a timeout of a split job fired | Once per timed-out job, on the owner, only with `split` | [`CollectResult`](sinks.md#collectresult) `\| JobAction \| None` |
 | `http_job_result(job)` | Optional; an [HTTP split job](split.md#http-jobs) ended normally, after `aggregate` | Once per end of an HTTP job, on the owner, only with `split.http.enabled` | a pydantic model, `dict`, `list`, `str`, `int`, `float`, `bool` or `None` |
@@ -410,7 +411,7 @@ The four hooks of this section, and `part_data_model`, are used only when
 `split.enabled` is true. With `split.enabled` false a handler that overrides
 `split()` starts, never calls it, and logs `split_disabled` once; no hook of
 this section is checked then. With `split.enabled` true a handler may
-override `part_data()`, `aggregate()`, `on_job_timeout()` or set
+override `part_data()`, `part_key()`, `aggregate()`, `on_job_timeout()` or set
 `part_data_model` only together with `split()`. The [Split](split.md) page
 explains the whole feature: the topics, restarts, failures and what to know
 before you turn it on.
@@ -457,6 +458,13 @@ class ItemHandler(dk.BaseDrakkarHandler[Request, Output]):
   part. It runs where the part ran, after `on_message_complete` and its
   delivery. Larger than `split.max_part_data`, or a raise: the data is
   dropped, `data_error` says why, and the part still counts as finished.
+- `part_key(message, part, index)` gives a part an affinity key. It is
+  synchronous and runs on the owner once for each part that `split()`
+  yields, before the part is published. Parts with the same key go to the
+  same partition of the parts topic. `None` or an empty key keeps the even
+  spread. A raise, or an answer that is not `str`, `bytes` or `None`, fails
+  the job with a DLQ record of stage `split`. See
+  [Keeping the parts of one entity on one worker](split.md#part-key).
 - `aggregate(job)` runs on the owner once every part has a result. It
   returns a `CollectResult` (delivered to the aggregate sinks, then the job is
   done), `None` or `JobAction.DONE` (done, nothing delivered), or
@@ -550,7 +558,7 @@ when the records of the job are gone (handled as a raise of the hook). See
 | Condition | Result |
 |---|---|
 | `split.enabled` is true and the handler does not override `split()` | startup fails |
-| `split.enabled` is true and the handler overrides `part_data()`, `aggregate()` or `on_job_timeout()`, or sets `part_data_model`, without `split()` | startup fails |
+| `split.enabled` is true and the handler overrides `part_data()`, `part_key()`, `aggregate()` or `on_job_timeout()`, or sets `part_data_model`, without `split()` | startup fails |
 | `split.enabled` is true and `split()` is not an async generator function | startup fails |
 | `split.enabled` is true, `split.http.enabled` is false, and the handler overrides `http_job_result()` | startup fails |
 | `split.enabled` is false | no split hook is checked: the worker starts and never calls them. A handler that has a `split()` method logs `split_disabled` once |

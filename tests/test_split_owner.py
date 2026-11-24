@@ -25,7 +25,14 @@ from drakkar.split import partmode
 from drakkar.split import splitting as splitting_module
 from drakkar.split.ending import MAX_RESULTS_RETRIES, RESULTS_RETRY_SECONDS
 from drakkar.split.models import JobAction, PartResult, SplitJob, SplitResultsUnavailable
-from drakkar.split.records import H_SINKS, LOG_HEADER_ORDER, PART_HEADER_ORDER, part_partition, result_body
+from drakkar.split.records import (
+    H_SINKS,
+    LOG_HEADER_ORDER,
+    PART_HEADER_ORDER,
+    key_partition,
+    part_partition,
+    result_body,
+)
 from drakkar.split.tracker import TIMEOUT_CHECK_SECONDS
 from drakkar.uiserver.runner import DebugRunner, ProbeInput
 from tests.split_helpers import FakeProducerClient
@@ -37,6 +44,7 @@ from tests.split_owner_helpers import (
     RESULTS_TOPIC,
     SOURCE_TOPIC,
     Item,
+    KeyedHandler,
     OwnerWorker,
     SplittingHandler,
     World,
@@ -1653,3 +1661,112 @@ async def test_phase_of_is_waiting_message_for_a_restored_job_whose_message_has_
     assert second.owner is not None
     assert second.owner.phase_of(500) == 'waiting_message'
     await second.stop()
+
+
+# --- the affinity key of a part ---
+
+
+def part_partitions(world: World) -> list[int]:
+    """The parts-topic partition of each part record, by part number."""
+    return [partition for partition, _, _ in world.part_records()]
+
+
+async def split_parts(handler: Any, count: int) -> tuple[World, list[int]]:
+    """Run the split of message 500 by ``handler`` until ``split-done`` and return the part partitions."""
+    world = World()
+    worker = await OwnerWorker(world, handler).start(source_message(500))
+    await wait_until(lambda: world.kinds() == ['open', 'split-done'])
+    partitions = part_partitions(world)
+    assert len(partitions) == count
+    await worker.stop()
+    return world, partitions
+
+
+async def test_parts_with_the_same_key_go_to_one_partition():
+    handler = KeyedHandler({500: items(6)}, lambda part, index: 'customer-17')
+    _, partitions = await split_parts(handler, 6)
+
+    assert partitions == [key_partition(b'customer-17', PARTS_PARTITIONS)] * 6
+
+
+async def test_text_and_bytes_keys_of_the_same_text_agree():
+    text_handler = KeyedHandler({500: items(3)}, lambda part, index: f'Ünï-{index}')
+    bytes_handler = KeyedHandler({500: items(3)}, lambda part, index: f'Ünï-{index}'.encode())
+    _, by_text = await split_parts(text_handler, 3)
+    _, by_bytes = await split_parts(bytes_handler, 3)
+
+    assert by_text == by_bytes == [key_partition(f'Ünï-{index}'.encode(), PARTS_PARTITIONS) for index in range(3)]
+
+
+@pytest.mark.parametrize('empty', [None, '', b''])
+async def test_none_and_empty_key_keep_the_even_spread(empty):
+    _, keyed = await split_parts(KeyedHandler({500: items(5)}, lambda part, index: empty), 5)
+    _, plain = await split_parts(SplittingHandler({500: items(5)}), 5)
+
+    assert keyed == plain == [part_partition(500, index, PARTS_PARTITIONS) for index in range(5)]
+
+
+async def test_keyed_and_unkeyed_parts_mix_in_one_job():
+    handler = KeyedHandler({500: items(4)}, lambda part, index: 'pinned' if index % 2 == 0 else None)
+    _, partitions = await split_parts(handler, 4)
+
+    pinned = key_partition(b'pinned', PARTS_PARTITIONS)
+    assert partitions == [
+        pinned,
+        part_partition(500, 1, PARTS_PARTITIONS),
+        pinned,
+        part_partition(500, 3, PARTS_PARTITIONS),
+    ]
+
+
+async def test_part_key_gets_the_yielded_part_and_its_index():
+    plan = [Item(n=0), b'raw part', Item(n=2)]
+    handler = KeyedHandler({500: plan}, lambda part, index: None)
+    await split_parts(handler, 3)
+
+    assert handler.key_calls == [(500, plan[0], 0), (500, b'raw part', 1), (500, plan[2], 2)]
+    assert handler.key_calls[0][1] is plan[0]
+
+
+async def test_part_key_that_raises_fails_the_split():
+    world = World()
+    keys = lambda part, index: RuntimeError('no customer id') if index == 1 else 'c'  # noqa: E731
+    handler = KeyedHandler({500: items(3)}, keys)
+    failed = jobs_counted('split_failed')
+    with capture_logs() as logs:
+        worker = await OwnerWorker(world, handler).start(source_message(500))
+        await wait_until(lambda: worker.committed == 501)
+
+    assert world.kinds() == ['open', 'closed']
+    assert world.closed()[0]['outcome'] == 'split_failed'
+    assert len(world.parts()) == 1
+    [record] = worker.dlq_records()
+    assert (record.stage, record.error) == ('split', 'split failed: no customer id')
+    assert jobs_counted('split_failed') == failed + 1
+    [line] = [line for line in logs if line['event'] == 'split_failed']
+    assert (line['category'], line['error']) == ('split', 'no customer id')
+    assert handler.closed_splits == 1
+    await worker.stop()
+
+
+async def test_part_key_of_a_wrong_type_fails_the_split():
+    world = World()
+    handler = KeyedHandler({500: items(2)}, lambda part, index: 17)
+    worker = await OwnerWorker(world, handler).start(source_message(500))
+    await wait_until(lambda: worker.committed == 501)
+
+    assert world.kinds() == ['open', 'closed'] and world.parts() == []
+    [record] = worker.dlq_records()
+    assert (record.stage, record.error) == ('split', 'split failed: part_key returned int')
+    await worker.stop()
+
+
+async def test_part_key_is_not_called_for_a_local_message():
+    handler = KeyedHandler({}, lambda part, index: 'never')
+    world = World()
+    worker = await OwnerWorker(world, handler).start(source_message(501))
+    await wait_until(lambda: worker.committed == 502)
+
+    assert [job.source_message.offset for job in handler.jobs] == [501]
+    assert handler.key_calls == []
+    await worker.stop()

@@ -21,6 +21,7 @@ import structlog
 from structlog.contextvars import bind_contextvars, unbind_contextvars
 
 from drakkar.groups import STREAM_CLOSE_TIMEOUT, STREAM_END, close_stream, next_stream_item, retrieve_task_outcome
+from drakkar.handler import _overrides_hook
 from drakkar.hook_scope import PipelineHookScope, pipeline_hook
 from drakkar.hookctx import bind_hook_context, clear_hook_context
 from drakkar.metrics import handler_duration, split_parts_published
@@ -170,6 +171,10 @@ class SplitRun:
         self._on_first_part = on_first_part
         self._crashed_attempts = crashed_attempts
         self._log_limit = log_limit
+        # Decided once per run: a handler that keeps the default is never called for each part.
+        self._part_key: Callable[[SourceMessage, Any, int], object] | None = (
+            handler.part_key if _overrides_hook(handler, 'part_key') else None
+        )
         self._context = contextvars.copy_context()
         self._interrupt: asyncio.Future[InterruptReason] = asyncio.get_running_loop().create_future()
         self._started_at = time.monotonic()
@@ -419,6 +424,7 @@ class SplitRun:
             value = part_value(item)
         except TypeError as error:
             raise _SplitFailed(str(error)) from None
+        affinity_key = self._affinity_key(item, index)
         http_job = message.http_job
         record = part_record(
             self.ref,
@@ -431,6 +437,7 @@ class SplitRun:
             partition_count=settings.parts_partition_count,
             origin=ORIGIN_KAFKA if http_job is None else ORIGIN_HTTP,
             deliver_sinks=True if http_job is None else http_job.deliver_sinks,
+            affinity_key=affinity_key,
         )
         self.parts += 1
         try:
@@ -443,6 +450,26 @@ class SplitRun:
         self._in_flight[future] = record
         if len(self._in_flight) >= MAX_UNACKED_PARTS:
             await self._settle_parts()
+
+    def _affinity_key(self, item: object, index: int) -> bytes | None:
+        """The key bytes that ``part_key`` gives part ``index``; ``None`` when there is no hook or no key.
+
+        Raises:
+            _SplitFailed: the hook raised, or answered something other than ``str``, ``bytes`` or ``None``.
+        """
+        hook = self._part_key
+        if hook is None:
+            return None
+        try:
+            key = hook(self._message, item, index)
+        except Exception as error:
+            raise _SplitFailed(_error_text(error), error) from error
+        if isinstance(key, str):
+            key = key.encode('utf-8')
+        elif key is not None and not isinstance(key, bytes):
+            raise _SplitFailed(f'part_key returned {type(key).__name__}')
+        # An empty key is no key, so a missing id cannot send every part of a job to one partition.
+        return key or None
 
     async def _enqueue(self, topic: str, record: WireRecord) -> asyncio.Future[int]:
         """Give ``record`` to the producer and return its delivery future.

@@ -541,6 +541,20 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
         """
         return None
 
+    def part_key(self, message: SourceMessage, part: BaseModel | bytes, index: int) -> str | bytes | None:
+        """Return the affinity key of one part, or None to keep the even spread of the parts.
+
+        Optional and synchronous. Runs on the owner once for each part that
+        ``split()`` yields, before the part is published. ``part`` is the
+        object that ``split()`` yielded and ``index`` is the part number.
+        Parts with the same key go to the same partition of the parts topic:
+        the CRC-32 of the key bytes modulo the partition count. A ``str`` key
+        is hashed as its UTF-8 bytes. ``None`` or an empty key keeps the even
+        spread. A raise, or an answer of another type, fails the split. The
+        key is not written into the part. Valid only with ``split``.
+        """
+        return None
+
     async def aggregate(self, job: SplitJob) -> CollectResult | JobAction | None:
         """Process the end of a split job, once every part has a result.
 

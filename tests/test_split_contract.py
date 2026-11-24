@@ -14,6 +14,7 @@ from drakkar.split.records import (
     JobRef,
     RecordKind,
     closed_body,
+    key_partition,
     log_record,
     open_body,
     parse_log_record,
@@ -71,6 +72,11 @@ def test_closed_sets_match_the_fixture():
 @pytest.mark.parametrize('case', FIXTURE['partition_cases'], ids=lambda c: f'{c["offset"]}-{c["index"]}')
 def test_part_partition_follows_the_fixture(case):
     assert part_partition(case['offset'], case['index'], case['partition_count']) == case['partition']
+
+
+@pytest.mark.parametrize('case', FIXTURE['key_partition_cases'], ids=lambda c: f'{c["key"]}-{c["partition_count"]}')
+def test_key_partition_cases_of_the_contract(case):
+    assert key_partition(_bytes(case['key']), case['partition_count']) == case['partition']
 
 
 @pytest.mark.parametrize('case', FIXTURE['log_cases'], ids=lambda c: c['name'])

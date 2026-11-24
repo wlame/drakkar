@@ -319,3 +319,27 @@ def test_parse_part_headers_reads_deliver_sinks(origin, sinks, expected):
 
     assert part is not None
     assert part.deliver_sinks is expected
+
+
+@pytest.mark.parametrize('partition_count', [0, -1])
+def test_key_partition_needs_a_partition(partition_count):
+    with pytest.raises(ValueError, match='the parts topic needs at least 1 partition'):
+        records.key_partition(b'customer-17', partition_count)
+
+
+def test_part_record_with_a_key_changes_only_the_partition():
+    facts = {
+        'source_topic': 'requests',
+        'index': 0,
+        'request_id': 'req-1',
+        'key': b'request-key',
+        'value': b'{"n": 1}',
+        'source_headers': [('traceparent', b'00-1'), ('dk-old', b'x')],
+        'partition_count': 12,
+    }
+    plain = records.part_record(REF, **facts)
+    keyed = records.part_record(REF, **facts, affinity_key=b'customer-17')
+
+    assert (keyed.key, keyed.value, keyed.headers) == (plain.key, plain.value, plain.headers)
+    assert plain.partition == records.part_partition(REF.offset, 0, 12) == 9
+    assert keyed.partition == records.key_partition(b'customer-17', 12) == 11

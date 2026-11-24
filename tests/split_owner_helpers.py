@@ -279,6 +279,22 @@ class SplittingHandler(FanOutHandler):
         return await super().on_job_timeout(job)
 
 
+class KeyedHandler(SplittingHandler):
+    """A ``SplittingHandler`` whose ``part_key`` answers ``keys(part, index)``; an exception answer is raised."""
+
+    def __init__(self, plan: dict[int, list[Any]], keys: Any, **options: Any) -> None:
+        super().__init__(plan, **options)
+        self.keys = keys
+        self.key_calls: list[tuple[int, Any, int]] = []
+
+    def part_key(self, message: Any, part: Any, index: int) -> Any:
+        self.key_calls.append((message.offset, part, index))
+        answer = self.keys(part, index)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
 def items(count: int) -> list[Any]:
     """``count`` parts for a split plan."""
     return [Item(n=index) for index in range(count)]

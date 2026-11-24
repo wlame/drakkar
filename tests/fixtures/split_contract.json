@@ -1,5 +1,5 @@
 {
-  "_comment": "Split wire contract, shared byte for byte by every implementation. A results-log record has the key \"<partition>:<offset>\" (UTF-8) and goes to the results partition with the number of the source partition; its headers are log_header_order, each value ASCII text. Its value is compact JSON with sorted keys, raw UTF-8. A part record has the key and the value of the part, the source headers of the original message in their order minus every header whose name starts with \"dk-\", then the headers of part_header_order; dk-request-id is not written when the request id is null, and dk-split-sinks is written only when the origin is http (on or off). Part i goes to partition (offset mod N + i) mod N of the parts topic. Encoding of bytes in this file: a JSON string is its UTF-8 bytes, {\"base64\": \"...\"} is the decoded bytes, null is no value. The parsed form of a part case of origin kafka leaves deliver_sinks out: it is true for every such part.",
+  "_comment": "Split wire contract, shared byte for byte by every implementation. A results-log record has the key \"<partition>:<offset>\" (UTF-8) and goes to the results partition with the number of the source partition; its headers are log_header_order, each value ASCII text. Its value is compact JSON with sorted keys, raw UTF-8. A part record has the key and the value of the part, the source headers of the original message in their order minus every header whose name starts with \"dk-\", then the headers of part_header_order; dk-request-id is not written when the request id is null, and dk-split-sinks is written only when the origin is http (on or off). Part i goes to partition (offset mod N + i) mod N of the parts topic. A part with an affinity key goes instead to partition CRC-32 (the zlib one, unsigned) of the key bytes modulo N; a part without one keeps the rule above. Encoding of bytes in this file: a JSON string is its UTF-8 bytes, {\"base64\": \"...\"} is the decoded bytes, null is no value. The parsed form of a part case of origin kafka leaves deliver_sinks out: it is true for every such part.",
   "version": "1",
   "parts_partition_base": 1000000,
   "log_header_order": [
@@ -33,6 +33,18 @@
     {"offset": 500, "partition_count": 6, "index": 1, "partition": 3},
     {"offset": 500, "partition_count": 6, "index": 5, "partition": 1},
     {"offset": 500, "partition_count": 6, "index": 6, "partition": 2}
+  ],
+  "key_partition_cases": [
+    {"key": "customer-17", "partition_count": 12, "partition": 11},
+    {"key": "customer-17", "partition_count": 8, "partition": 7},
+    {"key": "customer-18", "partition_count": 12, "partition": 2},
+    {"key": "123456789", "partition_count": 10, "partition": 2},
+    {"key": "order 2026-11-24", "partition_count": 6, "partition": 4},
+    {"key": "Ünïcødé-客户-9", "partition_count": 12, "partition": 2},
+    {"key": "Ünïcødé-客户-9", "partition_count": 5, "partition": 4},
+    {"key": {"base64": "AAH+/4A="}, "partition_count": 7, "partition": 2},
+    {"key": "a", "partition_count": 3, "partition": 0},
+    {"key": "anything", "partition_count": 1, "partition": 0}
   ],
   "log_cases": [
     {
