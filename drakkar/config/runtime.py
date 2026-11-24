@@ -411,8 +411,9 @@ class LoggingConfig(ConfigModel):
         default='drakkar',
         description=(
             "With format 'ecs': the object that holds every field that is not an ECS field, for "
-            'example your product name. A lower-case identifier of at most 64 characters, and not '
-            'an ECS field set (host, error, event, ...).'
+            'example your product name. 1 to 255 characters with no space; dots are allowed and the '
+            'name is written as one key. The part before the first dot may not be an ECS field set '
+            '(host, error, event, ...).'
         ),
     )
     ecs_request_id_at_root: bool = Field(

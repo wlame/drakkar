@@ -5,12 +5,17 @@ config can check ``logging.ecs_namespace`` without an import cycle. The names
 are pinned by ``tests/fixtures/log_ecs.json``.
 """
 
-import re
+import unicodedata
 
 ECS_VERSION = '8.11.0'
 DEFAULT_ECS_NAMESPACE = 'drakkar'
 
-NAMESPACE_PATTERN = re.compile(r'[a-z_][a-z0-9_]{0,63}')
+NAMESPACE_MAX_CHARACTERS = 255
+# How much of a refused name a load message shows.
+SHOWN_NAME_CHARACTERS = 64
+# Unicode general categories a namespace may not hold: control characters, lone surrogates (they cannot be
+# written as UTF-8), and every kind of space. They make a field name that is hard to type and to query.
+REFUSED_CATEGORIES = frozenset({'Cc', 'Cs', 'Zs', 'Zl', 'Zp'})
 
 # The top-level field sets of ECS (and the base fields that are objects or
 # words a user could pick), plus ``request_id``, which the format can write at
@@ -82,15 +87,44 @@ ECS_RESERVED_NAMES = frozenset(
 )
 
 
+def _is_refused_character(character: str) -> bool:
+    """Whether ``character`` is a space or a control character, which a namespace may not hold."""
+    return unicodedata.category(character) in REFUSED_CATEGORIES
+
+
+def _shown(name: str) -> str:
+    """``name`` for a load message: its first characters, with each refused character written as an escape."""
+    cut = name[:SHOWN_NAME_CHARACTERS]
+    text = ''.join(repr(character)[1:-1] if _is_refused_character(character) else character for character in cut)
+    return text + ('...' if len(name) > SHOWN_NAME_CHARACTERS else '')
+
+
 def ecs_namespace_error(name: str) -> str | None:
-    """Return the load message for an unusable ``logging.ecs_namespace``, or None."""
-    if not NAMESPACE_PATTERN.fullmatch(name):
+    """Return the load message for an unusable ``logging.ecs_namespace``, or None.
+
+    A name is free text of 1 to 255 characters. Dots are allowed: the name is
+    written as one key, and a store that reads a dot as a level sees nested
+    objects, so no part between dots may be empty, and the first part may not
+    be an ECS field.
+    """
+    parts = name.split('.')
+    has_a_valid_shape = (
+        0 < len(name) <= NAMESPACE_MAX_CHARACTERS
+        and all(parts)
+        and not any(_is_refused_character(character) for character in name)
+    )
+    if not has_a_valid_shape:
         return (
-            f"logging.ecs_namespace '{name}' must be a lower-case identifier "
-            'of at most 64 characters ([a-z_][a-z0-9_]*)'
+            f"logging.ecs_namespace '{_shown(name)}' must be 1 to {NAMESPACE_MAX_CHARACTERS} characters "
+            'with no space or control character, and no empty part between dots'
         )
     if name in ECS_RESERVED_NAMES:
         return (
             f"logging.ecs_namespace '{name}' is an ECS field name; choose another name, for example your product name"
+        )
+    if parts[0] in ECS_RESERVED_NAMES:
+        return (
+            f"logging.ecs_namespace '{name}' is inside the ECS field '{parts[0]}'; "
+            'choose another name, for example your product name'
         )
     return None

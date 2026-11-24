@@ -1,5 +1,5 @@
 {
-  "_comment": "One log event per case, and the exact ECS line logging.format ecs writes for it (no trailing newline). fields is the event as the renderer sees it; error is the ECS error of an exception, or null; settings are logging.ecs_namespace and logging.ecs_request_id_at_root. ecs_reserved_names are the names logging.ecs_namespace may not take.",
+  "_comment": "One log event per case, and the exact ECS line logging.format ecs writes for it (no trailing newline). fields is the event as the renderer sees it; error is the ECS error of an exception, or null; settings are logging.ecs_namespace and logging.ecs_request_id_at_root. ecs_reserved_names are the names that logging.ecs_namespace, or its part before the first dot, may not take. A namespace with dots is written as one key.",
   "ecs_version": "8.11.0",
   "default_namespace": "drakkar",
   "ecs_reserved_names": [
@@ -206,6 +206,24 @@
       },
       "error": null,
       "line": "{\"@timestamp\":\"2026-11-11T09:30:00.123456Z\",\"log.level\":\"info\",\"message\":\"task_completed\",\"ecs.version\":\"8.11.0\",\"service\":{\"name\":\"drakkar\",\"node\":{\"name\":\"w1\"}},\"acme_search\":{\"partition\":3,\"request_id\":\"req_20261111T093000_3f9a1c2e_0007\"}}"
+    },
+    {
+      "name": "dotted_namespace_is_one_key",
+      "settings": {
+        "namespace": "A.bcd.myteam_name",
+        "request_id_at_root": false
+      },
+      "fields": {
+        "timestamp": "2026-11-11T09:30:00.123456Z",
+        "level": "info",
+        "event": "task_completed",
+        "service_name": "drakkar",
+        "worker_id": "w1",
+        "request_id": "req_20261111T093000_3f9a1c2e_0007",
+        "partition": 3
+      },
+      "error": null,
+      "line": "{\"@timestamp\":\"2026-11-11T09:30:00.123456Z\",\"log.level\":\"info\",\"message\":\"task_completed\",\"ecs.version\":\"8.11.0\",\"service\":{\"name\":\"drakkar\",\"node\":{\"name\":\"w1\"}},\"A.bcd.myteam_name\":{\"partition\":3,\"request_id\":\"req_20261111T093000_3f9a1c2e_0007\"}}"
     },
     {
       "name": "request_id_copied_to_the_root",

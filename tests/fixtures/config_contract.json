@@ -2743,13 +2743,31 @@
       "message": "autodiscover.enabled needs api.enabled: peers reach a worker through its API"
     },
     {
-      "name": "ecs_namespace_not_an_identifier",
+      "name": "ecs_namespace_has_a_space",
       "yaml": {
         "logging": {
-          "ecs_namespace": "My-Product"
+          "ecs_namespace": "my product"
         }
       },
-      "message": "logging.ecs_namespace 'My-Product' must be a lower-case identifier of at most 64 characters ([a-z_][a-z0-9_]*)"
+      "message": "logging.ecs_namespace 'my product' must be 1 to 255 characters with no space or control character, and no empty part between dots"
+    },
+    {
+      "name": "ecs_namespace_has_an_empty_part",
+      "yaml": {
+        "logging": {
+          "ecs_namespace": "team..app"
+        }
+      },
+      "message": "logging.ecs_namespace 'team..app' must be 1 to 255 characters with no space or control character, and no empty part between dots"
+    },
+    {
+      "name": "ecs_namespace_is_empty",
+      "yaml": {
+        "logging": {
+          "ecs_namespace": ""
+        }
+      },
+      "message": "logging.ecs_namespace '' must be 1 to 255 characters with no space or control character, and no empty part between dots"
     },
     {
       "name": "ecs_namespace_is_an_ecs_field",
@@ -2768,6 +2786,15 @@
         }
       },
       "message": "logging.ecs_namespace 'request_id' is an ECS field name; choose another name, for example your product name"
+    },
+    {
+      "name": "ecs_namespace_inside_an_ecs_field",
+      "yaml": {
+        "logging": {
+          "ecs_namespace": "host.myteam"
+        }
+      },
+      "message": "logging.ecs_namespace 'host.myteam' is inside the ECS field 'host'; choose another name, for example your product name"
     },
     {
       "name": "detach_needs_autodiscover",
@@ -4680,6 +4707,26 @@
       },
       "path": "logging.ecs_namespace",
       "value": "acme_search"
+    },
+    {
+      "name": "ecs_namespace_with_dots_and_capitals",
+      "yaml": {
+        "logging": {
+          "ecs_namespace": "A.bcd.myteam_name"
+        }
+      },
+      "path": "logging.ecs_namespace",
+      "value": "A.bcd.myteam_name"
+    },
+    {
+      "name": "ecs_namespace_with_a_hyphen",
+      "yaml": {
+        "logging": {
+          "ecs_namespace": "My-Product"
+        }
+      },
+      "path": "logging.ecs_namespace",
+      "value": "My-Product"
     },
     {
       "name": "split_job_timeout_default",

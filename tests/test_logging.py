@@ -11,7 +11,7 @@ import structlog
 from pydantic import ValidationError
 
 from drakkar.config import LoggingConfig
-from drakkar.ecs import DEFAULT_ECS_NAMESPACE, ECS_RESERVED_NAMES, ECS_VERSION
+from drakkar.ecs import DEFAULT_ECS_NAMESPACE, ECS_RESERVED_NAMES, ECS_VERSION, ecs_namespace_error
 from drakkar.logging import (
     DeferredLog,
     EcsError,
@@ -267,6 +267,53 @@ def test_ecs_fixture_pins_the_version_and_namespace():
 def test_ecs_namespace_refuses_every_reserved_name(name):
     with pytest.raises(ValidationError, match='is an ECS field name'):
         LoggingConfig(ecs_namespace=name)
+
+
+@pytest.mark.parametrize(
+    'name',
+    ['acme', 'A.bcd.myteam_name', 'My-Product', 'a.b', 'team@site', 'Ünï.код', 'x' * 255, 'hostname', 'my.host'],
+)
+def test_ecs_namespace_accepts_free_names_and_dots(name):
+    assert LoggingConfig(ecs_namespace=name).ecs_namespace == name
+
+
+@pytest.mark.parametrize(
+    'name',
+    [
+        '',
+        ' ',
+        'a b',
+        'a\tb',
+        'a\nb',
+        '.a',
+        'a.',
+        'a..b',
+        'x' * 256,
+        'a\x7fb',
+        'a\u00a0b',
+        'a\x00b',
+        'a\u2028b',
+        'a\ud800b',
+    ],
+)
+def test_ecs_namespace_refuses_spaces_control_characters_and_empty_parts(name):
+    with pytest.raises(ValidationError, match='must be 1 to 255 characters'):
+        LoggingConfig(ecs_namespace=name)
+
+
+@pytest.mark.parametrize(
+    ('name', 'field'), [('host.myteam', 'host'), ('log.level', 'log'), ('request_id.x', 'request_id')]
+)
+def test_ecs_namespace_refuses_a_name_inside_an_ecs_field(name, field):
+    with pytest.raises(ValidationError, match=f"is inside the ECS field '{field}'"):
+        LoggingConfig(ecs_namespace=name)
+
+
+def test_ecs_namespace_error_shows_a_long_or_unprintable_name_cut_and_escaped():
+    message = ecs_namespace_error('a\nb' + 'x' * 300)
+
+    assert message is not None and '\n' not in message
+    assert "'a\\nb" in message and "...'" in message and len(message) < 250
 
 
 def test_setup_logging_ecs_uses_the_configured_namespace_and_root_copy():

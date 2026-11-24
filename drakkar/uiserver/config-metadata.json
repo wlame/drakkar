@@ -2653,7 +2653,7 @@
           "path": "logging.ecs_namespace",
           "env": "DK_LOGGING__ECS_NAMESPACE",
           "description": "With format 'ecs': the object that holds every field that is not an ECS field, for example your product name.",
-          "full_description": "With format 'ecs': the object that holds every field that is not an ECS field, for example your product name. A lower-case identifier of at most 64 characters, and not an ECS field set (host, error, event, ...).",
+          "full_description": "With format 'ecs': the object that holds every field that is not an ECS field, for example your product name. 1 to 255 characters with no space; dots are allowed and the name is written as one key. The part before the first dot may not be an ECS field set (host, error, event, ...).",
           "type": "string",
           "default": "drakkar",
           "secret": false,

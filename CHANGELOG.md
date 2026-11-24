@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Split: the optional handler hook `part_key(message, part, index)` gives a part an affinity key. Parts with the same key go to one partition of the parts topic, the CRC-32 of the key modulo the partition count; `None` or an empty key keeps the even spread, and a raise or another type fails the job with stage `split` (docs page Split a Message Across the Fleet, section Keeping the parts of one entity on one worker).
 
+### Changed
+
+- `logging.ecs_namespace` takes free text: 1 to 255 characters with no space or control character, where it took only a lower-case identifier of at most 64 characters. Capital letters, hyphens and dots are allowed, for example `A.bcd.myteam_name`. A name with dots is written as one key. No part between dots may be empty, and the part before the first dot cannot be an ECS field name. Every name that was valid before is still valid and gives the same log lines. The load message for a refused name has a new text.
+
 ## [3.6.0] - 2026-11-23
 
 ### Added
