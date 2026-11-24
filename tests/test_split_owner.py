@@ -1761,6 +1761,19 @@ async def test_part_key_of_a_wrong_type_fails_the_split():
     await worker.stop()
 
 
+async def test_part_key_text_that_is_not_utf8_fails_the_split():
+    # A lone surrogate cannot be written as UTF-8; the job must end like any failed split, not hang.
+    world = World()
+    handler = KeyedHandler({500: items(2)}, lambda part, index: '\ud800')
+    worker = await OwnerWorker(world, handler).start(source_message(500))
+    await wait_until(lambda: worker.committed == 501)
+
+    assert world.kinds() == ['open', 'closed'] and world.parts() == []
+    [record] = worker.dlq_records()
+    assert record.stage == 'split' and record.error.startswith('split failed: ')
+    await worker.stop()
+
+
 async def test_part_key_is_not_called_for_a_local_message():
     handler = KeyedHandler({}, lambda part, index: 'never')
     world = World()

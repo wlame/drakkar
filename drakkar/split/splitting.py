@@ -461,12 +461,14 @@ class SplitRun:
         if hook is None:
             return None
         try:
-            key = hook(self._message, item, index)
+            # In the context of the split, so a log line of the hook carries the same fields as one of split().
+            key = self._context.run(hook, self._message, item, index)
+            if isinstance(key, str):
+                # Inside the try: a text that is not valid UTF-8 (a lone surrogate) is a failure of the hook.
+                key = key.encode('utf-8')
         except Exception as error:
             raise _SplitFailed(_error_text(error), error) from error
-        if isinstance(key, str):
-            key = key.encode('utf-8')
-        elif key is not None and not isinstance(key, bytes):
+        if key is not None and not isinstance(key, bytes):
             raise _SplitFailed(f'part_key returned {type(key).__name__}')
         # An empty key is no key, so a missing id cannot send every part of a job to one partition.
         return key or None

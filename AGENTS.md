@@ -79,7 +79,8 @@ breaking change, never a refactor:
   (`tests/fixtures/split_contract.json`): the part records of the parts topic
   (key and value of the original message, its non-`dk-` headers, then the
   `dk-split-*` headers in a fixed order, and the partition rule
-  `(source offset + index) mod N`), and the records of the results log
+  `(source offset + index) mod N`, or for a part with a key of the handler's
+  `part_key` the unsigned CRC-32 of the key bytes `mod N`), and the records of the results log
   (`open`, `split-done`, `split-cancelled`, `result`, `closed`: key
   `<partition>:<offset>`, headers in a fixed order, sorted compact JSON
   values, the closed sets of outcomes) — workers of other releases write and
