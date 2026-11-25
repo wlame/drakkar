@@ -17,7 +17,7 @@ from typing import Any, NamedTuple, TextIO
 import structlog
 
 from drakkar.config import LoggingConfig
-from drakkar.ecs import DEFAULT_ECS_NAMESPACE, ECS_VERSION
+from drakkar.ecs import DEFAULT_ECS_NAMESPACE, DEFAULT_SERVICE_NAME, ECS_VERSION
 
 _log_file_handle: TextIO | None = None
 
@@ -91,7 +91,7 @@ def build_ecs_record(
     if 'module' in fields:
         record['log'] = {'logger': fields['module']}
 
-    service: dict[str, Any] = {'name': fields.get('service_name', 'drakkar')}
+    service: dict[str, Any] = {'name': fields.get('service_name', DEFAULT_SERVICE_NAME)}
     if fields.get('service_version'):
         service['version'] = fields['service_version']
     if fields.get('worker_id'):
@@ -198,9 +198,14 @@ class DeferredLog:
         return lines
 
 
-def identity_fields(worker_id: str = '', consumer_group: str = '', version: str = '') -> dict[str, str]:
+def identity_fields(
+    worker_id: str = '',
+    consumer_group: str = '',
+    version: str = '',
+    service_name: str = DEFAULT_SERVICE_NAME,
+) -> dict[str, str]:
     """The identity fields of every log line; empty values are left out."""
-    fields = {'service_name': 'drakkar'}
+    fields = {'service_name': service_name}
     if worker_id:
         fields['worker_id'] = worker_id
     if consumer_group:
@@ -277,7 +282,14 @@ def setup_logging(
 
     processors: list[structlog.types.Processor] = [
         structlog.contextvars.merge_contextvars,
-        IdentityFields(identity_fields(worker_id=worker_id, consumer_group=consumer_group, version=version)),
+        IdentityFields(
+            identity_fields(
+                worker_id=worker_id,
+                consumer_group=consumer_group,
+                version=version,
+                service_name=config.service_name,
+            )
+        ),
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt='iso', key='timestamp'),
         structlog.processors.StackInfoRenderer(),

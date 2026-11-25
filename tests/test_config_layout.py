@@ -209,6 +209,7 @@ LAYOUT = [
     'logging.format',
     'logging.output',
     'logging.min_task_duration',
+    'logging.service_name',
     'logging.ecs_namespace',
     'logging.ecs_request_id_at_root',
     'runtime_health.enabled',

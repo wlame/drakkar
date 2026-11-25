@@ -716,7 +716,7 @@ Every log line includes these fields, bound once at startup:
 |-------|--------|---------|
 | `timestamp` | ISO 8601 timestamp | `2026-04-06T12:34:56.789Z` |
 | `level` | Log level | `info` |
-| `service_name` | Hardcoded | `drakkar` |
+| `service_name` | `logging.service_name` config, default `drakkar` | `drakkar` |
 | `worker_id` | `worker.name_env` env var, else `worker.name` | `worker-3` |
 | `consumer_group` | `sources.kafka.consumer_group` config; **omitted entirely** when the Kafka source is disabled | `drakkar-workers` |
 | `module` | Python module name | `drakkar.partition` |
@@ -738,7 +738,7 @@ With `logging.format: ecs`, every line is one JSON object in the Elastic Common 
 | `message` | The event name, for example `partition_paused` | `event` |
 | `ecs.version` | `8.11.0` | -- |
 | `log.logger` | The module that wrote the line | `module` |
-| `service.name` | `drakkar` | `service_name` |
+| `service.name` | `logging.service_name`, default `drakkar` | `service_name` |
 | `service.version` | The framework version | `service_version` |
 | `service.node.name` | The worker name | `worker_id` |
 | `error.type`, `error.message`, `error.stack_trace` | The exception of a line logged with `exc_info` (for example `logger.exception(...)`) | `exception` |

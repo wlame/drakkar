@@ -2650,6 +2650,16 @@
           "group": "logging"
         },
         {
+          "path": "logging.service_name",
+          "env": "DK_LOGGING__SERVICE_NAME",
+          "description": "The name of this service on every log line: the field service_name of the json and console formats, and service.name of the ecs format.",
+          "full_description": "The name of this service on every log line: the field service_name of the json and console formats, and service.name of the ecs format. 1 to 255 characters.",
+          "type": "string",
+          "default": "drakkar",
+          "secret": false,
+          "group": "logging"
+        },
+        {
           "path": "logging.ecs_namespace",
           "env": "DK_LOGGING__ECS_NAMESPACE",
           "description": "With format 'ecs': the object that holds every field that is not an ECS field, for example your product name.",

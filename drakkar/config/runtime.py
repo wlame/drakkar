@@ -10,7 +10,7 @@ from pydantic import Field, field_validator, model_validator
 
 from drakkar.config.base import ConfigModel
 from drakkar.config.units import ByteSize, Duration, WholeSeconds
-from drakkar.ecs import ecs_namespace_error
+from drakkar.ecs import DEFAULT_SERVICE_NAME, ecs_namespace_error, service_name_error
 
 EXECUTOR_ON_FAILURE_CHOICES = ('skip', 'dlq')
 
@@ -407,6 +407,13 @@ class LoggingConfig(ConfigModel):
             'Shortest task duration that emits a slow_task_completed / slow_task_failed log line. 0 logs all tasks.'
         ),
     )
+    service_name: str = Field(
+        default=DEFAULT_SERVICE_NAME,
+        description=(
+            'The name of this service on every log line: the field service_name of the json and console '
+            'formats, and service.name of the ecs format. 1 to 255 characters.'
+        ),
+    )
     ecs_namespace: str = Field(
         default='drakkar',
         description=(
@@ -423,6 +430,14 @@ class LoggingConfig(ConfigModel):
             'in the ecs_namespace object.'
         ),
     )
+
+    @field_validator('service_name')
+    @classmethod
+    def _check_service_name(cls, value: str) -> str:
+        error = service_name_error(value)
+        if error is not None:
+            raise ValueError(error)
+        return value
 
     @field_validator('ecs_namespace')
     @classmethod

@@ -405,3 +405,47 @@ def test_logging_format_refuses_an_unknown_value():
 def test_render_ecs_line_writes_a_non_finite_float_as_text(value, text):
     line = render_ecs_line({'event': 'x', 'level': 'info', 'ratio': value, 'nested': {'v': [value]}})
     assert json.loads(line)['drakkar'] == {'nested': {'v': [text]}, 'ratio': text}
+
+
+def _capture_line(config: LoggingConfig) -> dict:
+    """Set logging up with ``config``, log one line and return it parsed."""
+    buf = io.StringIO()
+    structlog.contextvars.clear_contextvars()
+    setup_logging(config)
+    structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=buf), cache_logger_on_first_use=False)
+    try:
+        structlog.get_logger().info('x')
+        return json.loads(buf.getvalue().strip())
+    finally:
+        structlog.configure(
+            logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+            cache_logger_on_first_use=True,
+        )
+
+
+def test_service_name_defaults_to_drakkar():
+    assert LoggingConfig().service_name == 'drakkar'
+
+
+def test_service_name_of_the_config_is_on_every_json_line():
+    data = _capture_line(LoggingConfig(format='json', service_name='billing-worker'))
+
+    assert data['service_name'] == 'billing-worker'
+
+
+def test_service_name_of_the_config_is_the_ecs_service_name():
+    data = _capture_line(LoggingConfig(format='ecs', service_name='billing-worker'))
+
+    assert data['service']['name'] == 'billing-worker'
+    assert 'service_name' not in data.get('drakkar', {})
+
+
+@pytest.mark.parametrize('name', ['billing-worker', 'Search API', 'team.app_1', 'Ünï-сервис', 'x' * 255])
+def test_service_name_accepts_free_text(name):
+    assert LoggingConfig(service_name=name).service_name == name
+
+
+@pytest.mark.parametrize('name', ['', ' ', ' padded', 'padded ', 'a\nb', 'a\tb', 'a\x00b', 'a\u2028b', 'x' * 256])
+def test_service_name_refuses_empty_padded_and_control_text(name):
+    with pytest.raises(ValidationError, match=r'logging\.service_name .* must be 1 to 255 characters'):
+        LoggingConfig(service_name=name)

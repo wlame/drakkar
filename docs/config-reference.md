@@ -454,6 +454,8 @@ logging:
                                    # e.g. /var/log/drakkar/{worker_id}.log
   min_task_duration: 500ms         # shortest task that logs slow_task_completed/failed; 0 logs all.
                                    # env: DK_LOGGING__MIN_TASK_DURATION
+  service_name: drakkar            # the name of this service on every log line: service_name, or service.name
+                                   # with format ecs. env: DK_LOGGING__SERVICE_NAME
   ecs_namespace: drakkar           # with format ecs: the object of every non-ECS field, e.g. your product name.
                                    # env: DK_LOGGING__ECS_NAMESPACE
   ecs_request_id_at_root: false    # with format ecs: also write request_id at the root of each line.

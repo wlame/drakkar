@@ -2743,6 +2743,24 @@
       "message": "autodiscover.enabled needs api.enabled: peers reach a worker through its API"
     },
     {
+      "name": "service_name_empty",
+      "yaml": {
+        "logging": {
+          "service_name": ""
+        }
+      },
+      "message": "logging.service_name '' must be 1 to 255 characters with no control character and no space at its start or end"
+    },
+    {
+      "name": "service_name_with_a_space_at_its_end",
+      "yaml": {
+        "logging": {
+          "service_name": "billing "
+        }
+      },
+      "message": "logging.service_name 'billing ' must be 1 to 255 characters with no control character and no space at its start or end"
+    },
+    {
       "name": "ecs_namespace_has_a_space",
       "yaml": {
         "logging": {
@@ -4686,6 +4704,21 @@
       },
       "path": "agent.enabled",
       "value": true
+    },
+    {
+      "name": "service_name_default",
+      "yaml": {},
+      "path": "logging.service_name",
+      "value": "drakkar"
+    },
+    {
+      "name": "service_name_by_env",
+      "yaml": {},
+      "env": {
+        "DK_LOGGING__SERVICE_NAME": "Search API"
+      },
+      "path": "logging.service_name",
+      "value": "Search API"
     },
     {
       "name": "ecs_namespace_default",
