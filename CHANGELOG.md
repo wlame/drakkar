@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.1] - 2026-11-25
+
 ### Added
 
 - `logging.service_name` (default `drakkar`) sets the name of the service on every log line: the field `service_name` of the `json` and `console` formats, and `service.name` of the `ecs` format. It was always `drakkar` before. The name is 1 to 255 characters with no control character and no space at its start or end.
