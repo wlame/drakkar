@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.0] - 2026-11-25
+
 ### Added
 
 - Split: the optional handler hook `part_key(message, part, index)` gives a part an affinity key. Parts with the same key go to one partition of the parts topic, the CRC-32 of the key modulo the partition count; `None` or an empty key keeps the even spread, and a raise or another type fails the job with stage `split` (docs page Split a Message Across the Fleet, section Keeping the parts of one entity on one worker).
