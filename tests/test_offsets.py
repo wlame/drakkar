@@ -243,3 +243,14 @@ def test_uncommitted_advance_stops_at_the_first_incomplete_offset():
     tracker.complete(1)
     tracker.complete(4)  # 2 and 3 still pending
     assert tracker.uncommitted_advance() == 2
+
+
+def test_pending_outside_leaves_out_an_offset_of_two_sets_once():
+    tracker = OffsetTracker()
+    for offset in (1, 2, 3, 4):
+        tracker.register(offset)
+    tracker.complete(4)
+    assert tracker.pending_outside() == 3
+    assert tracker.pending_outside({1}, {1, 2}) == 1
+    # A set offset that is completed or unknown is no pending offset to leave out.
+    assert tracker.pending_outside({4, 99}, {3}) == 2

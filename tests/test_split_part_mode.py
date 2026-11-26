@@ -1108,6 +1108,29 @@ async def test_a_report_cancelled_before_it_starts_leaves_the_drain():
     assert processor._waiting_reports == 0
 
 
+async def test_an_offset_out_of_the_drain_for_two_reasons_is_left_out_once():
+    pipeline = PartPipeline(one_task_handler())
+    processor = pipeline.processor
+    message = part_with_split()
+    other = 7_000
+    processor.offset_tracker.register(message.offset)
+    processor.offset_tracker.register(other)
+
+    async def end_that_gives_up():
+        # The owner put the job back among the open ones, then the end gave up at a stop.
+        processor.hold_job_offset(message.offset)
+        raise asyncio.CancelledError
+
+    await processor.start_job_end(message, end_that_gives_up)
+
+    assert message.offset in processor._open_job_offsets
+    assert message.offset in processor._abandoned_offsets
+    # The other offset can still complete, so the drain must wait for it.
+    assert processor._has_drainable_pending()
+    processor.offset_tracker.complete(other)
+    assert not processor._has_drainable_pending()
+
+
 async def test_a_part_that_ends_after_the_drain_timed_out_is_not_reported():
     gate = asyncio.Event()
     pipeline = PartPipeline(one_task_handler(), ScriptedPool(gates={'t-a': gate}))

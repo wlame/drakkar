@@ -67,6 +67,23 @@ class OffsetTracker:
         self._offsets[offset] = OffsetState.COMPLETED
         self._pending_count -= 1
 
+    def pending_outside(self, *excluded: set[int]) -> int:
+        """The pending offsets that are in none of ``excluded``.
+
+        An offset in two of the sets is left out once, and an offset of a set
+        that is no longer pending is not left out. The cost grows with the
+        sizes of the sets, not with the number of tracked offsets.
+        """
+        left_out = 0
+        for index, offsets in enumerate(excluded):
+            for offset in offsets:
+                if self._offsets.get(offset) is not OffsetState.PENDING:
+                    continue
+                if any(offset in earlier for earlier in excluded[:index]):
+                    continue
+                left_out += 1
+        return self._pending_count - left_out
+
     def committable(self) -> int | None:
         """Return the next offset to commit (highest consecutive completed + 1).
 

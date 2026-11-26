@@ -813,8 +813,8 @@ class PartitionProcessor:
         the offsets of open split jobs: a job ends when its results are in,
         which no stop waits for.
         """
-        not_drainable = len(self._stalled_offsets) + len(self._abandoned_offsets) + len(self._open_job_offsets)
-        return self._offset_tracker.pending_count > not_drainable
+        left_out = (self._stalled_offsets, self._abandoned_offsets, self._open_job_offsets)
+        return self._offset_tracker.pending_outside(*left_out) > 0
 
     async def drain(self) -> None:
         """Wait for in-flight work to complete and for the queue to empty,
