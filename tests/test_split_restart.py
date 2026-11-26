@@ -807,6 +807,8 @@ async def test_a_failure_while_the_owner_of_a_restored_partition_is_built_takes_
     assert source.processors[1]._task is None
     [line] = events(logs, 'split_restore_task_failed')
     assert (line['log_level'], line['error']) == ('critical', 'no owner')
+    # The results partition of the failed restore is no longer followed.
+    assert 1 not in runtime.tracker._followed
     await source.on_revoke([1])
     await runtime.stop(deadline=0.0)
 

@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Split jobs over HTTP: a status record whose `state` is not text, whose `duration_seconds` is an integer too large for a float, or whose result holds a number beyond the float range is ignored as invalid. A lone surrogate in a result is read as U+FFFD. Before, such records raised an error in the status follower, gave an answer that was not JSON, or answered 503. A handler result with a lone surrogate now fails the job like any result that is not JSON.
 - Split: a topic whose `retention.ms` is below -1 gives the warning that its retention could not be read. Before, the start failed.
 - A drain of a partition counts an offset that it does not wait for only once, also when the offset is out of the drain for two reasons (for example a split job that is open and whose end gave up). Before, such an offset was counted twice and a drain could end while other work was still running.
+- Split: when the restore of a partition fails after its results partition was followed, the worker stops following that results partition.
 
 ## [3.7.1] - 2026-11-25
 

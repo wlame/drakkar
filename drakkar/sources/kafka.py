@@ -866,10 +866,12 @@ class KafkaSource:
         the processor either not started or started with its owner.
         """
         shown = self._shown(partition_id)
+        followed = False
         try:
             await self._pause_for_restore(partition_id)
             committed = await self._committed_source_offset(partition_id)
             table = await runtime.follow(partition_id, committed_source_offset=committed)
+            followed = True
             ctx = self._context()
             owner = runtime.owner_for(
                 partition_id,
@@ -898,6 +900,10 @@ class KafkaSource:
                 impact='the partition is not processed; the worker now fails /readyz',
                 exc_info=error,
             )
+            if followed:
+                # No owner reads the results partition, so it is not followed either; a later revoke finds
+                # nothing to release.
+                await runtime.release(partition_id)
             return
         await self._resume_after_restore(partition_id)
 
