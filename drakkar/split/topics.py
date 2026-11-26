@@ -182,13 +182,19 @@ def topic_retention_ms(
 ) -> Callable[[str], Awaitable[int | None]]:
     """A ``retention`` callable for ``check_split_topics``: the blocking client call runs on a thread.
 
-    A read the broker refuses raises ``KafkaException`` and a malformed value ``ValueError``;
+    A read the broker refuses raises ``KafkaException`` and a malformed value (also one below -1) ``ValueError``;
     ``check_split_topics`` turns any failed read into a warning.
     """
 
     def read(topic: str) -> int | None:
         value = _topic_config_value(connection, admin_factory, topic, RETENTION_KEY)
-        return int(value) if value is not None else None
+        if value is None:
+            return None
+        retention_ms = int(value)
+        # A broker refuses a value below -1, so such a value is malformed: a read that failed.
+        if retention_ms < NO_RETENTION_LIMIT_MS:
+            raise ValueError(f'{RETENTION_KEY} is below {NO_RETENTION_LIMIT_MS}: {retention_ms}')
+        return retention_ms
 
     async def retention(topic: str) -> int | None:
         return await asyncio.to_thread(read, topic)

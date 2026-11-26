@@ -21,6 +21,7 @@ from tests.conftest import kafka_connections
 PARTS = 'items_g_split_parts'
 RESULTS = 'items_g_split_results'
 HOUR_MS = 3_600_000
+RETENTION_TEXTS = {'malformed': 'abc', 'below': '-2', 'unlimited': '-1'}
 
 
 def make_config(**split) -> DrakkarConfig:
@@ -107,7 +108,7 @@ class FakeAdmin:
                 {}
                 if topic == 'bare'
                 else {
-                    'retention.ms': SimpleNamespace(value='abc' if topic == 'malformed' else '60000'),
+                    'retention.ms': SimpleNamespace(value=RETENTION_TEXTS.get(topic, '60000')),
                     'cleanup.policy': SimpleNamespace(value='compact,delete'),
                 }
             )
@@ -163,6 +164,38 @@ async def test_malformed_retention_value_from_the_real_query_is_a_warning():
 
     warnings = await check_split_topics(make_config(job_timeout='24h'), metadata=metadata, retention=retention)
     assert warnings[0].startswith(f"split: the retention of the topic '{PARTS}' could not be read: ")
+
+
+async def test_retention_below_no_limit_is_a_read_that_fails():
+    read = topic_retention_ms(KafkaConnectionConfig(), admin_factory=FakeAdmin)
+    assert await read('unlimited') == -1
+    with pytest.raises(ValueError, match=r'^retention.ms is below -1: -2$'):
+        await read('below')
+
+
+async def test_retention_below_no_limit_is_a_warning_on_every_checked_topic():
+    read = topic_retention_ms(KafkaConnectionConfig(), admin_factory=FakeAdmin)
+
+    async def metadata():
+        return {'items': 1, PARTS: 1, RESULTS: 1, STATUS: 1}
+
+    async def retention(topic: str):
+        return await read('below')
+
+    async def cleanup_policy(topic: str):
+        return 'delete'
+
+    warnings = await check_split_topics(make_config(job_timeout='24h'), metadata=metadata, retention=retention)
+    assert warnings == [
+        f"split: the retention of the topic '{topic}' could not be read: retention.ms is below -1: -2"
+        for topic in (PARTS, RESULTS)
+    ]
+    status_warnings = await check_status_topic(
+        STATUS, result_retention=DAY_SECONDS, metadata=metadata, retention=retention, cleanup_policy=cleanup_policy
+    )
+    assert status_warnings == [
+        f"split: the retention of the topic '{STATUS}' could not be read: retention.ms is below -1: -2"
+    ]
 
 
 STATUS = 'items_status'

@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Split: the reader of part results skips a result whose part number is above the limit of 16 777 216 parts, also when the job announced a larger part count. Before, such a record could make the worker try to allocate a very large buffer.
 - Split: a `closed` record whose outcome is a list or an object is ignored as malformed. Before, the job table raised an error for it.
 - Split jobs over HTTP: a status record whose `state` is not text, whose `duration_seconds` is an integer too large for a float, or whose result holds a number beyond the float range is ignored as invalid. A lone surrogate in a result is read as U+FFFD. Before, such records raised an error in the status follower, gave an answer that was not JSON, or answered 503. A handler result with a lone surrogate now fails the job like any result that is not JSON.
+- Split: a topic whose `retention.ms` is below -1 gives the warning that its retention could not be read. Before, the start failed.
 
 ## [3.7.1] - 2026-11-25
 
