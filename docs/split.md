@@ -630,11 +630,12 @@ The root section `split`, after `sources` and before `executor`:
   values are checked then: the ranges, the two timeouts, and the form
   `<type>/<name>` of the `aggregate_sinks` entries. The rules that read
   other keys (the Kafka source, the connection, the configured sinks, the
-  four topics, the sink stages) apply only with `enabled: true`.
+  topics, the sink stages) apply only with `enabled: true`.
 - The parts consumer takes its poll and session settings from
   `sources.kafka`.
 - With `enabled: true` the source topic, the parts topic, the results topic
-  and the DLQ topic must be four different topics.
+  and the DLQ topic must be four different topics; with `split.http.enabled`
+  the status topic is a fifth, different from all of them.
 - The checks run again after `on_startup`. A change of `split.enabled` in
   `on_startup` is ignored and logged, like the other settings that are read
   before `on_startup`.

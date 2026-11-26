@@ -77,7 +77,8 @@ SPLIT_WITHOUT_KAFKA_SOURCE_MESSAGE = (
     'split.enabled needs sources.kafka.enabled: only messages of the Kafka source are split'
 )
 
-# The topic keys that must name four different topics, in the order a message names them.
+# The topic keys that must name five different topics (the status topic only with HTTP jobs), in the order a
+# message names them.
 SPLIT_HTTP_WITHOUT_SPLIT_MESSAGE = (
     'split.http.enabled needs split.enabled: an HTTP job is a split job of the Kafka source'
 )

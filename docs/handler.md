@@ -407,7 +407,7 @@ an instance (`handler.arrange_stream = ...`) is not seen.
 
 ### Splitting a message
 
-The four hooks of this section, and `part_data_model`, are used only when
+The six hooks of this section, and `part_data_model`, are used only when
 `split.enabled` is true. With `split.enabled` false a handler that overrides
 `split()` starts, never calls it, and logs `split_disabled` once; no hook of
 this section is checked then. With `split.enabled` true a handler may

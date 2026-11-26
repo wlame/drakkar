@@ -45,7 +45,7 @@ Every route is a `GET` under `/api/v1/agent`. Every answer has
 | `/api/v1/agent/manual` | The registry: concepts, config advice, metrics, events, recipes, routes, rules, and the handler notes (`app`). | `parts`, `detail`, `format=json\|markdown`, `topic=<kind>:<key>` |
 | `/api/v1/agent/config` | The effective config, one entry per key: `path`, `value`, `default`, `origin` (`default`, `yaml`, `env` or `on_startup`), `type`, `secret`, `meaning`, and `advice` with `detail=full`. | `parts` (the root sections), `detail` |
 | `/api/v1/agent/metrics` | The framework and handler metrics with their meaning, the healthy values and at most 100 samples per family; `promql` and `related` with `detail=full`. | `names`, `prefix`, `detail` |
-| `/api/v1/agent/state` | One snapshot: `health`, `budget`, `partitions`, `sinks`, `recorder`, `autodiscover`, `detach` (the state, origin, reason, and `since` and `until` in epoch seconds), `recent_failures` (the last 20 failed tasks). | `parts` |
+| `/api/v1/agent/state` | One snapshot: `health`, `budget`, `partitions`, `sinks`, `recorder`, `autodiscover`, `detach` (the state, origin, reason, and `since` and `until` in epoch seconds), `split` (the open split jobs, the age of the oldest, the job nearest to its timeout, and the partitions that restore; `enabled` false with split off), `recent_failures` (the last 20 failed tasks). | `parts` |
 | `/api/v1/agent/diagnose` | The findings of the rules, by severity, with their evidence, an `explain` reference and a suggestion; `checked` names every rule that ran and `failed` every rule that could not run. | none |
 
 The common parameters:
@@ -100,6 +100,8 @@ text, also with `agent.include_payloads: true`.
 | `recorder-dropping` | warning | The recorder dropped events or Postgres rows since the previous call. |
 | `peers-offline` | warning | Peers in the registry count as offline. |
 | `cluster-tasks-mismatch` | warning | Online peers of the cluster declare other cluster tasks. |
+| `split-job-near-timeout` | warning | An open split job is close to its timeout: less time left than min(max(10 percent of the timeout, 300 seconds), 25 percent of the timeout). |
+| `split-partition-restoring` | warning | The split jobs of a source partition have been restoring for more than 120 seconds. |
 | `pool-saturated` | info | Every executor slot is busy and tasks wait. |
 | `partition-paused-by-debug` | info | An operator paused a partition from the UI. |
 | `dlq-writing` | info | The worker wrote DLQ records since the previous call. |

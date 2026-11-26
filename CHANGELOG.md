@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Split jobs over HTTP: a request with another method on the job path answers 405 with `Allow: GET, POST`. Before, the header named only `POST`.
 - Split jobs over HTTP: `updated_at` of a status record and of a status answer is written with the rounding of every other epoch time in JSON (the seconds times 1 000 000, rounded half to even). Before, about one time in eight could end one microsecond lower.
 - Split: when the DLQ record or the `closed` record of a failed split cannot be written because of an error (not a refusal of the broker), the offset of the job is held: it never completes and no drain waits for it. Before, the offset stayed pending, and each later drain of that partition ran to its timeout.
+- Docs: the counts of split hooks, metric families, topics and DLQ stages are right, and the agent page lists the state part `split` and the rules `split-job-near-timeout` and `split-partition-restoring`.
 
 ## [3.7.1] - 2026-11-25
 

@@ -30,13 +30,14 @@ new metric families at 0, and a new config section.
 3. **The split feature is off by default.** A worker with `split.enabled:
    false` behaves as before. Its handler is not checked for the new hook
    names: a handler that already has its own `split`, `part_data`,
-   `aggregate`, `on_job_timeout` or `part_data_model` starts as before, and
+   `part_key`, `aggregate`, `on_job_timeout`, `http_job_result` or
+   `part_data_model` starts as before, and
    the framework never calls them. A handler with a method named `split`
    logs `split_disabled` once (level info). Four things are new for such a
    worker:
     - The config summary line of the start has one more token,
       ` split=off`, after `sources=[...]`. Change a parser of that line.
-    - The eleven `drakkar_split_*` metric families exist, with the value 0.
+    - The seventeen `drakkar_split_*` metric families exist, with the value 0.
     - The root config accepts a `split` section. With `split.enabled: false`
       only its own values are checked (the ranges, the two timeouts, the
       form of the `aggregate_sinks` entries); no other key of your config is
