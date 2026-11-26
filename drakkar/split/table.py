@@ -373,7 +373,8 @@ class JobTable:
             return _ignored(job, reason)
         job = cast(JobState, job)
         parts = entry.body.get('parts')
-        if not _is_count(parts):
+        # A count above the limit of one job is refused here, so no later reader walks it.
+        if not _is_count(parts) or parts > MAX_PART_INDEX + 1:
             return _ignored(job, IgnoreReason.MALFORMED)
         if job.parts is not None:
             return _ignored(job, IgnoreReason.DUPLICATE)

@@ -251,7 +251,7 @@ def test_result_with_a_bad_body_is_malformed(log, body):
     assert applied.job is not None and applied.job.received_count == 0
 
 
-@pytest.mark.parametrize('parts', [-1, '3', True, None, 1.5])
+@pytest.mark.parametrize('parts', [-1, '3', True, None, 1.5, 2**24 + 1, 2**62])
 def test_split_done_with_bad_parts_is_malformed(log, parts):
     log.put(open_entry(ref()))
     applied = log.put(LogEntry(ref=ref(), kind='split-done', body={'parts': parts}))

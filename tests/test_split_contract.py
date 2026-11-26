@@ -12,6 +12,7 @@ from drakkar.split.models import JobAction, PartResult
 from drakkar.split.records import (
     ClosedOutcome,
     JobRef,
+    LogEntry,
     RecordKind,
     closed_body,
     key_partition,
@@ -23,7 +24,7 @@ from drakkar.split.records import (
     part_record,
     result_body,
 )
-from drakkar.split.table import IgnoreReason
+from drakkar.split.table import IgnoreReason, JobTable
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures' / 'split_contract.json').read_text(encoding='utf-8'))
 
@@ -67,6 +68,22 @@ def test_closed_sets_match_the_fixture():
     assert list(get_args(ClosedOutcome)) == FIXTURE['closed_outcomes']
     assert [action.value for action in JobAction] == FIXTURE['job_actions']
     assert [reason.value for reason in IgnoreReason] == FIXTURE['ignore_reasons']
+
+
+@pytest.mark.parametrize('case', FIXTURE['split_done_parts_cases'], ids=lambda c: f'{c["parts"]}-{c["verdict"]}')
+def test_split_done_part_count_follows_the_fixture(case):
+    job_ref = JobRef(group='workers', partition=7, offset=500, attempt=1, attempt_id='fedcba9876543210')
+    table = JobTable(partition=7, group='workers')
+    opened = LogEntry(ref=job_ref, kind='open', body=open_body(worker='w1', instance='i-1', request_id=None))
+    table.apply(opened, offset=0, timestamp_ms=1_000)
+    done = LogEntry(ref=job_ref, kind='split-done', body={'parts': case['parts']})
+    applied = table.apply(done, offset=1, timestamp_ms=2_000)
+    if case['verdict'] == 'malformed':
+        assert applied.ignored is IgnoreReason.MALFORMED
+        assert applied.job is not None and applied.job.parts is None
+    else:
+        assert applied.ignored is None
+        assert applied.job is not None and applied.job.parts == case['parts']
 
 
 @pytest.mark.parametrize('case', FIXTURE['partition_cases'], ids=lambda c: f'{c["offset"]}-{c["index"]}')
