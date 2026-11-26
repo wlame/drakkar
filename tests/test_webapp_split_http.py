@@ -616,3 +616,26 @@ async def test_failed_dispatch_logs_only_a_valid_request_id(main_loop, request_i
 
     [line] = [entry for entry in cap if entry['event'] == 'split_http_dispatch_failed']
     assert line['request_id'] == logged
+
+
+@pytest.mark.parametrize('method', ['PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS', 'PURGE'])
+async def test_another_method_on_the_job_path_answers_405_and_names_both_routes(main_loop, method):
+    webapp, gateway = _webapp(main_loop)
+    transport = httpx.ASGITransport(app=webapp._fastapi_app)
+    async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.request(method, PATH, headers=_auth())
+
+    assert response.status_code == 405
+    assert response.headers['allow'] == 'GET, POST'
+    if method != 'HEAD':
+        assert response.json() == {'detail': 'Method Not Allowed'}
+    assert gateway.calls == []
+
+
+async def test_an_unknown_path_still_answers_404(main_loop):
+    webapp, _ = _webapp(main_loop)
+    transport = httpx.ASGITransport(app=webapp._fastapi_app)
+    async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
+        response = await client.put('/elsewhere', headers=_auth())
+
+    assert (response.status_code, response.json()) == (404, {'detail': 'Not Found'})

@@ -81,13 +81,16 @@ import time
 from collections.abc import Coroutine
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
 import structlog
 import uvicorn
 from fastapi import Depends, FastAPI, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from drakkar.concurrency import dispatch_to_loop
 from drakkar.config import WebAppConfig
@@ -171,6 +174,8 @@ BODY_READ_TIMEOUT_MARGIN_SECONDS = 30
 DISPATCH_MARGIN_SECONDS = 1.0
 
 STATUS_READ_FAILED_TEXT = 'the status could not be read'
+# The methods of the job path, as the Allow header of its 405 names them.
+JOB_PATH_METHODS = 'GET, POST'
 NOT_READY_PIPELINE_TEXT = 'webapp is starting; main pipeline is not yet ready'
 NOT_READY_STATUS_TEXT = 'webapp is starting; the status of HTTP jobs is not restored yet'
 
@@ -768,6 +773,14 @@ class WebApp:
         jobs = self._jobs
         assert jobs is not None
         path = self._config.path
+
+        @app.exception_handler(StarletteHTTPException)
+        async def _name_both_job_methods(request: Request, exc: StarletteHTTPException) -> Response:
+            # The router names only the methods of the first route of a path in a 405; the job path has two.
+            if exc.status_code == HTTPStatus.METHOD_NOT_ALLOWED and request.url.path == path:
+                headers = {**(exc.headers or {}), 'Allow': JOB_PATH_METHODS}
+                exc = StarletteHTTPException(exc.status_code, detail=exc.detail, headers=headers)
+            return await http_exception_handler(request, exc)
 
         @app.post(path)
         async def submit_job(
