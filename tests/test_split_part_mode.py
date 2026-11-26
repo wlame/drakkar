@@ -25,6 +25,7 @@ from drakkar.executor import ExecutorPool
 from drakkar.handler import BaseDrakkarHandler
 from drakkar.metrics import (
     delivery_stalled_offsets,
+    message_parse_failures,
     messages_consumed,
     queued_messages_dropped_at_stop,
     split_parts_processed,
@@ -450,6 +451,21 @@ async def test_a_parse_failure_makes_a_failed_result_whatever_the_parse_policy_s
     assert pipeline.dlq.sent == []
     assert not pipeline.processor.is_dead
     assert pipeline.commits[-1] == (PARTS_PARTITION, 2)
+
+
+async def test_a_parse_failure_of_a_part_is_counted_under_the_shown_partition():
+    class Handler(FanOutHandler):
+        input_model = Data
+
+    shown = str(PARTS_PARTITION_BASE + PARTS_PARTITION)
+    before_shown = message_parse_failures.labels(partition=shown)._value.get()
+    before_kafka = message_parse_failures.labels(partition=str(PARTS_PARTITION))._value.get()
+    pipeline = PartPipeline(Handler(['t-a']))
+
+    await pipeline.run(part_message(offset=0, value=b'not json'))
+
+    assert message_parse_failures.labels(partition=shown)._value.get() == before_shown + 1
+    assert message_parse_failures.labels(partition=str(PARTS_PARTITION))._value.get() == before_kafka
 
 
 async def test_a_raise_of_arrange_fails_every_part_of_the_window_and_the_loop_goes_on():

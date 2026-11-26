@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Split: a topic whose `retention.ms` is below -1 gives the warning that its retention could not be read. Before, the start failed.
 - A drain of a partition counts an offset that it does not wait for only once, also when the offset is out of the drain for two reasons (for example a split job that is open and whose end gave up). Before, such an offset was counted twice and a drain could end while other work was still running.
 - Split: when the restore of a partition fails after its results partition was followed, the worker stops following that results partition.
+- Split: `drakkar_message_parse_failures_total` counts a part that cannot be parsed under the partition number the worker shows for parts (`1000000 + n`), as the other metrics of a part do. Before, it used the partition of the parts topic, which has the same numbers as a source partition.
 
 ## [3.7.1] - 2026-11-25
 

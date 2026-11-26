@@ -52,6 +52,7 @@ from drakkar.models import (
     TaskGroup,
 )
 from drakkar.split.models import JobAction, SplitJob
+from drakkar.split.records import PARTS_PARTITION_BASE
 from drakkar.utils import make_request_id
 
 logger = structlog.get_logger()
@@ -161,6 +162,11 @@ def _extract_type_args(
                 None,
             )
     return None, None, None, None
+
+
+def _shown_partition(msg: SourceMessage) -> int:
+    """The partition number the worker shows for ``msg``: a part of a split job is ``PARTS_PARTITION_BASE + n``."""
+    return PARTS_PARTITION_BASE + msg.partition if msg.split is not None else msg.partition
 
 
 class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
@@ -457,7 +463,7 @@ class BaseDrakkarHandler(Generic[InputT, OutputT, HttpRequestT, HttpResponseT]):
                 # explicitly for clarity; TypeError covers a None value.
                 msg.payload = None
                 msg.parse_error = str(e)
-                message_parse_failures.labels(partition=str(msg.partition)).inc()
+                message_parse_failures.labels(partition=str(_shown_partition(msg))).inc()
                 logger.warning(
                     'message_parse_failed',
                     category='handler',
