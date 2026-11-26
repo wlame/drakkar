@@ -334,3 +334,10 @@ def test_parse_keeps_a_surrogate_pair_of_a_result():
     parsed = parse_status_record(b'order-1', VERSION_HEADER, value)
     assert parsed is not None
     assert parsed.result_json == '"\U0001f600"'
+
+
+def test_updated_at_is_written_with_the_canonical_epoch_rounding():
+    # The product of the seconds and 1e6 is rounded half to even, as for every other epoch time in JSON.
+    record = make(updated=1764000945.2706954)
+    assert b'"updated_at":"2025-11-24T16:15:45.270696Z"' in status_record(record).value
+    assert json.loads(answer_body(record))['updated_at'] == '2025-11-24T16:15:45.270696Z'

@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Split: when the restore of a partition fails after its results partition was followed, the worker stops following that results partition.
 - Split: `drakkar_message_parse_failures_total` counts a part that cannot be parsed under the partition number the worker shows for parts (`1000000 + n`), as the other metrics of a part do. Before, it used the partition of the parts topic, which has the same numbers as a source partition.
 - Split jobs over HTTP: a request with another method on the job path answers 405 with `Allow: GET, POST`. Before, the header named only `POST`.
+- Split jobs over HTTP: `updated_at` of a status record and of a status answer is written with the rounding of every other epoch time in JSON (the seconds times 1 000 000, rounded half to even). Before, about one time in eight could end one microsecond lower.
 
 ## [3.7.1] - 2026-11-25
 

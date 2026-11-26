@@ -13,12 +13,12 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Literal, cast
 
 from drakkar.sinks.dlq_record import cut_error
 from drakkar.split.records import ANY_PARTITION, Header, WireRecord, encode_value, header_map, json_object
-from drakkar.timefmt import format_rfc3339_micro
+from drakkar.timefmt import format_epoch_micro
 
 STATUS_VERSION = '1'
 H_STATUS_VERSION = 'dk-status-version'
@@ -78,7 +78,7 @@ class StatusRecord:
 
 
 def _time_text(epoch_seconds: float) -> str:
-    return format_rfc3339_micro(datetime.fromtimestamp(epoch_seconds, UTC))
+    return format_epoch_micro(epoch_seconds)
 
 
 def _parts_body(parts: PartCounts) -> dict[str, int | None]:
