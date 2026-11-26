@@ -584,7 +584,7 @@ def test_encode_result_cases():
 def test_encode_result_writes_each_lone_surrogate_as_the_replacement_character():
     assert encode_result({'name': 'a\ud800b\udc00'}, 100) == ('{"name":"a\ufffdb\ufffd"}', None)
     # Two keys that become equal after the repair leave one key, as a reader of the text keeps the last one.
-    assert encode_result({'\ud800': 1, '\udc00': 2}, 100) == ('{"\ufffd":2}', None)
+    assert encode_result({chr(0xD800): 1, chr(0xDC00): 2}, 100) == ('{"\ufffd":2}', None)
     # A surrogate pair is a character, not two lone surrogates.
     assert encode_result('\U0001f600', 100) == ('"\U0001f600"', None)
     # The size limit counts the repaired text: U+FFFD is 3 bytes, and the quotes make 5.
