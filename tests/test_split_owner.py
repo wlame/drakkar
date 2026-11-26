@@ -1251,9 +1251,15 @@ async def test_a_split_failure_whose_record_write_raises_holds_the_offset_out_of
         raise RuntimeError('the producer is closed')
 
     setattr(worker.owner._ender, broken, raising)
-    worker.give(source_message(500))
-    await wait_until(lambda: 500 in worker.processor._open_job_offsets)
+    with capture_logs() as logs:
+        worker.give(source_message(500))
+        await wait_until(lambda: 500 in worker.processor._open_job_offsets)
+        await wait_until(lambda: any(e['event'] == 'partition_processor_restarting' for e in logs))
 
+    # The error reaches the partition loop, which restarts once and stays alive.
+    assert [e['event'] for e in logs].count('partition_processor_restarting') == 1
+    assert not worker.processor.is_dead
+    assert not any(e['event'] == 'split_owner_task_failed' for e in logs)
     # Nothing says the records were written: the offset never completes, and no drain waits for it.
     assert worker.pending == 1 and worker.commits == []
     await asyncio.wait_for(worker.processor.drain(), timeout=10)
