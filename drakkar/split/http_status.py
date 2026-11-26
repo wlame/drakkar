@@ -37,6 +37,7 @@ FAILED_OUTCOMES: tuple[str, ...] = (
 ENDED_STATES = frozenset({'done', 'failed'})
 
 _JOB_PATTERN = re.compile(r'([0-9]{1,19}):([0-9]{1,19})')
+_LONE_SURROGATE = re.compile('[\ud800-\udfff]')
 _TIME_PATTERN = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z')
 
 
@@ -163,7 +164,7 @@ def parse_status_record(
     match = _JOB_PATTERN.fullmatch(job) if isinstance(job, str) else None
     client = body.get('client', '')
     parts = _parse_parts(body.get('parts'))
-    if match is None or state not in STATE_RANK or updated_at is None or parts is False:
+    if match is None or not isinstance(state, str) or state not in STATE_RANK or updated_at is None or parts is False:
         return None
     if not isinstance(client, str):
         return None
@@ -186,12 +187,13 @@ def _end_fields(state: str, body: Mapping[str, Any]) -> dict[str, Any] | None:
     """The state-specific fields of a body, or None when they are invalid."""
     fields: dict[str, Any] = {}
     if state == 'done':
-        fields['result_json'] = json.dumps(
-            body.get('result'), sort_keys=True, separators=(',', ':'), ensure_ascii=False
-        )
+        result_json = _result_text(body.get('result'))
+        if result_json is None:
+            return None
+        fields['result_json'] = result_json
         duration = body.get('duration_seconds')
         if duration is not None:
-            if isinstance(duration, bool) or not isinstance(duration, int | float) or not math.isfinite(duration):
+            if not _is_finite_number(duration):
                 return None
             fields['duration_seconds'] = duration
     elif state == 'failed':
@@ -202,6 +204,32 @@ def _end_fields(state: str, body: Mapping[str, Any]) -> dict[str, Any] | None:
         # A record from outside may carry any text: the map keeps no more than a record of a worker writes.
         fields['error'] = cut_error(error)
     return fields
+
+
+def _result_text(result: object) -> str | None:
+    """The canonical JSON text of a result; None for a number beyond the float range.
+
+    A lone surrogate, which JSON text can carry as an escape but UTF-8 cannot, becomes U+FFFD.
+    """
+    try:
+        text = json.dumps(result, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False)
+    except ValueError:
+        return None
+    if not _LONE_SURROGATE.search(text):
+        return text
+    # A key can change, so the keys are sorted again after the replacement.
+    repaired = json.loads(_LONE_SURROGATE.sub('\ufffd', text))
+    return json.dumps(repaired, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+
+
+def _is_finite_number(value: object) -> bool:
+    """True for an int or a float that is finite as a float; an int too large for a float is not."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 class StatusMap:

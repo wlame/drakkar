@@ -579,6 +579,8 @@ def test_encode_result_cases():
     # The size counts UTF-8 bytes: "é" is 2 bytes, and the quotes make 4.
     assert encode_result('é', 3) == (None, 'the result is 4 bytes, the limit is 3')
     assert encode_result('é', 4) == ('"é"', None)
+    text, error = encode_result({'name': 'a\ud800'}, 100)
+    assert text is None and error is not None and error.startswith('the result is not JSON: ')
 
 
 # --- writes that fail ---

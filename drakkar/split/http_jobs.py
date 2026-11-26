@@ -244,9 +244,10 @@ def encode_result(value: object, max_response: int) -> tuple[str | None, str | N
         value = value.model_dump(mode='json')
     try:
         text = json.dumps(value, separators=(',', ':'), ensure_ascii=False, allow_nan=False)
+        # A lone surrogate has no UTF-8 form; UnicodeEncodeError is a ValueError.
+        size = len(text.encode('utf-8'))
     except (TypeError, ValueError, RecursionError) as error:
         return None, f'the result is not JSON: {error}'
-    size = len(text.encode('utf-8'))
     if size > max_response:
         return None, f'the result is {size} bytes, the limit is {max_response}'
     return text, None

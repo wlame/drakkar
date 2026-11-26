@@ -317,3 +317,20 @@ def test_map_marks_every_expired_job_of_one_id():
     assert not m.put(make(offset=500), now=now)
     assert not m.put(make(offset=900), now=now)
     assert len(m) == 0
+
+
+def test_parse_writes_a_lone_surrogate_of_a_result_as_the_replacement_character():
+    body = json.loads(status_record(done()).value)
+    value = json.dumps({**body, 'result': {'name': 'a\ud800b', '\udc00': [1]}}).encode()
+    parsed = parse_status_record(b'order-1', VERSION_HEADER, value)
+    assert parsed is not None
+    assert parsed.result_json == '{"name":"a\ufffdb","\ufffd":[1]}'
+    assert json.loads(answer_body(parsed))['result'] == {'name': 'a\ufffdb', '\ufffd': [1]}
+
+
+def test_parse_keeps_a_surrogate_pair_of_a_result():
+    body = json.loads(status_record(done()).value)
+    value = json.dumps({**body, 'result': '\U0001f600'}).encode()
+    parsed = parse_status_record(b'order-1', VERSION_HEADER, value)
+    assert parsed is not None
+    assert parsed.result_json == '"\U0001f600"'

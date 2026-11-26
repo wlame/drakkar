@@ -450,6 +450,42 @@
         ["dk-status-version", "1"]
       ],
       "value": "{\"client\":\"tenant-a\",\"duration_seconds\":\"1.5\",\"job\":\"7:500\",\"result\":null,\"state\":\"done\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "state_is_a_list",
+      "why": "state is a text",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"job\":\"7:500\",\"state\":[\"accepted\"],\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "state_is_an_object",
+      "why": "state is a text",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"job\":\"7:500\",\"state\":{\"accepted\":1},\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "done_duration_beyond_float_range",
+      "why": "duration_seconds is a finite number; an integer too large for a float is not",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"duration_seconds\":10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,\"job\":\"7:500\",\"result\":null,\"state\":\"done\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
+    },
+    {
+      "name": "done_result_beyond_float_range",
+      "why": "the result is JSON that every reader can write again; a number beyond the float range is not",
+      "key": "order-123",
+      "headers": [
+        ["dk-status-version", "1"]
+      ],
+      "value": "{\"client\":\"tenant-a\",\"duration_seconds\":1.5,\"job\":\"7:500\",\"result\":{\"n\":1e400},\"state\":\"done\",\"updated_at\":\"2026-11-23T10:15:02.123456Z\"}"
     }
   ],
   "map_cases": [
