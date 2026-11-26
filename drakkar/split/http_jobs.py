@@ -25,7 +25,15 @@ from drakkar.providers.resilience import RateLimitedLog, describe_error
 from drakkar.split.http_follower import MAX_STATUS_WAITERS as MAX_STATUS_WAITERS
 from drakkar.split.http_follower import StatusFollower
 from drakkar.split.http_message import source_message_record
-from drakkar.split.http_status import PartCounts, State, StatusMap, StatusRecord, answer_body, status_record
+from drakkar.split.http_status import (
+    LONE_SURROGATE,
+    PartCounts,
+    State,
+    StatusMap,
+    StatusRecord,
+    answer_body,
+    status_record,
+)
 from drakkar.split.partmode import RETRY_FIRST_WAIT_SECONDS, RETRY_MAX_WAIT_SECONDS, publish_or_stop
 from drakkar.split.producer import SplitProduceError, SplitProducer
 from drakkar.utils import validate_request_id
@@ -237,17 +245,20 @@ class HttpOwnerSide:
 def encode_result(value: object, max_response: int) -> tuple[str | None, str | None]:
     """The compact JSON text of a result, or why it cannot be stored: ``(text, None)`` or ``(None, error)``.
 
-    A pydantic model is dumped in its JSON mode first. The size limit counts
-    the UTF-8 bytes of the text.
+    A pydantic model is dumped in its JSON mode first. A lone surrogate, which
+    has no UTF-8 form, is written as U+FFFD, as a reader of the status topic
+    reads it. The size limit counts the UTF-8 bytes of the text.
     """
     if isinstance(value, BaseModel):
         value = value.model_dump(mode='json')
     try:
         text = json.dumps(value, separators=(',', ':'), ensure_ascii=False, allow_nan=False)
-        # A lone surrogate has no UTF-8 form; UnicodeEncodeError is a ValueError.
-        size = len(text.encode('utf-8'))
     except (TypeError, ValueError, RecursionError) as error:
         return None, f'the result is not JSON: {error}'
+    if LONE_SURROGATE.search(text):
+        # Loaded again, so that two keys that the repair makes equal give one key.
+        text = json.dumps(json.loads(LONE_SURROGATE.sub('\ufffd', text)), separators=(',', ':'), ensure_ascii=False)
+    size = len(text.encode('utf-8'))
     if size > max_response:
         return None, f'the result is {size} bytes, the limit is {max_response}'
     return text, None

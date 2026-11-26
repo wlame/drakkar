@@ -1474,7 +1474,8 @@ async def http_job_result(self, job: dk.SplitJob) -> BaseModel | dict | list | s
   in the log context, and the `hook` value `http_job_result` of
   `drakkar_handler_duration_seconds`.
 - A pydantic model is dumped with `model_dump(mode='json')`. The answer is
-  written as compact JSON; `NaN` and infinity are refused.
+  written as compact JSON; `NaN` and infinity are refused. A lone surrogate
+  in a text, which has no UTF-8 form, is written as U+FFFD.
 - A raise, an answer that is not JSON, or a JSON text larger than
   `split.http.max_response` (UTF-8 bytes) makes the status `failed` with
   the outcome `response_failed`, and logs `http_job_result_failed`. The job

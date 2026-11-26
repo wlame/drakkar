@@ -37,7 +37,7 @@ FAILED_OUTCOMES: tuple[str, ...] = (
 ENDED_STATES = frozenset({'done', 'failed'})
 
 _JOB_PATTERN = re.compile(r'([0-9]{1,19}):([0-9]{1,19})')
-_LONE_SURROGATE = re.compile('[\ud800-\udfff]')
+LONE_SURROGATE = re.compile('[\ud800-\udfff]')
 _TIME_PATTERN = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z')
 
 
@@ -215,10 +215,10 @@ def _result_text(result: object) -> str | None:
         text = json.dumps(result, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False)
     except ValueError:
         return None
-    if not _LONE_SURROGATE.search(text):
+    if not LONE_SURROGATE.search(text):
         return text
     # A key can change, so the keys are sorted again after the replacement.
-    repaired = json.loads(_LONE_SURROGATE.sub('\ufffd', text))
+    repaired = json.loads(LONE_SURROGATE.sub('\ufffd', text))
     return json.dumps(repaired, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
 
 
