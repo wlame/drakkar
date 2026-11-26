@@ -11,7 +11,7 @@ from drakkar.split import reader
 from drakkar.split.models import PartResult, SplitResultsExpired, SplitResultsUnavailable
 from drakkar.split.reader import read_results, results_consumer_factory
 from drakkar.split.records import JobRef, log_record, open_body, result_body
-from drakkar.split.table import JobState
+from drakkar.split.table import MAX_PART_INDEX, JobState
 from tests.split_helpers import FakeConsumerClient, FakeLog
 
 TOPIC = 'items_g_split_results'
@@ -129,6 +129,15 @@ async def test_part_number_not_below_the_known_part_count_is_skipped(log):
     add_result(log, 2)
     last = add_result(log, 0)
     assert [r.index for r in await read(log, job_state(first, last, parts=2))] == [0]
+
+
+async def test_part_number_above_the_part_cap_is_skipped_even_with_a_huge_part_count(log):
+    first = add_open(log)
+    add(log, log_record(ref(), 'result', {'part': 2**30, 'worker': 'w', 'outcome': 'ok'}))
+    add(log, log_record(ref(), 'result', {'part': MAX_PART_INDEX + 1, 'worker': 'w', 'outcome': 'ok'}))
+    last = add_result(log, MAX_PART_INDEX)
+    results = await read(log, job_state(first, last, parts=2**62))
+    assert [r.index for r in results] == [MAX_PART_INDEX]
 
 
 class Answer(BaseModel):

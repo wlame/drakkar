@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Split: the reader of part results skips a result whose part number is above the limit of 16 777 216 parts, also when the job announced a larger part count. Before, such a record could make the worker try to allocate a very large buffer.
+
 ## [3.7.1] - 2026-11-25
 
 ### Added

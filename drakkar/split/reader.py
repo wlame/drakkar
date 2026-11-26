@@ -82,7 +82,7 @@ def _part_result(body: dict[str, Any], job: JobState) -> PartResult | None:
         result = part_result_from_body(body)
     except (KeyError, ValueError):
         return None
-    limit = job.parts if job.parts is not None else MAX_PART_INDEX + 1
+    limit = MAX_PART_INDEX + 1 if job.parts is None else min(job.parts, MAX_PART_INDEX + 1)
     return result if 0 <= result.index < limit else None
 
 
