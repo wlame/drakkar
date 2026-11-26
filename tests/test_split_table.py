@@ -1,6 +1,7 @@
 """The job table: attempts, part counts, completion, timeouts and the restart position."""
 
 import random
+from typing import Any
 
 import pytest
 
@@ -38,7 +39,7 @@ def result_entry(job_ref: JobRef, index: int, **fields) -> LogEntry:
     return LogEntry(ref=job_ref, kind='result', body=result_body(result))
 
 
-def closed_entry(job_ref: JobRef, outcome: str = 'aggregated') -> LogEntry:
+def closed_entry(job_ref: JobRef, outcome: Any = 'aggregated') -> LogEntry:
     body = closed_body(outcome='aggregated', received=0, parts=0, duration_seconds=0.0)
     body['outcome'] = outcome
     return LogEntry(ref=job_ref, kind='closed', body=body)
@@ -266,6 +267,13 @@ def test_open_without_a_string_instance_is_malformed(log):
 def test_closed_with_an_unknown_outcome_is_malformed(log):
     log.put(open_entry(ref()))
     assert log.put(closed_entry(ref(), 'finished')).ignored is IgnoreReason.MALFORMED
+    assert log.table.job(JOB).closed is None
+
+
+@pytest.mark.parametrize('outcome', [['aggregated'], {'outcome': 'aggregated'}])
+def test_closed_with_an_outcome_that_is_not_text_is_malformed(log, outcome):
+    log.put(open_entry(ref()))
+    assert log.put(closed_entry(ref(), outcome)).ignored is IgnoreReason.MALFORMED
     assert log.table.job(JOB).closed is None
 
 

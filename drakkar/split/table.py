@@ -428,7 +428,7 @@ class JobTable:
             return _ignored(job, IgnoreReason.CLOSED_JOB)
         if job is not None and entry.ref.attempt_id != job.attempt_id:
             return _ignored(job, IgnoreReason.OLD_ATTEMPT)
-        if outcome not in CLOSED_OUTCOMES:
+        if not isinstance(outcome, str) or outcome not in CLOSED_OUTCOMES:
             return _ignored(job, IgnoreReason.MALFORMED)
         if job is None:
             # A closed record whose open is gone from the log still marks the job done,
