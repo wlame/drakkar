@@ -1304,10 +1304,7 @@ class SplitOwner:
         # the log never saw would be ignored for a job the log knows.
         ref = run.ref if result.open_acknowledged or held.base_ref is None else held.base_ref
         error = f'split failed: {cut_error(result.failure)}'
-        may_complete = await self._ender.send_to_dlq(
-            held.message, held.state, stage='split', error=error, attempts=None
-        )
-        return await self._close_failed(held, ref, 'split_failed', may_complete=may_complete, error=error)
+        return await self._write_failure(held, ref, 'split_failed', error=error, attempts=None)
 
     async def _fail_spent_attempts(self, held: _HeldJob, ref: JobRef, spent: int) -> BeginOutcome:
         """End a job whose split did not finish in ``split.max_attempts`` attempts: one DLQ record, then ``closed``.
@@ -1320,10 +1317,29 @@ class SplitOwner:
         logger.error(
             'split_failed', category='split', partition=self._label, job=ref_id(ref), error=error, attempts=spent
         )
-        may_complete = await self._ender.send_to_dlq(
-            held.message, held.state, stage='split', error=error, attempts=spent
-        )
-        return await self._close_failed(held, ref, 'attempts_spent', may_complete=may_complete, error=error)
+        return await self._write_failure(held, ref, 'attempts_spent', error=error, attempts=spent)
+
+    async def _write_failure(
+        self, held: _HeldJob, ref: JobRef, outcome: ClosedOutcome, *, error: str, attempts: int | None
+    ) -> BeginOutcome:
+        """Write the DLQ record and ``closed`` of a job whose split failed.
+
+        An error of a write (a misuse such as a closed producer, not a verdict)
+        says nothing about what was written: the job stays busy and its offset
+        is held, so it never completes and no drain of the partition waits for
+        it. The next owner of the partition ends the job by what the log shows.
+
+        Raises:
+            Exception: the error of the write, after the offset is held.
+        """
+        try:
+            may_complete = await self._ender.send_to_dlq(
+                held.message, held.state, stage='split', error=error, attempts=attempts
+            )
+            return await self._close_failed(held, ref, outcome, may_complete=may_complete, error=error)
+        except Exception:
+            self._host.hold_job_offset(held.message.offset)
+            raise
 
     async def _close_failed(
         self, held: _HeldJob, ref: JobRef, outcome: ClosedOutcome, *, may_complete: bool, error: str

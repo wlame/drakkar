@@ -1239,6 +1239,28 @@ async def test_a_split_failure_whose_closed_record_can_never_be_written_stalls_t
     await worker.stop()
 
 
+@pytest.mark.parametrize('broken', ['send_to_dlq', 'write_closed'])
+async def test_a_split_failure_whose_record_write_raises_holds_the_offset_out_of_the_drain(broken):
+    world = World()
+    handler = SplittingHandler({500: [RuntimeError('boom')]})
+    worker = OwnerWorker(world, handler)
+    await worker.restore()
+    worker.run()
+
+    async def raising(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError('the producer is closed')
+
+    setattr(worker.owner._ender, broken, raising)
+    worker.give(source_message(500))
+    await wait_until(lambda: 500 in worker.processor._open_job_offsets)
+
+    # Nothing says the records were written: the offset never completes, and no drain waits for it.
+    assert worker.pending == 1 and worker.commits == []
+    await asyncio.wait_for(worker.processor.drain(), timeout=10)
+    assert worker.commits == []
+    await worker.stop()
+
+
 async def test_a_stop_during_the_retries_of_a_closed_record_leaves_the_offset_pending():
     world = World()
     handler = SplittingHandler({500: [RuntimeError('boom')], 501: items(1)}, answer=summary())
